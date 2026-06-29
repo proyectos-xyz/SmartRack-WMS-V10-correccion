@@ -1,0 +1,10 @@
+{
+  "name": "SmartRack WMS V10-correccion",
+  "description": "Sistema de gestión de almacenes (WMS) con soporte para carga de XML, recepción de productos, inventario en tiempo real y logística inversa.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

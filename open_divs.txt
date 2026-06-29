@@ -1,0 +1,119 @@
+356:        <div className={`bg-white rounded-lg shadow-md border border-gray-200 p-3 ${isFull ? 'w-full h-full flex flex-col' : 'w-max'}`}>
+357:            <div className="flex justify-between items-center mb-2">
+358:                <div className="font-bold text-xs text-slate-500 uppercase tracking-wider">Rack {rack.id} - Pasillo {rack.aisle}</div>
+370:            <div className={`flex gap-2 ${isFull ? 'flex-1' : ''}`}>
+372:                <div className="flex flex-col justify-between py-1.5 text-[8px] font-bold text-slate-400 uppercase">
+374:                        <div key={l} className={`${isFull ? 'flex-1' : 'h-8'} flex items-center justify-center`}>N{l}</div>
+378:                <div className={`bg-blue-900 p-1.5 rounded-sm relative shadow-inner ${isFull ? 'flex-1 flex flex-col' : ''}`}>
+380:                    <div 
+392:                                    <div 
+401:                                        <div className="absolute bottom-[110%] left-1/2 -translate-x-1/2 bg-slate-800 text-white text-[9px] font-bold px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-20 whitespace-nowrap shadow-sm">
+403:                                            <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-800"></div>
+413:                                            <div className={`${isFull ? 'text-xs' : 'text-[6px]'} text-red-300 font-mono select-none`}>{pos}</div>
+422:                    <div 
+427:                            <div key={p} className={`text-center ${isFull ? 'text-[10px]' : 'text-[7px]'} font-bold text-blue-200/60`}>
+505:    <div className="flex flex-col h-full gap-4 relative">
+507:      <div className="flex flex-col gap-4 bg-white p-4 rounded-2xl shadow-sm border border-gray-200">
+508:         <div className="flex flex-wrap justify-between items-center gap-4">
+509:            <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
+522:                        <div className="text-left">
+523:                            <div className="font-bold text-sm leading-tight">{zone.name}</div>
+524:                            <div className={`text-[10px] font-mono ${activeZoneId === zone.id ? 'text-blue-100' : 'text-gray-400'}`}>CODE: {getZoneCode(zone.type)}</div>
+530:            <div className="flex items-center gap-3">
+531:                <div className="relative group">
+532:                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+552:                <div className="h-8 w-px bg-gray-200 mx-1"></div>
+554:                <div className="flex flex-col items-end">
+555:                    <div className="flex items-center gap-2">
+559:                    <div className="w-24 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+560:                        <div 
+569:         <div className="flex flex-wrap items-center justify-between gap-4 pt-2 border-t border-gray-50">
+570:             <div className="flex items-center gap-3 text-[10px] text-gray-500 flex-wrap">
+571:                <div className="flex items-center gap-1.5 px-2 py-1 bg-emerald-50 text-emerald-700 rounded-md border border-emerald-100"><div className="w-2 h-2 bg-emerald-400 rounded-full"></div> OK</div>
+572:                <div className="flex items-center gap-1.5 px-2 py-1 bg-blue-50 text-blue-700 rounded-md border border-blue-100"><div className="w-2 h-2 bg-blue-600 rounded-full"></div> Mixto</div>
+573:                <div className="flex items-center gap-1.5 px-2 py-1 bg-amber-50 text-amber-700 rounded-md border border-amber-100"><div className="w-2 h-2 bg-amber-400 rounded-full"></div> &lt;30 Días</div>
+574:                <div className="flex items-center gap-1.5 px-2 py-1 bg-red-50 text-red-700 rounded-md border border-red-100"><div className="w-2 h-2 bg-red-600 rounded-full animate-pulse"></div> ≤5 Días</div>
+575:                <div className="flex items-center gap-1.5 px-2 py-1 bg-gray-50 text-gray-500 rounded-md border border-gray-100"><div className="w-2 h-2 bg-white border border-gray-300 rounded-full"></div> Vacío</div>
+577:                    <div className="flex items-center gap-1.5 px-2 py-1 bg-yellow-50 text-yellow-700 rounded-md border border-yellow-200 font-bold animate-bounce"><div className="w-2 h-2 bg-yellow-400 rounded-full"></div> Resultado</div>
+581:             <div className="flex items-center gap-2">
+616:      <div className="flex-1 overflow-auto bg-slate-100 rounded-xl border border-slate-200 p-4 shadow-inner">
+618:            <div className="flex flex-col items-center justify-center h-full text-gray-400">
+624:                <div key={aisle} className="flex flex-col gap-3 min-w-max mb-10">
+629:                    <div className="flex flex-wrap gap-8 p-2">
+639:          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex justify-center items-center p-4">
+640:              <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden animate-fade-in">
+641:                  <div className={`p-6 relative text-white ${selectedSlotItem.isMixed ? 'bg-blue-700' : 'bg-slate-800'}`}>
+651:                          <div className="inline-block bg-blue-500/50 px-2 py-0.5 rounded text-xs mt-1 font-bold border border-blue-400">PALLET MIXTO</div>
+655:                  <div className="p-6 space-y-6">
+656:                      <div className="flex justify-between items-center p-4 bg-gray-50 rounded-xl border border-gray-100">
+657:                          <div>
+661:                          <div className="text-right">
+667:                      <div className="space-y-3">
+668:                          <div className="flex items-center gap-3 text-sm text-gray-600">
+673:                          <div className="flex items-center gap-3 text-sm text-gray-600">
+678:                          <div className="flex items-center gap-3 text-sm text-gray-600">
+684:                              <div className="mt-4 p-3 bg-blue-50 rounded-xl border border-blue-100 space-y-2">
+685:                                  <div className="flex items-center gap-2 text-[10px] font-black text-blue-600 uppercase">
+688:                                  <div className="text-xs text-slate-700">
+691:                                  <div className="text-xs text-slate-700">
+694:                                  <div className="text-xs text-slate-700 italic">
+703:                          <div className="border border-gray-200 rounded-lg overflow-hidden">
+704:                              <div className="bg-gray-100 px-3 py-2 text-xs font-bold text-gray-500 uppercase flex items-center gap-2">
+707:                              <div className="max-h-40 overflow-y-auto">
+750:          <div className="fixed inset-0 z-[60] bg-slate-900/95 backdrop-blur-md flex flex-col p-4 md:p-8">
+751:              <div className="flex justify-between items-center mb-6 text-white">
+752:                  <div className="flex items-center gap-4">
+753:                      <div className="bg-blue-600 p-3 rounded-2xl shadow-lg">
+756:                      <div>
+769:              <div className="flex-1 min-h-0">
+777:          <div className="fixed inset-0 z-[60] bg-indigo-950/80 backdrop-blur-md flex items-center justify-center p-4">
+778:              <div className="bg-white w-full max-w-4xl rounded-[2.5rem] shadow-2xl overflow-hidden animate-fade-in flex flex-col max-h-[90vh]">
+779:                  <div className="bg-blue-600 p-8 text-white relative shrink-0">
+783:                      <div className="flex items-center gap-4">
+784:                          <div className="bg-white/20 p-3 rounded-2xl">
+787:                          <div className="flex-1">
+795:                          <div className="flex bg-white/10 p-1 rounded-xl border border-white/20">
+812:                  <div className="p-8 flex flex-col md:flex-row gap-8 overflow-hidden">
+814:                      <div className="flex-1 flex flex-col gap-6 overflow-hidden">
+815:                          <div className="space-y-2">
+817:                              <div className="relative">
+830:                                  <div className="mt-2 bg-white border border-zinc-100 rounded-2xl shadow-xl overflow-hidden z-10">
+837:                                              <div>
+838:                                                  <div className="font-black text-blue-600 text-sm">{product.codigo}</div>
+839:                                                  <div className="text-xs text-zinc-500 font-bold">{product.nombre}</div>
+848:                          <div className="flex-1 flex flex-col overflow-hidden">
+850:                              <div className="flex-1 overflow-y-auto space-y-3 pr-2 custom-scrollbar">
+852:                                      <div className="h-full flex flex-col items-center justify-center border-2 border-dashed border-zinc-100 rounded-3xl text-zinc-300">
+858:                                          <div key={`${item.productCode}-${index}`} className="bg-zinc-50 p-4 rounded-2xl border border-zinc-100 space-y-3">
+859:                                              <div className="flex justify-between items-start">
+860:                                                  <div className="flex-1 min-w-0">
+861:                                                      <div className="font-black text-slate-800 text-sm truncate">{item.productName}</div>
+862:                                                      <div className="text-[10px] font-black text-blue-600 uppercase mt-0.5">{item.productCode}</div>
+869:                                              <div className="grid grid-cols-3 gap-3">
+870:                                                  <div className="space-y-1">
+872:                                                      <div className="flex bg-zinc-100 p-0.5 rounded-lg border border-zinc-200">
+887:                                                  <div className="space-y-1">
+896:                                                  <div className="space-y-1">
+898:                                                      <div className="relative">
+909:                                                  <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 rounded-lg border border-blue-100">
+922:                      <div className="w-full md:w-80 space-y-6 shrink-0">
+923:                          <div className="bg-blue-50 p-6 rounded-[2rem] border border-blue-100 space-y-4">
+924:                              <div className="space-y-1">
+935:                              <div className="pt-4 border-t border-blue-200">
+936:                                  <div className="flex justify-between items-center mb-2">
+940:                                  <div className="flex justify-between items-center">
+968:          <div className="fixed inset-0 z-50 bg-slate-900/90 flex justify-center items-start pt-10 px-4">
+969:              <div className="w-full max-w-4xl flex flex-col md:flex-row gap-6">
+972:                  <div className="flex-1">
+973:                      <div className="flex justify-between items-center mb-6 text-white">
+986:                      <div className="bg-slate-800 rounded-2xl p-8 shadow-2xl border border-slate-700">
+989:                          <div className={`transition-all duration-300 ${scanStep === 'LPN' ? 'opacity-100 translate-x-0' : 'opacity-30 translate-x-[-20px] hidden'}`}>
+1006:                              <div className="animate-fade-in">
+1007:                                  <div className="mb-6 p-4 bg-slate-700/50 rounded-lg border border-slate-600">
+1030:                              <div className={`mt-6 p-4 rounded-lg flex items-center gap-3 ${
+1044:                      <div className="w-full md:w-80 bg-slate-800 rounded-xl p-4 border border-slate-700 flex flex-col h-[500px]">
+1049:                          <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+1062:                                          <div className="flex justify-between items-start">
+1066:                                          <div className="text-slate-300 text-xs truncate mt-1">{item.productName}</div>
+1067:                                          {item.isMixed && <div className="text-[10px] text-blue-400 uppercase font-bold mt-1">Mixto</div>}
+1072:                          <div className="mt-2 pt-2 border-t border-slate-700 text-[10px] text-slate-500 text-center">

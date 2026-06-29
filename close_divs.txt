@@ -1,0 +1,118 @@
+358:                <div className="font-bold text-xs text-slate-500 uppercase tracking-wider">Rack {rack.id} - Pasillo {rack.aisle}</div>
+368:            </div>
+374:                        <div key={l} className={`${isFull ? 'flex-1' : 'h-8'} flex items-center justify-center`}>N{l}</div>
+376:                </div>
+403:                                            <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-800"></div>
+404:                                        </div>
+413:                                            <div className={`${isFull ? 'text-xs' : 'text-[6px]'} text-red-300 font-mono select-none`}>{pos}</div>
+415:                                    </div>
+419:                    </div>
+429:                            </div>
+431:                    </div>
+432:                </div>
+433:            </div>
+434:        </div>
+523:                            <div className="font-bold text-sm leading-tight">{zone.name}</div>
+524:                            <div className={`text-[10px] font-mono ${activeZoneId === zone.id ? 'text-blue-100' : 'text-gray-400'}`}>CODE: {getZoneCode(zone.type)}</div>
+525:                        </div>
+528:            </div>
+534:                    </div>
+550:                </div>
+552:                <div className="h-8 w-px bg-gray-200 mx-1"></div>
+558:                    </div>
+563:                        ></div>
+564:                    </div>
+565:                </div>
+566:            </div>
+567:         </div>
+571:                <div className="flex items-center gap-1.5 px-2 py-1 bg-emerald-50 text-emerald-700 rounded-md border border-emerald-100"><div className="w-2 h-2 bg-emerald-400 rounded-full"></div> OK</div>
+572:                <div className="flex items-center gap-1.5 px-2 py-1 bg-blue-50 text-blue-700 rounded-md border border-blue-100"><div className="w-2 h-2 bg-blue-600 rounded-full"></div> Mixto</div>
+573:                <div className="flex items-center gap-1.5 px-2 py-1 bg-amber-50 text-amber-700 rounded-md border border-amber-100"><div className="w-2 h-2 bg-amber-400 rounded-full"></div> &lt;30 Días</div>
+574:                <div className="flex items-center gap-1.5 px-2 py-1 bg-red-50 text-red-700 rounded-md border border-red-100"><div className="w-2 h-2 bg-red-600 rounded-full animate-pulse"></div> ≤5 Días</div>
+575:                <div className="flex items-center gap-1.5 px-2 py-1 bg-gray-50 text-gray-500 rounded-md border border-gray-100"><div className="w-2 h-2 bg-white border border-gray-300 rounded-full"></div> Vacío</div>
+577:                    <div className="flex items-center gap-1.5 px-2 py-1 bg-yellow-50 text-yellow-700 rounded-md border border-yellow-200 font-bold animate-bounce"><div className="w-2 h-2 bg-yellow-400 rounded-full"></div> Resultado</div>
+579:             </div>
+611:             </div>
+612:         </div>
+613:      </div>
+621:            </div>
+631:                    </div>
+632:                </div>
+635:      </div>
+651:                          <div className="inline-block bg-blue-500/50 px-2 py-0.5 rounded text-xs mt-1 font-bold border border-blue-400">PALLET MIXTO</div>
+653:                  </div>
+660:                          </div>
+664:                          </div>
+665:                      </div>
+672:                          </div>
+677:                          </div>
+682:                          </div>
+687:                                  </div>
+690:                                  </div>
+693:                                  </div>
+696:                                  </div>
+697:                              </div>
+699:                      </div>
+706:                              </div>
+726:                              </div>
+727:                          </div>
+743:                  </div>
+744:              </div>
+745:          </div>
+755:                      </div>
+759:                      </div>
+760:                  </div>
+767:              </div>
+771:              </div>
+772:          </div>
+786:                          </div>
+794:                          </div>
+808:                          </div>
+809:                      </div>
+810:                  </div>
+826:                              </div>
+838:                                                  <div className="font-black text-blue-600 text-sm">{product.codigo}</div>
+839:                                                  <div className="text-xs text-zinc-500 font-bold">{product.nombre}</div>
+840:                                              </div>
+844:                                  </div>
+846:                          </div>
+855:                                      </div>
+861:                                                      <div className="font-black text-slate-800 text-sm truncate">{item.productName}</div>
+862:                                                      <div className="text-[10px] font-black text-blue-600 uppercase mt-0.5">{item.productCode}</div>
+863:                                                  </div>
+867:                                              </div>
+885:                                                      </div>
+886:                                                  </div>
+895:                                                  </div>
+905:                                                      </div>
+906:                                                  </div>
+907:                                              </div>
+914:                                                  </div>
+916:                                          </div>
+919:                              </div>
+920:                          </div>
+933:                              </div>
+939:                                  </div>
+945:                                  </div>
+946:                              </div>
+947:                          </div>
+960:                      </div>
+961:                  </div>
+962:              </div>
+963:          </div>
+984:                      </div>
+1002:                          </div>
+1010:                                  </div>
+1025:                              </div>
+1037:                              </div>
+1039:                      </div>
+1040:                  </div>
+1065:                                          </div>
+1066:                                          <div className="text-slate-300 text-xs truncate mt-1">{item.productName}</div>
+1067:                                          {item.isMixed && <div className="text-[10px] text-blue-400 uppercase font-bold mt-1">Mixto</div>}
+1071:                          </div>
+1074:                          </div>
+1075:                      </div>
+1077:              </div>
+1078:          </div>
+1080:    </div>

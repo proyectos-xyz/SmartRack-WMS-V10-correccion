@@ -1,0 +1,17 @@
+{
+  "name": "SmartRack WMS",
+  "short_name": "SmartRack",
+  "description": "Sistema de Gestión de Almacenes Inteligente",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#009ED6",
+  "icons": [
+    {
+      "src": "https://iili.io/fsmAapV.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
