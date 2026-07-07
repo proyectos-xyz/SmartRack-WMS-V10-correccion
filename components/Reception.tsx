@@ -142,6 +142,14 @@ const Reception: React.FC<ReceptionProps> = ({
   const [validationFile, setValidationFile] = useState<File | null>(null);
   const [isValidatingEntry, setIsValidatingEntry] = useState(false);
   const [showValidationModal, setShowValidationModal] = useState({ show: false, message: '' });
+  const [showValidationReportModal, setShowValidationReportModal] = useState(false);
+  const [activeReportTab, setActiveReportTab] = useState<'differences' | 'appOnly' | 'sapOnly' | 'conforme'>('differences');
+  const [validationReportData, setValidationReportData] = useState<{
+    differences: any[];
+    appOnly: any[];
+    sapOnly: any[];
+    conforme: any[];
+  } | null>(null);
 
   // Submission Lock State (Double-Click / Multi-Submit Protection)
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -385,85 +393,284 @@ const Reception: React.FC<ReceptionProps> = ({
 
     setIsValidatingEntry(true);
     try {
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        const data = e.target?.result;
-        const workbook = XLSX.read(data, { type: 'binary' });
-        const sheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
-        const excelData = XLSX.utils.sheet_to_json(worksheet) as any[];
+      const getRowValue = (row: any, aliases: string[]) => {
+        for (const alias of aliases) {
+          const key = Object.keys(row).find(
+            k => k.toLowerCase().replace(/_/g, ' ').replace(/\s+/g, ' ').trim() === 
+                 alias.toLowerCase().replace(/_/g, ' ').replace(/\s+/g, ' ').trim()
+          );
+          if (key !== undefined) return row[key];
+        }
+        return undefined;
+      };
 
-        // Get today's receptions
-        const today = new Date().toISOString().split('T')[0];
-        const { data: receptionData, error } = await supabase
-          .from('recepcion_productos')
-          .select('codigo, nombre, cantidad')
-          .gte('created_at', `${today}T00:00:00Z`)
-          .lte('created_at', `${today}T23:59:59Z`);
-
-        if (error) throw error;
-
-        // Group receptions by code
-        const logisticTotals: Record<string, { nombre: string, cantidad: number }> = {};
-        receptionData.forEach(item => {
-          if (!logisticTotals[item.codigo]) {
-            logisticTotals[item.codigo] = { nombre: item.nombre, cantidad: 0 };
+      const parseExcelDate = (val: any): string => {
+        if (!val) return '';
+        if (val instanceof Date) {
+          return val.toISOString().split('T')[0];
+        }
+        if (typeof val === 'number') {
+          const date = new Date(Math.round((val - 25569) * 86400 * 1000));
+          return date.toISOString().split('T')[0];
+        }
+        const str = String(val).trim();
+        if (str.includes('/')) {
+          const parts = str.split('/');
+          if (parts.length === 3) {
+            let day = parts[0];
+            let month = parts[1];
+            let year = parts[2];
+            if (year.length === 2) year = '20' + year;
+            return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
           }
-          logisticTotals[item.codigo].cantidad += item.cantidad;
-        });
-
-        // Group Excel data by code
-        const sapTotals: Record<string, number> = {};
-        const sapNames: Record<string, string> = {};
-        excelData.forEach(item => {
-          const code = String(item.CODIGO || item.codigo || '').trim();
-          const qty = parseFloat(item['CANTIDAD SAP'] || item.cantidad_sap || '0');
-          if (code) {
-            sapTotals[code] = (sapTotals[code] || 0) + qty;
-            if (item.NOMBRE || item.nombre) {
-              sapNames[code] = item.NOMBRE || item.nombre;
+        }
+        if (str.includes('-')) {
+          const parts = str.split('-');
+          if (parts.length === 3) {
+            if (parts[0].length === 4) {
+              return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+            } else {
+              let day = parts[0];
+              let month = parts[1];
+              let year = parts[2];
+              if (year.length === 2) year = '20' + year;
+              return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
             }
           }
-        });
+        }
+        try {
+          const d = new Date(str);
+          if (!isNaN(d.getTime())) {
+            return d.toISOString().split('T')[0];
+          }
+        } catch (e) {}
+        return str;
+      };
 
-        // Combine all unique codes
-        const allCodes = new Set([...Object.keys(sapTotals), ...Object.keys(logisticTotals)]);
-        const reportData: any[] = [];
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const data = e.target?.result;
+          const workbook = XLSX.read(data, { type: 'binary' });
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+          const excelData = XLSX.utils.sheet_to_json(worksheet) as any[];
 
-        allCodes.forEach(code => {
-          const sapQty = sapTotals[code] || 0;
-          const logisticQty = logisticTotals[code]?.cantidad || 0;
-          const productName = logisticTotals[code]?.nombre || sapNames[code] || 'DESCONOCIDO';
-          const diff = sapQty - logisticQty;
+          if (excelData.length === 0) {
+            alert("El archivo Excel está vacío.");
+            setIsValidatingEntry(false);
+            return;
+          }
 
-          let comment = "CONFORME";
-          if (diff > 0) comment = "HAY MAS EN EL SAP";
-          else if (diff < 0) comment = "HAY MENOS EN EL SAP";
+          // Group SAP (Excel) by date and code
+          const sapGrouped: Record<string, { fecha: string; codigo: string; nombre: string; cantidad: number }> = {};
+          const uniqueDates = new Set<string>();
 
-          reportData.push({
-            'CODIGO': code,
-            'NOMBRE PRODUCTO': productName,
-            'SAP CANTIDADES': sapQty,
-            'LOGISTIC CANTIDADES': logisticQty,
-            'DIFERENCIAS': diff,
-            'COMENTARIO': comment
+          excelData.forEach(row => {
+            const rawFecha = getRowValue(row, ['fecha de ingreso', 'fecha ingreso', 'fecha_ingreso', 'fecha', 'fecha de recepcion', 'fecha de registro']);
+            const rawCodigo = getRowValue(row, ['codigo (ico)', 'codigo ico', 'codigo', 'código (ico)', 'código ico', 'código', 'id', 'sku']);
+            const rawCantidad = getRowValue(row, ['cantidad', 'cant', 'cantidad sap', 'cantidad_sap', 'unidades']);
+            const rawNombre = getRowValue(row, ['nombre', 'producto', 'desc', 'descripcion', 'descripción', 'nombre producto']);
+
+            const fecha = parseExcelDate(rawFecha);
+            const codigo = String(rawCodigo !== undefined && rawCodigo !== null ? rawCodigo : '').trim().toUpperCase();
+            const cantidad = parseFloat(rawCantidad !== undefined && rawCantidad !== null ? rawCantidad : '0') || 0;
+            const nombre = String(rawNombre !== undefined && rawNombre !== null ? rawNombre : 'PRODUCTO EXCEL').trim();
+
+            if (fecha && codigo) {
+              uniqueDates.add(fecha);
+              const key = `${fecha}_${codigo}`;
+              if (!sapGrouped[key]) {
+                sapGrouped[key] = { fecha, codigo, nombre, cantidad: 0 };
+              }
+              sapGrouped[key].cantidad += cantidad;
+            }
           });
-        });
 
-        // Generate Excel Report
-        const reportWS = XLSX.utils.json_to_sheet(reportData);
-        const reportWB = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(reportWB, reportWS, "Diferencias");
-        XLSX.writeFile(reportWB, `Reporte_Diferencias_${today}.xlsx`);
-        
-        setIsValidatingEntry(false);
-        alert("Validación completada. El reporte se ha descargado.");
+          // Determine date range to query Supabase
+          let minDate = new Date().toISOString().split('T')[0];
+          let maxDate = minDate;
+          if (uniqueDates.size > 0) {
+            const sortedDates = Array.from(uniqueDates).sort();
+            minDate = sortedDates[0];
+            maxDate = sortedDates[sortedDates.length - 1];
+          }
+
+          // Query recepcion_productos in the calculated date range
+          let query = supabase
+            .from('recepcion_productos')
+            .select('codigo, nombre, cantidad, fecha_registro, lpn')
+            .eq('estado', 'ACTIVO')
+            .gte('fecha_registro', `${minDate}T00:00:00`)
+            .lte('fecha_registro', `${maxDate}T23:59:59.999`);
+
+          // Scope by branch if multi-tenant active
+          if (currentUser?.sede_id) {
+            query = query.eq('sede_id', currentUser.sede_id);
+          }
+
+          const { data: receptionData, error: dbError } = await query;
+          if (dbError) throw dbError;
+
+          // Group App by date and code
+          const appGrouped: Record<string, { fecha: string; codigo: string; nombre: string; cantidad: number; lpns: string[] }> = {};
+          
+          receptionData?.forEach(item => {
+            if (!item.fecha_registro) return;
+            const dateObj = new Date(item.fecha_registro);
+            const year = dateObj.getFullYear();
+            const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+            const day = String(dateObj.getDate()).padStart(2, '0');
+            const fecha = `${year}-${month}-${day}`;
+            
+            const codigo = String(item.codigo || '').trim().toUpperCase();
+            const cantidad = parseFloat(item.cantidad || '0') || 0;
+            const nombre = String(item.nombre || '').trim();
+
+            if (fecha && codigo) {
+              const key = `${fecha}_${codigo}`;
+              if (!appGrouped[key]) {
+                appGrouped[key] = { fecha, codigo, nombre, cantidad: 0, lpns: [] };
+              }
+              appGrouped[key].cantidad += cantidad;
+              if (item.lpn) {
+                appGrouped[key].lpns.push(item.lpn);
+              }
+            }
+          });
+
+          // Compare
+          const allKeys = new Set([...Object.keys(sapGrouped), ...Object.keys(appGrouped)]);
+          
+          const differences: any[] = [];
+          const appOnly: any[] = [];
+          const sapOnly: any[] = [];
+          const conforme: any[] = [];
+
+          allKeys.forEach(key => {
+            const sapItem = sapGrouped[key];
+            const appItem = appGrouped[key];
+            
+            const keyParts = key.split('_');
+            const fecha = keyParts[0];
+            const codigo = keyParts[1];
+            const nombre = sapItem?.nombre || appItem?.nombre || 'DESCONOCIDO';
+
+            const cantSap = sapItem ? sapItem.cantidad : 0;
+            const cantApp = appItem ? appItem.cantidad : 0;
+            const diff = cantSap - cantApp;
+
+            if (sapItem && appItem) {
+              if (diff === 0) {
+                conforme.push({
+                  fecha,
+                  codigo,
+                  nombre,
+                  cantSap,
+                  cantApp,
+                  diferencia: 0,
+                  comentario: 'CONFORME'
+                });
+              } else {
+                differences.push({
+                  fecha,
+                  codigo,
+                  nombre,
+                  cantSap,
+                  cantApp,
+                  diferencia: diff,
+                  comentario: diff > 0 ? `Faltan ${diff} en App` : `Sobran ${Math.abs(diff)} en App`
+                });
+              }
+            } else if (appItem) {
+              appOnly.push({
+                fecha,
+                codigo,
+                nombre,
+                cantSap: 0,
+                cantApp,
+                diferencia: -cantApp,
+                comentario: 'Registrado en App, No en SAP'
+              });
+            } else if (sapItem) {
+              sapOnly.push({
+                fecha,
+                codigo,
+                nombre,
+                cantSap,
+                cantApp: 0,
+                diferencia: cantSap,
+                comentario: 'Registrado en SAP, No en App'
+              });
+            }
+          });
+
+          setValidationReportData({
+            differences: differences.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.codigo.localeCompare(b.codigo)),
+            appOnly: appOnly.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.codigo.localeCompare(b.codigo)),
+            sapOnly: sapOnly.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.codigo.localeCompare(b.codigo)),
+            conforme: conforme.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.codigo.localeCompare(b.codigo))
+          });
+
+          setIsValidatingEntry(false);
+          setShowValidationReportModal(true);
+        } catch (innerErr) {
+          console.error("Error al procesar el Excel:", innerErr);
+          alert("Error al parsear o procesar los datos del Excel.");
+          setIsValidatingEntry(false);
+        }
       };
       reader.readAsBinaryString(validationFile);
     } catch (error) {
       console.error("Error validando ingreso:", error);
-      alert("Error al procesar la validación.");
+      alert("Error general al procesar la validación.");
       setIsValidatingEntry(false);
+    }
+  };
+
+  const handleExportValidationReport = () => {
+    if (!validationReportData) return;
+    try {
+      const workbook = XLSX.utils.book_new();
+
+      const formatDataForSheet = (list: any[]) => {
+        return list.map(item => ({
+          'FECHA DE INGRESO': item.fecha,
+          'CODIGO (ICO)': item.codigo,
+          'NOMBRE PRODUCTO': item.nombre,
+          'CANTIDAD SAP': item.cantSap,
+          'CANTIDAD APP': item.cantApp,
+          'DIFERENCIA (SAP - APP)': item.diferencia,
+          'ESTADO / COMENTARIO': item.comentario
+        }));
+      };
+
+      if (validationReportData.differences.length > 0) {
+        const ws = XLSX.utils.json_to_sheet(formatDataForSheet(validationReportData.differences));
+        XLSX.utils.book_append_sheet(workbook, ws, "Diferencias");
+      }
+      if (validationReportData.appOnly.length > 0) {
+        const ws = XLSX.utils.json_to_sheet(formatDataForSheet(validationReportData.appOnly));
+        XLSX.utils.book_append_sheet(workbook, ws, "Solo en App (No SAP)");
+      }
+      if (validationReportData.sapOnly.length > 0) {
+        const ws = XLSX.utils.json_to_sheet(formatDataForSheet(validationReportData.sapOnly));
+        XLSX.utils.book_append_sheet(workbook, ws, "Solo en SAP (No App)");
+      }
+      if (validationReportData.conforme.length > 0) {
+        const ws = XLSX.utils.json_to_sheet(formatDataForSheet(validationReportData.conforme));
+        XLSX.utils.book_append_sheet(workbook, ws, "Conformes");
+      }
+
+      if (workbook.SheetNames.length === 0) {
+        const ws = XLSX.utils.json_to_sheet([{ 'MENSAJE': 'No hay datos' }]);
+        XLSX.utils.book_append_sheet(workbook, ws, "Sin_Datos");
+      }
+
+      XLSX.writeFile(workbook, `Reporte_Validacion_Ingresos_${new Date().toISOString().split('T')[0]}.xlsx`);
+    } catch (e) {
+      console.error("Error al exportar reporte:", e);
+      alert("Error al exportar reporte a Excel.");
     }
   };
 
@@ -2210,15 +2417,21 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                             )}
                                         </div>
 
-                                        {/* Temperature Field - Only for Refrigerated or Frozen */}
-                                        {(selectedProduct?.es_refrigerado || selectedProduct?.es_congelado) && (
+                                        {/* Temperature Field - For Refrigerated, Frozen, or Seco */}
+                                        {(selectedProduct?.es_refrigerado || selectedProduct?.es_congelado || selectedProduct?.es_seco || selectedProduct?.zona_predeterminada === 'SECO') && (
                                             <div className="col-span-2 space-y-1 bg-slate-50 dark:bg-slate-800/40 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800/60 animate-in fade-in duration-200">
                                                 <div className="flex justify-between items-center">
                                                     <label className="text-[10px] font-black text-slate-500 uppercase tracking-wide flex items-center gap-1.5">
-                                                        <Thermometer className="w-3.5 h-3.5 text-blue-600"/> Temperatura (°C) <span className="text-red-500 font-extrabold">*Obligatorio</span>
+                                                        <Thermometer className="w-3.5 h-3.5 text-blue-600"/> Temperatura (°C) {(!selectedProduct?.es_refrigerado && !selectedProduct?.es_congelado) ? <span className="text-gray-400 font-extrabold">(Opcional)</span> : <span className="text-red-500 font-extrabold">*Obligatorio</span>}
                                                     </label>
-                                                    <span className={`text-[9.5px] font-black uppercase px-2 py-0.5 rounded-full ${selectedProduct?.es_congelado ? 'bg-cyan-100 text-cyan-800 dark:bg-cyan-950/40 dark:text-cyan-400 animate-pulse' : 'bg-blue-100 text-blue-800 dark:bg-blue-950/40 dark:text-blue-400'}`}>
-                                                        {selectedProduct?.es_congelado ? 'Congelado (Bajo Cero)' : 'Refrigerado'}
+                                                    <span className={`text-[9.5px] font-black uppercase px-2 py-0.5 rounded-full ${
+                                                        selectedProduct?.es_congelado 
+                                                            ? 'bg-cyan-100 text-cyan-800 dark:bg-cyan-950/40 dark:text-cyan-400 animate-pulse' 
+                                                            : selectedProduct?.es_refrigerado 
+                                                                ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/40 dark:text-blue-400'
+                                                                : 'bg-slate-100 text-slate-800'
+                                                    }`}>
+                                                        {selectedProduct?.es_congelado ? 'Congelado (Bajo Cero)' : selectedProduct?.es_refrigerado ? 'Refrigerado' : 'Seco'}
                                                     </span>
                                                 </div>
                                                 
@@ -2500,74 +2713,119 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                 </div>
                             ) : (
                                 <div className="space-y-2">
-                                    {receptionHistory.map((record) => (
-                                        <div key={record.id} className="p-3 bg-white border border-gray-100 rounded-lg shadow-sm hover:border-blue-200 transition-colors">
-                                            <div className="flex justify-between items-start mb-1">
-                                                <div>
-                                                    <div className="flex items-center gap-2 mb-1">
-                                                        <span className="text-[9px] font-black bg-blue-600 text-white px-1.5 py-0.5 rounded uppercase">
-                                                            LPN: {record.lpn || 'N/A'}
-                                                        </span>
-                                                        <span className="text-[9px] font-bold text-gray-400">
-                                                            {new Date(record.fecha_registro).toLocaleDateString()}
-                                                        </span>
-                                                        {record.estado === 'PENDIENTE_AUTORIZACION' ? ( <span className="text-[9px] font-black border border-amber-200 text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded uppercase animate-pulse">PENDIENTE APROBACIÓN</span> ) : record.paletas_lpn?.tipo && (
-                                                            <span className={`text-[9px] font-black border px-1.5 py-0.5 rounded uppercase ${record.paletas_lpn.tipo === 'GENERADO' ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-emerald-700 bg-emerald-50 border-emerald-250'}`}>
-                                                                {record.paletas_lpn.tipo === 'GENERADO' ? 'ROTULADO' : 'RECEPCIÓN'}
+                                    {receptionHistory.map((record) => {
+                                        const matchedProduct = catalog.find(p => p.id === record.producto_id || p.codigo === record.codigo);
+                                        let rawChamber = 'SECO';
+
+                                        if (matchedProduct) {
+                                            if (matchedProduct.es_congelado || matchedProduct.zona_predeterminada === 'CONGELADO') {
+                                                rawChamber = 'CONGELADO';
+                                            } else if (matchedProduct.es_refrigerado || matchedProduct.zona_predeterminada === 'REFRIGERADO') {
+                                                rawChamber = 'REFRIGERADO';
+                                            } else {
+                                                rawChamber = 'SECO';
+                                            }
+                                        } else if (record.ubicacion) {
+                                            const locUpper = record.ubicacion.toUpperCase();
+                                            if (locUpper.includes('CONGELADO') || locUpper.includes('CAMARA 3') || locUpper.includes('CÁMARA 3')) {
+                                                rawChamber = 'CONGELADO';
+                                            } else if (locUpper.includes('REFRIGERADO') || locUpper.includes('CAMARA 1') || locUpper.includes('CAMARA 2') || locUpper.includes('CÁMARA 1') || locUpper.includes('CÁMARA 2')) {
+                                                rawChamber = 'REFRIGERADO';
+                                            } else {
+                                                rawChamber = 'SECO';
+                                            }
+                                        }
+
+                                        let chamberLabel = 'Seco';
+                                        let chamberColor = 'bg-slate-100 text-slate-700 border-slate-200';
+
+                                        if (rawChamber === 'REFRIGERADO') {
+                                            chamberLabel = 'Refrigerado';
+                                            chamberColor = 'bg-blue-50 text-blue-700 border-blue-100';
+                                        } else if (rawChamber === 'CONGELADO') {
+                                            chamberLabel = 'Congelado';
+                                            chamberColor = 'bg-cyan-50 text-cyan-700 border-cyan-100';
+                                        }
+
+                                        return (
+                                            <div key={record.id} className="p-3 bg-white border border-gray-100 rounded-lg shadow-sm hover:border-blue-200 transition-colors">
+                                                <div className="flex justify-between items-start mb-1">
+                                                    <div>
+                                                        <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                                            <span className="text-[9px] font-black bg-blue-600 text-white px-1.5 py-0.5 rounded uppercase">
+                                                                LPN: {record.lpn || 'N/A'}
                                                             </span>
-                                                        )}
-                                                        {record.paletas_lpn?.ubicacion_id && (
-                                                            <span className="text-[9px] font-black text-green-600 bg-green-50 px-1.5 py-0.5 rounded border border-green-100 uppercase">
-                                                                {record.paletas_lpn.ubicacion_id}
+                                                            <span className="text-[9px] font-bold text-gray-400">
+                                                                {new Date(record.fecha_registro).toLocaleDateString()}
                                                             </span>
-                                                        )}
+                                                            {record.estado === 'PENDIENTE_AUTORIZACION' ? ( <span className="text-[9px] font-black border border-amber-200 text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded uppercase animate-pulse">PENDIENTE APROBACIÓN</span> ) : record.paletas_lpn?.tipo && (
+                                                                <span className={`text-[9px] font-black border px-1.5 py-0.5 rounded uppercase ${record.paletas_lpn.tipo === 'GENERADO' ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-emerald-700 bg-emerald-50 border-emerald-250'}`}>
+                                                                    {record.paletas_lpn.tipo === 'GENERADO' ? 'ROTULADO' : 'RECEPCIÓN'}
+                                                                </span>
+                                                            )}
+                                                            {record.paletas_lpn?.ubicacion_id && (
+                                                                <span className="text-[9px] font-black text-green-600 bg-green-50 px-1.5 py-0.5 rounded border border-green-100 uppercase">
+                                                                    {record.paletas_lpn.ubicacion_id}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <h4 className="text-xs font-bold text-gray-800 leading-tight">{record.nombre}</h4>
+                                                        <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                                                            <span className="text-[9px] text-gray-500 font-mono">{record.codigo}</span>
+                                                            {record.fecha_vencimiento && (
+                                                                <span className="text-[9px] text-rose-600 bg-rose-50 border border-rose-100 px-1.5 py-0.5 rounded font-extrabold uppercase tracking-tight">
+                                                                    Vence: {formatDate(record.fecha_vencimiento)}
+                                                                </span>
+                                                            )}
+                                                            <span className={`text-[9px] font-bold border px-1.5 py-0.5 rounded uppercase ${chamberColor}`}>
+                                                                Cámara: {chamberLabel}
+                                                            </span>
+                                                            {(rawChamber === 'REFRIGERADO' || rawChamber === 'SECO') && (
+                                                                <span className="text-[9px] font-bold bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded uppercase flex items-center gap-0.5">
+                                                                    <Thermometer className="w-2.5 h-2.5 text-amber-600" /> T. Llegada: {record.temperatura !== null && record.temperatura !== undefined ? `${record.temperatura}°C` : 'N/R'}
+                                                                </span>
+                                                            )}
+                                                        </div>
                                                     </div>
-                                                    <h4 className="text-xs font-bold text-gray-800 leading-tight">{record.nombre}</h4>
-                                                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                                                        <span className="text-[9px] text-gray-500 font-mono">{record.codigo}</span>
-                                                        {record.fecha_vencimiento && (
-                                                            <span className="text-[9px] text-rose-600 bg-rose-50 border border-rose-100 px-1.5 py-0.5 rounded font-extrabold uppercase tracking-tight">
-                                                                Vence: {formatDate(record.fecha_vencimiento)}
-                                                            </span>
-                                                        )}
+                                                    <div className="text-right flex flex-col items-end gap-2">
+                                                        <div className="flex items-center gap-2">
+                                                            <div className="text-sm font-black text-gray-900">{record.cantidad}</div>
+                                                            <button 
+                                                                onClick={() => record.estado === 'PENDIENTE_AUTORIZACION' ? alert('Este ingreso requiere aprobación antes de poder imprimir su etiqueta LPN.') : handlePrintLpnFromHistory(record)}
+                                                                className={`p-1 transition-colors cursor-pointer ${record.estado === 'PENDIENTE_AUTORIZACION' ? 'text-amber-500 hover:text-amber-700' : 'text-blue-500 hover:text-blue-700'}`}
+                                                                title={record.estado === 'PENDIENTE_AUTORIZACION' ? "RETENIDO: Requiere aprobación del asistente" : "Imprimir etiqueta LPN"}
+                                                            >
+                                                                {record.estado === 'PENDIENTE_AUTORIZACION' ? <span className="text-[9px] font-black tracking-tighter bg-amber-50 px-1 py-0.5 border border-amber-200 rounded text-amber-600">⚠ RETENIDO</span> : <Printer className="w-3.5 h-3.5" />}
+                                                            </button>
+                                                            {(currentUser?.rol === 'ADMIN' || currentUser?.rol === 'ASISTENTE') && (
+                                                                <button 
+                                                                    onClick={() => {
+                                                                        setSelectedLpns(new Set([record.lpn]));
+                                                                        setShowConfirmModal({ show: true, type: 'DELETE', count: 1 });
+                                                                    }}
+                                                                    className="p-1 text-red-400 hover:text-red-600 transition-colors cursor-pointer"
+                                                                    title="Eliminar registro"
+                                                                >
+                                                                    <Trash className="w-3.5 h-3.5" />
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                        <div className="text-[8px] font-bold text-gray-400 uppercase">{record.unidad_medida}</div>
                                                     </div>
                                                 </div>
-                                                <div className="text-right flex flex-col items-end gap-2">
-                                                    <div className="flex items-center gap-2">
-                                                        <div className="text-sm font-black text-gray-900">{record.cantidad}</div>
-                                                        <button 
-                                                            onClick={() => record.estado === 'PENDIENTE_AUTORIZACION' ? alert('Este ingreso requiere aprobación antes de poder imprimir su etiqueta LPN.') : handlePrintLpnFromHistory(record)}
-                                                            className={`p-1 transition-colors cursor-pointer ${record.estado === 'PENDIENTE_AUTORIZACION' ? 'text-amber-500 hover:text-amber-700' : 'text-blue-500 hover:text-blue-700'}`}
-                                                            title={record.estado === 'PENDIENTE_AUTORIZACION' ? "RETENIDO: Requiere aprobación del asistente" : "Imprimir etiqueta LPN"}
-                                                        >
-                                                            {record.estado === 'PENDIENTE_AUTORIZACION' ? <span className="text-[9px] font-black tracking-tighter bg-amber-50 px-1 py-0.5 border border-amber-200 rounded text-amber-600">⚠ RETENIDO</span> : <Printer className="w-3.5 h-3.5" />}
-                                                        </button>
-                                                        <button 
-                                                            onClick={() => {
-                                                                setSelectedLpns(new Set([record.lpn]));
-                                                                setShowConfirmModal({ show: true, type: 'DELETE', count: 1 });
-                                                            }}
-                                                            className="p-1 text-red-400 hover:text-red-600 transition-colors cursor-pointer"
-                                                            title="Eliminar registro"
-                                                        >
-                                                            <Trash className="w-3.5 h-3.5" />
-                                                        </button>
+                                                <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-50">
+                                                    <div className="flex items-center gap-1">
+                                                        <User className="w-2.5 h-2.5 text-gray-400" />
+                                                        <span className="text-[9px] text-gray-500">{record.usuario_registro}</span>
                                                     </div>
-                                                    <div className="text-[8px] font-bold text-gray-400 uppercase">{record.unidad_medida}</div>
+                                                    <div className="flex items-center gap-1">
+                                                        <Clock className="w-2.5 h-2.5 text-gray-400" />
+                                                        <span className="text-[9px] text-gray-500">{new Date(record.fecha_registro).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+                                                    </div>
                                                 </div>
                                             </div>
-                                            <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-50">
-                                                <div className="flex items-center gap-1">
-                                                    <User className="w-2.5 h-2.5 text-gray-400" />
-                                                    <span className="text-[9px] text-gray-500">{record.usuario_registro}</span>
-                                                </div>
-                                                <div className="flex items-center gap-1">
-                                                    <Clock className="w-2.5 h-2.5 text-gray-400" />
-                                                    <span className="text-[9px] text-gray-500">{new Date(record.fecha_registro).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             )}
                         </div>
@@ -2656,14 +2914,16 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                             >
                                 <ArrowRightFromLine className="w-3 h-3"/>
                             </button>
-                            <button 
-                                onClick={handleDeleteSelected}
-                                disabled={isProcessingBulk}
-                                className="flex items-center gap-1 bg-red-100 text-red-600 px-3 py-1.5 rounded hover:bg-red-200 transition-colors text-xs font-bold disabled:opacity-50"
-                                title="Eliminar registro (error)"
-                            >
-                                <Trash className="w-4 h-4"/>
-                            </button>
+                            {(currentUser?.rol === 'ADMIN' || currentUser?.rol === 'ASISTENTE') && (
+                                <button 
+                                    onClick={handleDeleteSelected}
+                                    disabled={isProcessingBulk}
+                                    className="flex items-center gap-1 bg-red-100 text-red-600 px-3 py-1.5 rounded hover:bg-red-200 transition-colors text-xs font-bold disabled:opacity-50"
+                                    title="Eliminar registro (error)"
+                                >
+                                    <Trash className="w-4 h-4"/>
+                                </button>
+                            )}
                         </div>
                     )}
                 </div>
@@ -2905,6 +3165,243 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                   </div>
               </div>
           </div>
+      )}
+
+      {/* Validation Report Modal (SAP vs Logistic) */}
+      {showValidationReportModal && validationReportData && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center p-2 sm:p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl h-[90vh] flex flex-col overflow-hidden transform animate-in zoom-in-95 duration-200">
+            {/* Header */}
+            <div className="px-6 py-4 bg-slate-50 border-b border-gray-200 flex justify-between items-center shrink-0">
+              <div className="flex items-center gap-2">
+                <FileCheck className="w-5 h-5 text-blue-600" />
+                <div>
+                  <h3 className="text-sm sm:text-base font-black text-gray-800 uppercase tracking-tight">Reporte de Validación (SAP vs Logistic)</h3>
+                  <p className="text-[10px] sm:text-xs text-gray-500 font-medium">Comparación automatizada por Fecha e Identificador (Código ICO)</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleExportValidationReport}
+                  className="flex items-center gap-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-3 py-1.5 rounded-lg text-[10px] sm:text-xs font-black uppercase transition-all shadow-sm"
+                  title="Descargar archivo Excel con todas las hojas"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Exportar Excel</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowValidationReportModal(false)}
+                  className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Summary Cards */}
+            <div className="p-4 grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-3 bg-white border-b border-gray-100 shrink-0">
+              <div 
+                onClick={() => setActiveReportTab('differences')}
+                className={`p-2.5 sm:p-3 rounded-xl border transition-all cursor-pointer ${activeReportTab === 'differences' ? 'bg-amber-50/80 border-amber-300 shadow-sm' : 'bg-slate-50 border-gray-100 hover:bg-slate-100/70'}`}
+              >
+                <span className="block text-[9px] font-black uppercase text-amber-700 tracking-wider">Diferencias / Faltantes</span>
+                <span className="text-base sm:text-lg font-black text-amber-900">{validationReportData.differences.length}</span>
+              </div>
+              <div 
+                onClick={() => setActiveReportTab('appOnly')}
+                className={`p-2.5 sm:p-3 rounded-xl border transition-all cursor-pointer ${activeReportTab === 'appOnly' ? 'bg-blue-50/80 border-blue-300 shadow-sm' : 'bg-slate-50 border-gray-100 hover:bg-slate-100/70'}`}
+              >
+                <span className="block text-[9px] font-black uppercase text-blue-700 tracking-wider">Solo en App (No SAP)</span>
+                <span className="text-base sm:text-lg font-black text-blue-900">{validationReportData.appOnly.length}</span>
+              </div>
+              <div 
+                onClick={() => setActiveReportTab('sapOnly')}
+                className={`p-2.5 sm:p-3 rounded-xl border transition-all cursor-pointer ${activeReportTab === 'sapOnly' ? 'bg-orange-50/80 border-orange-300 shadow-sm' : 'bg-slate-50 border-gray-100 hover:bg-slate-100/70'}`}
+              >
+                <span className="block text-[9px] font-black uppercase text-orange-700 tracking-wider">Solo en SAP (No App)</span>
+                <span className="text-base sm:text-lg font-black text-orange-900">{validationReportData.sapOnly.length}</span>
+              </div>
+              <div 
+                onClick={() => setActiveReportTab('conforme')}
+                className={`p-2.5 sm:p-3 rounded-xl border transition-all cursor-pointer ${activeReportTab === 'conforme' ? 'bg-emerald-50/80 border-emerald-300 shadow-sm' : 'bg-slate-50 border-gray-100 hover:bg-slate-100/70'}`}
+              >
+                <span className="block text-[9px] font-black uppercase text-emerald-700 tracking-wider">Conformes</span>
+                <span className="text-base sm:text-lg font-black text-emerald-900">{validationReportData.conforme.length}</span>
+              </div>
+            </div>
+
+            {/* Interactive Tabs */}
+            <div className="px-4 bg-white border-b border-gray-200 flex overflow-x-auto shrink-0 scrollbar-none">
+              <button
+                type="button"
+                onClick={() => setActiveReportTab('differences')}
+                className={`py-3 px-4 font-black text-xs uppercase border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 ${
+                  activeReportTab === 'differences' 
+                  ? 'border-amber-500 text-amber-700 bg-amber-50/30' 
+                  : 'border-transparent text-gray-400 hover:text-gray-600'
+                }`}
+              >
+                Diferencias ({validationReportData.differences.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveReportTab('appOnly')}
+                className={`py-3 px-4 font-black text-xs uppercase border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 ${
+                  activeReportTab === 'appOnly' 
+                  ? 'border-blue-500 text-blue-700 bg-blue-50/30' 
+                  : 'border-transparent text-gray-400 hover:text-gray-600'
+                }`}
+              >
+                Solo en App ({validationReportData.appOnly.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveReportTab('sapOnly')}
+                className={`py-3 px-4 font-black text-xs uppercase border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 ${
+                  activeReportTab === 'sapOnly' 
+                  ? 'border-orange-500 text-orange-700 bg-orange-50/30' 
+                  : 'border-transparent text-gray-400 hover:text-gray-600'
+                }`}
+              >
+                Solo en SAP ({validationReportData.sapOnly.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveReportTab('conforme')}
+                className={`py-3 px-4 font-black text-xs uppercase border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 ${
+                  activeReportTab === 'conforme' 
+                  ? 'border-emerald-500 text-emerald-700 bg-emerald-50/30' 
+                  : 'border-transparent text-gray-400 hover:text-gray-600'
+                }`}
+              >
+                Conformes ({validationReportData.conforme.length})
+              </button>
+            </div>
+
+            {/* Table Area */}
+            <div className="flex-1 overflow-y-auto p-4 bg-slate-50/40">
+              {(() => {
+                let currentList: any[] = [];
+                let emptyMessage = '';
+                let alertColor = 'text-gray-400';
+
+                if (activeReportTab === 'differences') {
+                  currentList = validationReportData.differences;
+                  emptyMessage = 'No se encontraron diferencias de cantidades en los ingresos coincidentes.';
+                  alertColor = 'text-amber-500';
+                } else if (activeReportTab === 'appOnly') {
+                  currentList = validationReportData.appOnly;
+                  emptyMessage = 'No hay registros en la aplicación que falten en el archivo SAP.';
+                  alertColor = 'text-blue-500';
+                } else if (activeReportTab === 'sapOnly') {
+                  currentList = validationReportData.sapOnly;
+                  emptyMessage = 'No hay registros en el archivo SAP que falten en la aplicación.';
+                  alertColor = 'text-orange-500';
+                } else {
+                  currentList = validationReportData.conforme;
+                  emptyMessage = 'No hay registros coincidentes 100% conformes.';
+                  alertColor = 'text-emerald-500';
+                }
+
+                if (currentList.length === 0) {
+                  return (
+                    <div className="h-full min-h-[250px] flex flex-col items-center justify-center text-center p-6">
+                      <div className="w-16 h-16 bg-white rounded-full shadow-sm border border-gray-100 flex items-center justify-center mb-3">
+                        <CheckCircle className={`w-8 h-8 ${alertColor}`} />
+                      </div>
+                      <p className="text-sm font-bold text-gray-600 max-w-md">{emptyMessage}</p>
+                      <p className="text-xs text-gray-400 mt-1">Los datos ingresados coinciden correctamente para esta sección.</p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-gray-200">
+                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider">Fecha</th>
+                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider">Código ICO</th>
+                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider">Producto</th>
+                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider text-right">Cant. SAP</th>
+                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider text-right">Cant. App</th>
+                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider text-right">Diferencia</th>
+                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider">Estado / Detalle</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100 text-xs">
+                          {currentList.map((item, idx) => {
+                            let diffBadgeColor = 'text-gray-600 bg-gray-50';
+                            if (item.diferencia > 0) {
+                              diffBadgeColor = 'text-rose-600 bg-rose-50 font-bold';
+                            } else if (item.diferencia < 0) {
+                              diffBadgeColor = 'text-amber-600 bg-amber-50 font-bold';
+                            } else {
+                              diffBadgeColor = 'text-emerald-600 bg-emerald-50 font-medium';
+                            }
+
+                            return (
+                              <tr key={`${idx}-${item.codigo}`} className="hover:bg-slate-50/70 transition-colors">
+                                <td className="px-4 py-3 font-medium text-gray-600 whitespace-nowrap">
+                                  {item.fecha}
+                                </td>
+                                <td className="px-4 py-3 font-mono font-bold text-gray-800 whitespace-nowrap">
+                                  {item.codigo}
+                                </td>
+                                <td className="px-4 py-3 font-medium text-gray-700 min-w-[200px] max-w-[320px] truncate" title={item.nombre}>
+                                  {item.nombre}
+                                </td>
+                                <td className="px-4 py-3 text-right font-mono font-bold text-gray-900">
+                                  {item.cantSap}
+                                </td>
+                                <td className="px-4 py-3 text-right font-mono font-bold text-gray-900">
+                                  {item.cantApp}
+                                </td>
+                                <td className="px-4 py-3 text-right">
+                                  <span className={`inline-block px-2 py-0.5 rounded font-mono ${diffBadgeColor}`}>
+                                    {item.diferencia > 0 ? `+${item.diferencia}` : item.diferencia}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3">
+                                  <span className={`text-[10px] font-black uppercase tracking-tight px-2 py-1 rounded-full ${
+                                    activeReportTab === 'differences' 
+                                      ? 'bg-amber-100/60 text-amber-800' 
+                                      : activeReportTab === 'appOnly' 
+                                        ? 'bg-blue-100/60 text-blue-800' 
+                                        : activeReportTab === 'sapOnly' 
+                                          ? 'bg-orange-100/60 text-orange-800' 
+                                          : 'bg-emerald-100/60 text-emerald-800'
+                                  }`}>
+                                    {item.comentario}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 bg-slate-50 border-t border-gray-200 flex justify-between items-center shrink-0">
+              <span className="text-[10px] sm:text-xs text-gray-400 font-bold uppercase">Smartrack WMS v2.6</span>
+              <button
+                type="button"
+                onClick={() => setShowValidationReportModal(false)}
+                className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-md transition-all active:scale-[0.98] uppercase text-xs tracking-wider"
+              >
+                Cerrar Reporte
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Validation Modal */}

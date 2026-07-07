@@ -146,100 +146,195 @@ const INITIAL_RACKS: Rack[] = [
 
 const App: React.FC = () => {
   const [view, setView] = useState<ViewState>(ViewState.ORCHESTRATOR);
+  const [previousView, setPreviousView] = useState<ViewState | null>(null);
   const [expandedMenus, setExpandedMenus] = useState<Set<string>>(new Set(['RECEPTION']));
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => localStorage.getItem('smartwms_darkmode') === 'true');
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
-  const [tasks, setTasks] = useState<Task[]>(() => {
+  const [tasks, setTasks] = useState<Task[]>([]);
+
+  const handleAddTask = async (task: Task) => {
     try {
-      const saved = localStorage.getItem('smartwms_tasks');
-      return saved ? JSON.parse(saved) : [];
+      const { error } = await supabase
+        .from('tareas')
+        .insert([{
+          id: task.id,
+          titulo: task.title,
+          descripcion: task.description,
+          prioridad: task.priority,
+          estado: task.status,
+          creado_por: task.createdBy,
+          fecha_creacion: task.createdAt,
+          sede_id: currentUser?.sede_id || null,
+          imagen: task.photos && task.photos.length > 0 ? task.photos.join(',') : null,
+          fecha_agendada: task.scheduledDate || null,
+          hora_alerta: task.alertTime || null,
+          cancelado_en: task.canceledAt || null,
+          cancelado_por: task.canceledBy || null,
+          comentario_cancelado: task.canceledComment || null,
+          alerta_disparada: task.triggeredAlert || false,
+          historial: task.history ? JSON.stringify(task.history) : null
+        }]);
+
+      if (error) {
+        console.error("Error inserting task:", error);
+      }
     } catch (e) {
-      return [];
+      console.error("Error adding task:", e);
     }
-  });
-
-  useEffect(() => {
-    localStorage.setItem('smartwms_tasks', JSON.stringify(tasks));
-  }, [tasks]);
-
-  const handleAddTask = (task: Task) => {
     setTasks(prev => [task, ...prev]);
   };
 
-  const handleTaskDone = (taskId: string, user: string) => {
+  const handleTaskDone = async (taskId: string, user: string) => {
+    const taskToUpdate = tasks.find(t => t.id === taskId);
+    if (!taskToUpdate) return;
+
+    const history = taskToUpdate.history || [];
+    const updatedHistory = [
+      ...history,
+      {
+        action: 'REALIZADO',
+        user,
+        timestamp: new Date().toISOString(),
+        comment: 'Completado desde el panel de control'
+      }
+    ];
+
+    try {
+      const { error } = await supabase
+        .from('tareas')
+        .update({
+          estado: 'REALIZADO',
+          realizado_por: user,
+          fecha_realizacion: new Date().toISOString(),
+          descripcion: taskToUpdate.description,
+          historial: JSON.stringify(updatedHistory)
+        })
+        .eq('id', taskId);
+
+      if (error) console.error("Error updating task to REALIZADO:", error);
+    } catch (e) {
+      console.error(e);
+    }
+
     setTasks(prev => prev.map(t => {
       if (t.id === taskId) {
-        const history = t.history || [];
         return {
           ...t,
           status: 'REALIZADO' as const,
           completedAt: new Date().toISOString(),
           completedBy: user,
-          history: [
-            ...history,
-            {
-              action: 'REALIZADO',
-              user,
-              timestamp: new Date().toISOString(),
-              comment: 'Completado desde el panel de control'
-            }
-          ]
+          history: updatedHistory
         };
       }
       return t;
     }));
   };
 
-  const handleTaskReschedule = (taskId: string, newDate: string, newTime: string, user: string, comment?: string) => {
+  const handleTaskReschedule = async (taskId: string, newDate: string, newTime: string, user: string, comment?: string) => {
+    const taskToUpdate = tasks.find(t => t.id === taskId);
+    if (!taskToUpdate) return;
+
+    const history = taskToUpdate.history || [];
+    const updatedHistory = [
+      ...history,
+      {
+        action: 'REPROGRAMADO',
+        user,
+        timestamp: new Date().toISOString(),
+        comment: comment || `Reprogramado para el ${newDate} a las ${newTime}`
+      }
+    ];
+
+    try {
+      const { error } = await supabase
+        .from('tareas')
+        .update({
+          descripcion: taskToUpdate.description,
+          fecha_agendada: newDate,
+          hora_alerta: newTime,
+          alerta_disparada: false,
+          historial: JSON.stringify(updatedHistory)
+        })
+        .eq('id', taskId);
+
+      if (error) console.error("Error updating task reschedule:", error);
+    } catch (e) {
+      console.error(e);
+    }
+
     setTasks(prev => prev.map(t => {
       if (t.id === taskId) {
-        const history = t.history || [];
         return {
           ...t,
           scheduledDate: newDate,
           alertTime: newTime,
-          triggeredAlert: false, // Reset trigger flag to allow alarm again
-          history: [
-            ...history,
-            {
-              action: 'REPROGRAMADO',
-              user,
-              timestamp: new Date().toISOString(),
-              comment: comment || `Reprogramado para el ${newDate} a las ${newTime}`
-            }
-          ]
+          triggeredAlert: false,
+          history: updatedHistory
         };
       }
       return t;
     }));
   };
 
-  const handleTaskCancel = (taskId: string, user: string, comment?: string) => {
+  const handleTaskCancel = async (taskId: string, user: string, comment?: string) => {
+    const taskToUpdate = tasks.find(t => t.id === taskId);
+    if (!taskToUpdate) return;
+
+    const history = taskToUpdate.history || [];
+    const updatedHistory = [
+      ...history,
+      {
+        action: 'CANCELADO',
+        user,
+        timestamp: new Date().toISOString(),
+        comment: comment || 'Cancelado por el operador'
+      }
+    ];
+
+    try {
+      const { error } = await supabase
+        .from('tareas')
+        .update({
+          estado: 'CANCELADO',
+          descripcion: taskToUpdate.description,
+          cancelado_en: new Date().toISOString(),
+          cancelado_por: user,
+          comentario_cancelado: comment || null,
+          historial: JSON.stringify(updatedHistory)
+        })
+        .eq('id', taskId);
+
+      if (error) console.error("Error updating task cancel:", error);
+    } catch (e) {
+      console.error(e);
+    }
+
     setTasks(prev => prev.map(t => {
       if (t.id === taskId) {
-        const history = t.history || [];
         return {
           ...t,
           status: 'CANCELADO' as const,
           canceledAt: new Date().toISOString(),
           canceledBy: user,
           canceledComment: comment,
-          history: [
-            ...history,
-            {
-              action: 'CANCELADO',
-              user,
-              timestamp: new Date().toISOString(),
-              comment: comment || 'Cancelado por el operador'
-            }
-          ]
+          history: updatedHistory
         };
       }
       return t;
     }));
   };
 
-  const handleDeleteTask = (taskId: string) => {
+  const handleDeleteTask = async (taskId: string) => {
+    try {
+      const { error } = await supabase
+        .from('tareas')
+        .delete()
+        .eq('id', taskId);
+
+      if (error) console.error("Error deleting task:", error);
+    } catch (e) {
+      console.error(e);
+    }
     setTasks(prev => prev.filter(t => t.id !== taskId));
   };
   const [racks, setRacks] = useState<Rack[]>(INITIAL_RACKS);
@@ -347,7 +442,6 @@ const App: React.FC = () => {
   const [isVersionOutdated, setIsVersionOutdated] = useState(false);
   const [receptionsAlerts, setReceptionsAlerts] = useState<any[]>([]);
   const [showAlertsReviewModal, setShowAlertsReviewModal] = useState(false);
-  const [showPendientesModal, setShowPendientesModal] = useState(false);
 
   const receptionsAlertsCount = receptionsAlerts.filter((a: any) => {
     if (a.estado !== undefined) {
@@ -638,6 +732,61 @@ const App: React.FC = () => {
           }
           setInventory(allInv as any);
 
+          // Load Tasks (Tareas) from Supabase
+          const { data: tareasData, error: tareasError } = await supabase
+              .from('tareas')
+              .select('*')
+              .eq('sede_id', currentSedeId);
+              
+          if (!tareasError && tareasData) {
+              const mappedTasks: Task[] = tareasData.map(t => {
+                  let extraData: any = {};
+                  try {
+                      if (t.descripcion && t.descripcion.startsWith('{')) {
+                          extraData = JSON.parse(t.descripcion);
+                      }
+                  } catch (e) {
+                      extraData = {};
+                  }
+                  
+                  const photosUrls: string[] = t.imagen 
+                      ? t.imagen.split(',').map((url: any) => url.trim()).filter(Boolean) 
+                      : (extraData.photos || []);
+                  
+                  let parsedHistory: any[] = [];
+                  if (t.historial) {
+                      try {
+                          parsedHistory = JSON.parse(t.historial);
+                      } catch (e) {
+                          parsedHistory = [];
+                      }
+                  } else if (extraData.history) {
+                      parsedHistory = extraData.history;
+                  }
+                  
+                  return {
+                      id: t.id,
+                      title: t.titulo,
+                      description: t.descripcion && t.descripcion.startsWith('{') ? (extraData.text || '') : (t.descripcion || ''),
+                      priority: (t.prioridad || 'BAJA') as 'BAJA' | 'MEDIA' | 'ALTA',
+                      status: (t.estado || 'PENDIENTE') as 'PENDIENTE' | 'REALIZADO' | 'CANCELADO',
+                      createdAt: t.fecha_creacion || new Date().toISOString(),
+                      completedAt: t.fecha_realizacion || undefined,
+                      createdBy: t.creado_por,
+                      completedBy: t.realizado_por || undefined,
+                      photos: photosUrls,
+                      scheduledDate: t.fecha_agendada || extraData.scheduledDate || undefined,
+                      alertTime: t.hora_alerta || extraData.alertTime || undefined,
+                      canceledAt: t.cancelado_en || extraData.canceledAt || undefined,
+                      canceledBy: t.cancelado_por || extraData.canceledBy || undefined,
+                      canceledComment: t.comentario_cancelado || extraData.canceledComment || undefined,
+                      triggeredAlert: t.alerta_disparada !== undefined && t.alerta_disparada !== null ? t.alerta_disparada : (extraData.triggeredAlert || false),
+                      history: parsedHistory
+                  };
+              });
+              setTasks(mappedTasks);
+          }
+
       } catch (err) {
           console.error('Error cargando datos desde Supabase:', err);
       } finally {
@@ -814,6 +963,22 @@ const App: React.FC = () => {
       
       if (updated) {
         setTasks(newTasks);
+        
+        // Also update the triggeredAlert status of these tasks in Supabase so it doesn't trigger again on reload
+        const triggeredTaskIds = newTasks.filter((t, i) => t.triggeredAlert && !tasks[i].triggeredAlert).map(t => t.id);
+        triggeredTaskIds.forEach(async (id) => {
+          const taskToUpdate = newTasks.find(t => t.id === id);
+          if (taskToUpdate) {
+            try {
+              await supabase
+                .from('tareas')
+                .update({ alerta_disparada: true })
+                .eq('id', id);
+            } catch (err) {
+              console.error("Error updating triggeredAlert in DB", err);
+            }
+          }
+        });
       }
     }, 1000); // Poll once per second for maximum precision
     return () => clearInterval(interval);
@@ -896,6 +1061,72 @@ const App: React.FC = () => {
       clearInterval(interval);
     };
   }, [currentUser, fetchReceptionsAlerts, playAlertSound]);
+
+  // REAL-TIME SUBSCRIPTION FOR TASKS (TAREAS) - Filtered by branch
+  useEffect(() => {
+    if (!currentUser?.sede_id) return;
+
+    const currentSedeId = currentUser.sede_id;
+
+    const tasksChannel = supabase
+      .channel('tareas-realtime')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tareas',
+          filter: `sede_id=eq.${currentSedeId}`
+        },
+        async (payload) => {
+          console.log("Realtime task event received:", payload);
+          // Fetch updated task list for consistency and safety
+          const { data: tareasData, error: tareasError } = await supabase
+              .from('tareas')
+              .select('*')
+              .eq('sede_id', currentSedeId);
+              
+          if (!tareasError && tareasData) {
+              const mappedTasks: Task[] = tareasData.map(t => {
+                  let extraData: any = {};
+                  try {
+                      if (t.descripcion && t.descripcion.startsWith('{')) {
+                          extraData = JSON.parse(t.descripcion);
+                      }
+                  } catch (e) {
+                      extraData = {};
+                  }
+                  
+                  return {
+                      id: t.id,
+                      title: t.titulo,
+                      description: extraData.text || t.descripcion || '',
+                      priority: (t.prioridad || 'BAJA') as 'BAJA' | 'MEDIA' | 'ALTA',
+                      status: (t.estado || 'PENDIENTE') as 'PENDIENTE' | 'REALIZADO' | 'CANCELADO',
+                      createdAt: t.fecha_creacion || new Date().toISOString(),
+                      completedAt: t.fecha_realizacion || undefined,
+                      createdBy: t.creado_por,
+                      completedBy: t.realizado_por || undefined,
+                      photos: extraData.photos || [],
+                      scheduledDate: extraData.scheduledDate || undefined,
+                      alertTime: extraData.alertTime || undefined,
+                      canceledAt: extraData.canceledAt || undefined,
+                      canceledBy: extraData.canceledBy || undefined,
+                      canceledComment: extraData.canceledComment || undefined,
+                      triggeredAlert: extraData.triggeredAlert || false,
+                      history: extraData.history || []
+                  };
+              });
+              setTasks(mappedTasks);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(tasksChannel);
+    };
+  }, [currentUser?.sede_id]);
 
   // REAL-TIME SUBSCRIPTION FOR INVENTORY - Filtered by branch
   useEffect(() => {
@@ -1447,6 +1678,7 @@ const App: React.FC = () => {
       items: [
         { view: ViewState.MONITOR, icon: <MonitorIcon className="w-5 h-5" />, label: "Monitor" },
         { view: ViewState.METRICS, icon: <TrendingUp className="w-5 h-5" />, label: "Métricas" },
+        { view: ViewState.PENDIENTES, icon: <ListChecks className="w-5 h-5" />, label: "Pendientes" },
       ]
     },
     {
@@ -1527,9 +1759,11 @@ const App: React.FC = () => {
           return;
       }
       
-      const isAllowed = currentUser.rol === 'ADMIN' || 
+      const isAllowed = view !== ViewState.ORCHESTRATOR && (
+                        currentUser.rol === 'ADMIN' || 
                         (view === ViewState.CLIENTES && currentUser.rol === 'ASISTENTE') ||
-                        !!currentUser.permisos?.[view];
+                        !!currentUser.permisos?.[view]
+                      );
       
       if (!isAllowed) {
           // If the user does not have permission for the main view but has permission for any sub-item of a category, 
@@ -1615,21 +1849,6 @@ const App: React.FC = () => {
         />
       )}
       
-      {showPendientesModal && (
-        <PendientesModal
-          isOpen={showPendientesModal}
-          onClose={() => setShowPendientesModal(false)}
-          tasks={tasks}
-          currentUser={currentUser}
-          isDarkMode={isDarkMode}
-          onAddTask={handleAddTask}
-          onTaskDone={handleTaskDone}
-          onTaskReschedule={handleTaskReschedule}
-          onTaskCancel={handleTaskCancel}
-          onDeleteTask={handleDeleteTask}
-        />
-      )}
-      
       <div className={`flex flex-col w-full h-full overflow-hidden transition-all duration-500 ${isDarkMode ? 'bg-[#0f172a]' : 'bg-white'}`}>
         
         {/* Header Section */}
@@ -1694,7 +1913,12 @@ const App: React.FC = () => {
                     )}
 
                     <button 
-                        onClick={() => setShowPendientesModal(true)}
+                        onClick={() => {
+                            if (view !== ViewState.PENDIENTES) {
+                                setPreviousView(view);
+                            }
+                            setView(ViewState.PENDIENTES);
+                        }}
                         className={`p-2.5 rounded-xl transition-all border flex items-center gap-2 px-2.5 md:px-3.5 group relative select-none cursor-pointer ${
                             tasks.filter(t => t.status === 'PENDIENTE' && t.scheduledDate === getLocalDateString()).length > 0 
                             ? 'bg-amber-500 border-amber-400 text-slate-950 font-bold hover:bg-amber-600' 
@@ -1948,6 +2172,33 @@ const App: React.FC = () => {
                     {view === ViewState.BRANCH_MANAGEMENT && <BranchManagement currentUser={currentUser} />}
                     {view === ViewState.CLIENTES && <Clientes currentUser={currentUser} />}
                     {view === ViewState.ORCHESTRATOR && <Orchestrator tasks={tasks} onAddTask={handleAddTask} onUpdateTask={(id, u) => setTasks(prev => prev.map(t => t.id === id ? {...t, ...u} : t))} onDeleteTask={handleDeleteTask} />}
+                    {view === ViewState.PENDIENTES && (
+                        <PendientesModal
+                            isOpen={true}
+                            onClose={() => {
+                                if (previousView && previousView !== ViewState.PENDIENTES && previousView !== ViewState.ORCHESTRATOR) {
+                                    setView(previousView);
+                                } else {
+                                    const firstAllowed = sidebarItems.find(item => !item.hidden);
+                                    if (firstAllowed) {
+                                        if (firstAllowed.subItems && firstAllowed.subItems.length > 0) {
+                                            setView(firstAllowed.subItems[0].view as ViewState);
+                                        } else {
+                                            setView(firstAllowed.view as ViewState);
+                                        }
+                                    }
+                                }
+                            }}
+                            tasks={tasks}
+                            currentUser={currentUser}
+                            isDarkMode={isDarkMode}
+                            onAddTask={handleAddTask}
+                            onTaskDone={handleTaskDone}
+                            onTaskReschedule={handleTaskReschedule}
+                            onTaskCancel={handleTaskCancel}
+                            onDeleteTask={handleDeleteTask}
+                        />
+                    )}
                     {view === ViewState.MERMAS && <Mermas catalog={catalog} currentUser={currentUser} />}
                     {view === ViewState.CONFIGURATION && <Configuration 
                         zones={zones} 
