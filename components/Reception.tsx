@@ -1246,9 +1246,13 @@ const Reception: React.FC<ReceptionProps> = ({
             .select('*', { count: 'exact' })
             .eq('estado', 'ACTIVO');
 
+        if (currentUser?.sede_id) {
+            query = query.eq('sede_id', currentUser.sede_id);
+        }
+
         if (historySearch.trim()) {
             const s = `%${historySearch.trim()}%`;
-            query = query.or(`lpn.ilike.${s},nombre.ilike.${s},codigo.ilike.${s}`);
+            query = query.or(`lpn.ilike.${s},nombre.ilike.${s},codigo.ilike.${s},conclusiones.ilike.${s},proveedor.ilike.${s},guia_factura.ilike.${s},lote.ilike.${s},usuario_registro.ilike.${s}`);
         }
 
         const { data: historyData, error: historyError, count } = await query
@@ -1262,18 +1266,28 @@ const Reception: React.FC<ReceptionProps> = ({
             const lpns = historyData.map(r => r.lpn).filter(Boolean);
             const { data: palletData, error: palletError } = await supabase
                 .from('paletas_lpn')
-                .select('lpn, ubicacion_id, tipo')
+                .select('lpn, ubicacion_id, tipo, estado, estado_lpn')
                 .in('lpn', lpns);
             
             if (!palletError && palletData) {
                 const infoMap = palletData.reduce((acc, p) => {
-                    acc[p.lpn] = { ubicacion_id: p.ubicacion_id, tipo: p.tipo };
+                    acc[p.lpn] = { 
+                        ubicacion_id: p.ubicacion_id, 
+                        tipo: p.tipo,
+                        estado: p.estado,
+                        estado_lpn: p.estado_lpn
+                    };
                     return acc;
-                }, {} as Record<string, { ubicacion_id: string; tipo: string }>);
+                }, {} as Record<string, { ubicacion_id: string; tipo: string; estado: string; estado_lpn: string }>);
 
                 const joinedData = historyData.map(r => ({
                     ...r,
-                    paletas_lpn: infoMap[r.lpn] ? { ubicacion_id: infoMap[r.lpn].ubicacion_id, tipo: infoMap[r.lpn].tipo } : null
+                    paletas_lpn: infoMap[r.lpn] ? { 
+                        ubicacion_id: infoMap[r.lpn].ubicacion_id, 
+                        tipo: infoMap[r.lpn].tipo,
+                        estado: infoMap[r.lpn].estado,
+                        estado_lpn: infoMap[r.lpn].estado_lpn
+                    } : null
                 }));
                 setReceptionHistory(joinedData);
             } else {
@@ -1864,6 +1878,9 @@ const Reception: React.FC<ReceptionProps> = ({
           }
       } else {
           await onBulkDispatch(Array.from(selectedLpns));
+          if (activeMobileTab === 'HISTORY') {
+              fetchReceptionHistory();
+          }
       }
       setSelectedLpns(new Set());
       setShowConfirmModal({ ...showConfirmModal, show: false });
@@ -2715,6 +2732,23 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                 <div className="space-y-2">
                                     {receptionHistory.map((record) => {
                                         const matchedProduct = catalog.find(p => p.id === record.producto_id || p.codigo === record.codigo);
+                                        const totalLife = matchedProduct ? (matchedProduct.tvm_dias || matchedProduct.vida_util_dias || 0) : 0;
+                                        let tvuCalculated: number | null = null;
+                                        if (totalLife > 0 && record.fecha_vencimiento && record.fecha_registro) {
+                                            try {
+                                                const expDate = new Date(record.fecha_vencimiento + 'T00:00:00');
+                                                const regDate = new Date(record.fecha_registro);
+                                                regDate.setHours(0, 0, 0, 0);
+                                                const diffTime = expDate.getTime() - regDate.getTime();
+                                                const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                                                tvuCalculated = Math.round((diffDays / totalLife) * 100);
+                                            } catch (e) {
+                                                console.error(e);
+                                            }
+                                        }
+                                        const productTvuThreshold = matchedProduct?.tvu_promesa !== undefined && matchedProduct?.tvu_promesa !== null && matchedProduct?.tvu_promesa > 0 
+                                            ? matchedProduct.tvu_promesa 
+                                            : 80;
                                         let rawChamber = 'SECO';
 
                                         if (matchedProduct) {
@@ -2758,11 +2792,30 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                                             <span className="text-[9px] font-bold text-gray-400">
                                                                 {new Date(record.fecha_registro).toLocaleDateString()}
                                                             </span>
-                                                            {record.estado === 'PENDIENTE_AUTORIZACION' ? ( <span className="text-[9px] font-black border border-amber-200 text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded uppercase animate-pulse">PENDIENTE APROBACIÓN</span> ) : record.paletas_lpn?.tipo && (
+                                                            
+                                                            {/* Quality Status Badge */}
+                                                            {record.conclusiones === 'RECHAZADO' ? (
+                                                                <span className="text-[9px] font-black border border-red-200 text-red-700 bg-red-50 px-1.5 py-0.5 rounded uppercase flex items-center gap-0.5">
+                                                                    <AlertTriangle className="w-2.5 h-2.5 text-red-600" /> RECHAZADO
+                                                                </span>
+                                                            ) : record.conclusiones === 'ACEPTADO' ? (
+                                                                <span className="text-[9px] font-black border border-emerald-200 text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded uppercase flex items-center gap-0.5">
+                                                                    <CheckCircle className="w-2.5 h-2.5 text-emerald-600" /> ACEPTADO
+                                                                </span>
+                                                            ) : record.conclusiones === 'ACEPTADO CON OBSERVACION' ? (
+                                                                <span className="text-[9px] font-black border border-amber-200 text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded uppercase flex items-center gap-0.5">
+                                                                    <Info className="w-2.5 h-2.5 text-amber-600" /> ACEPTADO CON OBS.
+                                                                </span>
+                                                            ) : null}
+
+                                                            {record.estado === 'PENDIENTE_AUTORIZACION' ? ( 
+                                                                <span className="text-[9px] font-black border border-amber-200 text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded uppercase animate-pulse">PENDIENTE APROBACIÓN</span> 
+                                                            ) : record.paletas_lpn?.tipo && (
                                                                 <span className={`text-[9px] font-black border px-1.5 py-0.5 rounded uppercase ${record.paletas_lpn.tipo === 'GENERADO' ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-emerald-700 bg-emerald-50 border-emerald-250'}`}>
                                                                     {record.paletas_lpn.tipo === 'GENERADO' ? 'ROTULADO' : 'RECEPCIÓN'}
                                                                 </span>
                                                             )}
+
                                                             {record.paletas_lpn?.ubicacion_id && (
                                                                 <span className="text-[9px] font-black text-green-600 bg-green-50 px-1.5 py-0.5 rounded border border-green-100 uppercase">
                                                                     {record.paletas_lpn.ubicacion_id}
@@ -2773,9 +2826,16 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                                         <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                                                             <span className="text-[9px] text-gray-500 font-mono">{record.codigo}</span>
                                                             {record.fecha_vencimiento && (
-                                                                <span className="text-[9px] text-rose-600 bg-rose-50 border border-rose-100 px-1.5 py-0.5 rounded font-extrabold uppercase tracking-tight">
-                                                                    Vence: {formatDate(record.fecha_vencimiento)}
-                                                                </span>
+                                                                <>
+                                                                    <span className="text-[9px] text-rose-600 bg-rose-50 border border-rose-100 px-1.5 py-0.5 rounded font-extrabold uppercase tracking-tight">
+                                                                        Vence: {formatDate(record.fecha_vencimiento)}
+                                                                    </span>
+                                                                    {tvuCalculated !== null && (
+                                                                        <span className={`text-[9px] font-extrabold border px-1.5 py-0.5 rounded uppercase flex items-center gap-0.5 ${tvuCalculated < productTvuThreshold ? 'text-red-700 bg-red-50 border-red-200 animate-pulse' : 'text-emerald-700 bg-emerald-50 border-emerald-200'}`}>
+                                                                            TVU: {tvuCalculated}%
+                                                                        </span>
+                                                                    )}
+                                                                </>
                                                             )}
                                                             <span className={`text-[9px] font-bold border px-1.5 py-0.5 rounded uppercase ${chamberColor}`}>
                                                                 Cámara: {chamberLabel}

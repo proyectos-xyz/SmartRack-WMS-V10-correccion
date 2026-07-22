@@ -46,6 +46,7 @@ export interface Product {
   tvu_promesa?: number | null;
   ventas_semanal?: number | null;
   multiplo?: number | null;
+  costo?: number | null;
 }
 
 export interface DespachoEncabezado {
@@ -308,7 +309,8 @@ export enum ViewState {
   VALIDADOR = 'VALIDADOR',
   CAPTURA_EAN = 'CAPTURA_EAN',
   ALERT_MONITOR = 'ALERT_MONITOR',
-  PENDIENTES = 'PENDIENTES'
+  PENDIENTES = 'PENDIENTES',
+  EXPIRATIONS = 'EXPIRATIONS'
 }
 
 export interface Cliente {

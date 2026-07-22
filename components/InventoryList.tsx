@@ -56,6 +56,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
   const [sessionHistory, setSessionHistory] = useState<StocktakeRecord[]>([]);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [expiryWarning, setExpiryWarning] = useState<string | null>(null);
+  const [fastScanMode, setFastScanMode] = useState(false);
 
   // Download Modal State
   const [showDownloadModal, setShowDownloadModal] = useState(false);
@@ -762,6 +763,47 @@ const InventoryList: React.FC<InventoryListProps> = ({
           URL.revokeObjectURL(photoToRemove.preview);
       }
       setCountPhotos(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handleFastScanSubmit = async (product: Product) => {
+      const userToSave = currentUser?.nombre || 'Auditor';
+      const timestamp = new Date().toISOString();
+      
+      const newRecord: Omit<StocktakeRecord, 'id'> = {
+          producto_id: product.id,
+          codigo: product.codigo,
+          nombre: product.nombre,
+          cantidad: 1,
+          pallets: 0,
+          cajas: 0,
+          unidades: 1,
+          fecha_vencimiento: '',
+          usuario_registro: userToSave,
+          fecha_registro: timestamp,
+          fotos: [],
+          zona: product.zona_predeterminada,
+          sede_id: currentUser?.sede_id || (() => {
+              try {
+                  const saved = localStorage.getItem('smartwms_user');
+                  return saved ? JSON.parse(saved)?.sede_id : undefined;
+              } catch {
+                  return undefined;
+              }
+          })()
+      };
+
+      setSuccessMsg(`Escaneo Rápido: +1 unidad de "${product.nombre}" registrado`);
+      setTimeout(() => setSuccessMsg(null), 2500);
+
+      try {
+          await onSaveStocktake(newRecord);
+          // Refresh expiring soon bell
+          fetchExpiringSoon();
+          // Update local session history
+          setSessionHistory(prev => [{ ...newRecord, id: Date.now().toString() } as StocktakeRecord, ...prev]);
+      } catch (err) {
+          console.error("Error al registrar escaneo rápido:", err);
+      }
   };
 
   const handleStocktakeSubmit = (e: React.FormEvent) => {
@@ -2321,10 +2363,24 @@ const InventoryList: React.FC<InventoryListProps> = ({
 
                             {/* 1. Product Select / Scan */}
                             <div className="space-y-1 md:space-y-2 mt-4 md:mt-0">
-                                <div className="flex justify-between items-center">
+                                <div className="flex justify-between items-center flex-wrap gap-2">
                                     <label className="text-xs md:text-sm font-bold text-gray-500 uppercase flex items-center gap-2">
                                         <Scan className="w-4 h-4"/> Escanear Producto
                                     </label>
+                                    <button
+                                        type="button"
+                                        onClick={() => setFastScanMode(!fastScanMode)}
+                                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] md:text-xs font-black uppercase transition-all duration-300 shadow-sm border ${
+                                            fastScanMode 
+                                                ? 'bg-amber-500 border-amber-600 text-white hover:bg-amber-600 active:scale-95' 
+                                                : 'bg-slate-100 hover:bg-slate-200 border-slate-300 text-slate-700 active:scale-95'
+                                        }`}
+                                    >
+                                        <svg xmlns="http://www.w3.org/2000/svg" fill={fastScanMode ? "currentColor" : "none"} viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-3.5 h-3.5">
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+                                        </svg>
+                                        <span>Escaneo Rápido: {fastScanMode ? 'ACTIVO' : 'DESACTIVADO'}</span>
+                                    </button>
                                 </div>
                                 {countProduct ? (
                                     <div className="flex flex-col bg-blue-600 text-white p-2 md:p-4 rounded-lg shadow-md">
@@ -2374,8 +2430,12 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                             ref={searchInputRef}
                                             autoFocus
                                             type="text"
-                                            placeholder="Escanee EAN o escriba nombre..."
-                                            className="w-full p-2 md:p-4 border-2 border-gray-300 rounded-lg focus:border-blue-500 outline-none text-base md:text-lg"
+                                            placeholder={fastScanMode ? "⚡ MODO ESCANEO RÁPIDO ACTIVO: Escanee EAN o SKU para sumar +1u..." : "Escanee EAN o escriba nombre..."}
+                                            className={`w-full p-2 md:p-4 border-2 rounded-lg outline-none text-base md:text-lg transition-all duration-300 ${
+                                                fastScanMode 
+                                                    ? 'border-amber-500 bg-amber-50/10 focus:border-amber-600 focus:ring-1 focus:ring-amber-500 text-amber-900 font-bold placeholder-amber-400' 
+                                                    : 'border-gray-300 focus:border-blue-500 text-gray-800'
+                                            }`}
                                             value={countSearch}
                                             onChange={e => setCountSearch(e.target.value)}
                                             onKeyDown={e => {
@@ -2387,14 +2447,24 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                                             p.codigo.trim().toLowerCase() === cleanSearch ||
                                                             (p.sku && p.sku.trim().toLowerCase() === cleanSearch)
                                                         );
-                                                        if (match) {
-                                                            setCountProduct(match);
-                                                            setCountSearch('');
-                                                            setTimeout(() => qtyInputRef.current?.focus(), 100);
-                                                        } else if (filteredCatalog.length > 0) {
-                                                            setCountProduct(filteredCatalog[0]);
-                                                            setCountSearch('');
-                                                            setTimeout(() => qtyInputRef.current?.focus(), 100);
+                                                        if (fastScanMode) {
+                                                            if (match) {
+                                                                handleFastScanSubmit(match);
+                                                                setCountSearch('');
+                                                            } else if (filteredCatalog.length > 0) {
+                                                                handleFastScanSubmit(filteredCatalog[0]);
+                                                                setCountSearch('');
+                                                            }
+                                                        } else {
+                                                            if (match) {
+                                                                setCountProduct(match);
+                                                                setCountSearch('');
+                                                                setTimeout(() => qtyInputRef.current?.focus(), 100);
+                                                            } else if (filteredCatalog.length > 0) {
+                                                                setCountProduct(filteredCatalog[0]);
+                                                                setCountSearch('');
+                                                                setTimeout(() => qtyInputRef.current?.focus(), 100);
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -2437,6 +2507,14 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                                 ))}
                                             </div>
                                         )}
+                                    </div>
+                                )}
+                                {fastScanMode && (
+                                    <div className="mt-2 p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-[10px] md:text-xs font-black text-amber-700 uppercase flex items-center gap-1.5 animate-pulse shadow-sm">
+                                        <svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" className="w-4 h-4 shrink-0 text-amber-600">
+                                            <path d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+                                        </svg>
+                                        <span>Modo Escaneo Rápido (+1 u.): El producto se registrará automáticamente en el almacén de inmediato al ser escaneado, sin requerir confirmación.</span>
                                     </div>
                                 )}
                             </div>

@@ -68,7 +68,8 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
     nivel_4: '',
     tvu_promesa: null,
     ventas_semanal: null,
-    multiplo: null
+    multiplo: null,
+    costo: 0
   });
 
   const [eanFilter, setEanFilter] = useState<'ALL' | 'WITHOUT_EAN_PROD' | 'WITHOUT_EAN_BULTO'>('ALL');
@@ -261,7 +262,8 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
                 nivel_4: '',
                 tvu_promesa: null,
                 ventas_semanal: null,
-                multiplo: null
+                multiplo: null,
+                costo: 0
             });
             setImportStatus({ msg: 'Producto agregado correctamente.', type: 'success' });
             setTimeout(() => setImportStatus(null), 3000);
@@ -416,13 +418,13 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
       'Nivel 0', 'Nivel 1', 'Nivel 2', 'Nivel 3', 'Nivel 4', 
       'Nivel WEB', 'TVM', 'CAMARA', 'pesaje', 'cajas_por_palet', 'control_tara', 'tara_caja_std', 'tara_pallet_std',
       'ean_bulto', 'unidades_por_caja', 'vida_util_dias', 'unidad_medida_sap', 'tiene_detraccion', 'camara_texto', 
-      'peso_unitario', 'foto_uno', 'foto_dos', 'factor_unidad', 'tvu_promesa', 'ventas_semanal', 'venta_media', 'multiplo'
+      'peso_unitario', 'foto_uno', 'foto_dos', 'factor_unidad', 'tvu_promesa', 'ventas_semanal', 'venta_media', 'multiplo', 'costo'
     ];
 
     const sampleData = [
-      ['PRF002', 'AGUA MIN CON GAS EVIAN SPARKLING BT VIDRIO X 330ML CJ X 20 UND', 'BX', '1238560', '', 'PERUFARMA S.A', 'Y', 'N', 'N', 'N', 'BX', '1', '11.6', 'EVIAN', 'ALIADAS', 'BEBIDAS', 'EVIAN', 'BEBIDAS', 'BEBIDAS NO ALCOHOLICAS', 'BEBIDAS', '720', 'SECOS', 'Y', '0', 'N', '0', '0', '20', '20', '720', 'UND', 'N', 'SECOS', '0.33', '', '', '1', '360', '50', '2.5', '6'],
-      ['AJB004', 'SOPA INSTANTANEA AJI-NO-MEN SABOR POLLO VASO 50GR', 'NIU', 'AJ0114', '', '(AJI)AJINOMOTO', 'Y', 'N', 'N', 'N', 'BX', '12', '0.05', 'AJINOMOTO', 'ALIADAS', 'ABARROTES', 'AJINOMOTO', 'SOPAS', 'SOPAS SUSTANCIAS', 'ABARROTES', '360', 'SECOS', 'Y', '0', 'N', '0', '0', '12', '12', '360', 'UND', 'N', 'SECOS', '0.05', '', '', '12', '180', '100', '1.2', ''],
-      ['LAH013', 'FRANKFURTER XL SUIZA PAQUETE 1KG', 'NIU', '50000401', '', '(LAI)LAIVE S.A.', 'N', 'Y', 'N', 'N', 'BX', '8', '1', 'LAIVE', 'LAIVE S.A.', 'LAIVE', 'SALCHICHERIA', 'CARNICOS', 'HOT DOG', 'EMBUTIDOS', '45', 'REFRIGERADOS', 'N', '78', 'Y', '0.05', '1.2', '8', '8', '45', 'UND', 'N', 'REFRIGERADO', '1.0', '', '', '8', '30', '120', '4.0', '8']
+      ['PRF002', 'AGUA MIN CON GAS EVIAN SPARKLING BT VIDRIO X 330ML CJ X 20 UND', 'BX', '1238560', '', 'PERUFARMA S.A', 'Y', 'N', 'N', 'N', 'BX', '1', '11.6', 'EVIAN', 'ALIADAS', 'BEBIDAS', 'EVIAN', 'BEBIDAS', 'BEBIDAS NO ALCOHOLICAS', 'BEBIDAS', '720', 'SECOS', 'Y', '0', 'N', '0', '0', '20', '20', '720', 'UND', 'N', 'SECOS', '0.33', '', '', '1', '360', '50', '2.5', '6', '12.5'],
+      ['AJB004', 'SOPA INSTANTANEA AJI-NO-MEN SABOR POLLO VASO 50GR', 'NIU', 'AJ0114', '', '(AJI)AJINOMOTO', 'Y', 'N', 'N', 'N', 'BX', '12', '0.05', 'AJINOMOTO', 'ALIADAS', 'ABARROTES', 'AJINOMOTO', 'SOPAS', 'SOPAS SUSTANCIAS', 'ABARROTES', '360', 'SECOS', 'Y', '0', 'N', '0', '0', '12', '12', '360', 'UND', 'N', 'SECOS', '0.05', '', '', '12', '180', '100', '1.2', '', '8'],
+      ['LAH013', 'FRANKFURTER XL SUIZA PAQUETE 1KG', 'NIU', '50000401', '', '(LAI)LAIVE S.A.', 'N', 'Y', 'N', 'N', 'BX', '8', '1', 'LAIVE', 'LAIVE S.A.', 'LAIVE', 'SALCHICHERIA', 'CARNICOS', 'HOT DOG', 'EMBUTIDOS', '45', 'REFRIGERADOS', 'N', '78', 'Y', '0.05', '1.2', '8', '8', '45', 'UND', 'N', 'REFRIGERADO', '1.0', '', '', '8', '30', '120', '4.0', '8', '15']
     ];
     
     const ws = XLSX.utils.aoa_to_sheet([headers, ...sampleData]);
@@ -456,7 +458,7 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
           'nivel_3', 'nivel_4', 'categoria', 'tvm_dias', 'zona_predeterminada', 'requiere_pesaje', 
           'cajas_por_palet', 'usa_control_tara', 'peso_tara_caja_std', 'peso_tara_pallet_std', 
           'ean_bulto', 'unidades_por_caja', 'vida_util_dias', 'unidad_medida_sap', 'tiene_detraccion', 
-          'camara_texto', 'peso_unitario', 'foto_uno', 'foto_dos', 'multiplo'
+          'camara_texto', 'peso_unitario', 'foto_uno', 'foto_dos', 'multiplo', 'costo'
         ];
 
         // Gather all existing columns from the data rows
@@ -627,6 +629,7 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
                       setIf(['ventas_semanal', 'ventas semanal', 'venta semanal', 'rotacion semanal', 'rotacion_semanal'], 'ventas_semanal', v => { const n = parseNum(v); return n !== undefined ? Math.round(n) : null; });
                       setIf(['venta media', 'venta_media', 'rotacion_media'], 'venta_media', v => parseNum(v));
                       setIf(['multiplo', 'multiplo_alerta', 'multiplo_sobrestock', 'multiplo sobrestock'], 'multiplo', v => parseNum(v));
+                      setIf(['costo', 'precio', 'costo unitario', 'cost'], 'costo', v => parseNum(v));
                       setIf(['peso unitario', 'peso_unitario'], 'peso_unitario', v => parseNum(v));
                       setIf(['control_tara', 'control tara', 'usa control tara'], 'usa_control_tara', v => yToBool(v));
                       setIf(['tara_caja_std', 'tara caja std', 'peso tara caja'], 'peso_tara_caja_std', v => parseNum(v));
@@ -1262,6 +1265,17 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
                                     placeholder="Ej: 6 o 8" 
                                 />
                             </div>
+                            <div className="space-y-1">
+                                <label className="text-[10px] font-black text-emerald-600 dark:text-emerald-400 uppercase ml-1">Costo Unitario (S/.)</label>
+                                <input 
+                                    type="number" 
+                                    step="0.01"
+                                    className="w-full p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-850/80 rounded-2xl font-black text-sm text-emerald-900 dark:text-emerald-100 outline-none focus:ring-2 focus:ring-emerald-500 placeholder-emerald-300" 
+                                    value={newProduct.costo ?? ''} 
+                                    onChange={e => setNewProduct({...newProduct, costo: parseFloat(e.target.value) || 0})} 
+                                    placeholder="Ej: 12.50" 
+                                />
+                            </div>
                         </div>
 
                         {/* CONTROL DE TARA */}
@@ -1600,6 +1614,17 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
                                         value={editingProduct.multiplo ?? ''} 
                                         onChange={e => setEditingProduct({...editingProduct, multiplo: parseFloat(e.target.value) || null})} 
                                         placeholder="Ej: 6 o 8"
+                                    />
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="text-[9px] font-black text-emerald-600 dark:text-emerald-400 uppercase ml-0.5">Costo Unitario (S/.)</label>
+                                    <input 
+                                        type="number" 
+                                        step="0.01"
+                                        className="w-full px-2.5 py-1.5 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800/80 rounded-lg font-black text-xs text-emerald-900 dark:text-emerald-100 outline-none focus:ring-1 focus:ring-emerald-500 placeholder-emerald-300" 
+                                        value={editingProduct.costo ?? ''} 
+                                        onChange={e => setEditingProduct({...editingProduct, costo: parseFloat(e.target.value) || 0})} 
+                                        placeholder="Ej: 12.50"
                                     />
                                 </div>
                                 <div className="space-y-1 col-span-2">

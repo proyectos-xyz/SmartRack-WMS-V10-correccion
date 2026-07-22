@@ -32,8 +32,9 @@ import AfternoonCar from './components/AfternoonCar';
 import AfternoonMonitor from './components/AfternoonMonitor';
 import { CapturaEan } from './components/CapturaEan';
 import { AlertMonitor } from './components/AlertMonitor';
+import { Expirations } from './components/Expirations';
 import { InventoryItem, Rack, Zone, ViewState, Slot, RackLocation, Product, Task, Usuario, StocktakeRecord, ZoneType } from './types';
-import { LayoutGrid, ArrowDownToLine, Settings, ClipboardList, Database, Beaker, Tag, Truck, ListChecks, Menu, XCircle, Sun, Moon, RefreshCw, ChevronRight, User, Upload, History as HistoryIcon, Monitor as MonitorIcon, Scale, Trash2, FileCheck, ChevronUp, ChevronDown, Package, TrendingUp, Building2, Bell, Printer, CheckCircle } from './components/Icons';
+import { LayoutGrid, ArrowDownToLine, Settings, ClipboardList, Database, Beaker, Tag, Truck, ListChecks, Menu, XCircle, Sun, Moon, RefreshCw, ChevronRight, User, Upload, History as HistoryIcon, Monitor as MonitorIcon, Scale, Trash2, FileCheck, ChevronUp, ChevronDown, Package, TrendingUp, Building2, Bell, Printer, CheckCircle, Clock } from './components/Icons';
 import { supabase } from './supabaseClient';
 
 const LOGO_URL = 'https://iili.io/fsmAapV.png';
@@ -584,7 +585,7 @@ const App: React.FC = () => {
           let hasMore = true;
           const pageSize = 1000;
           // Only columns needed for the app's general operation
-          let productColumns = 'id, codigo, sku, nombre, categoria, marca, unidad_venta, unidades_por_caja, cajas_por_palet, requiere_pesaje, zona_predeterminada, es_seco, es_refrigerado, es_congelado, es_peso, tvm_dias, vida_util_dias, peso_unitario, unidad_medida_sap, unidad_compra, factor_unidad, factor_inventario, usa_control_tara, peso_tara_caja_std, peso_tara_pallet_std, foto_uno, foto_dos, extranjero, venta_media, ean_bulto, camara_texto, tvu_promesa, ventas_semanal, multiplo';
+          let productColumns = 'id, codigo, sku, nombre, categoria, marca, unidad_venta, unidades_por_caja, cajas_por_palet, requiere_pesaje, zona_predeterminada, es_seco, es_refrigerado, es_congelado, es_peso, tvm_dias, vida_util_dias, peso_unitario, unidad_medida_sap, unidad_compra, factor_unidad, factor_inventario, usa_control_tara, peso_tara_caja_std, peso_tara_pallet_std, foto_uno, foto_dos, extranjero, venta_media, ean_bulto, camara_texto, tvu_promesa, ventas_semanal, multiplo, costo';
 
           while (hasMore) {
               let { data, error } = await supabase
@@ -593,10 +594,31 @@ const App: React.FC = () => {
                 .range(from, to);
               
               if (error) {
-                  // Fallback in case 'multiplo' column is not yet present on products table
-                  if (error.message && error.message.includes('multiplo')) {
+                  // Fallback in case 'costo' or 'multiplo' columns are not yet present on products table
+                  if (error.message && error.message.includes('costo')) {
+                      console.warn("Column 'costo' not found in database. Retrying query without it.");
+                      productColumns = productColumns.replace(', costo', '');
+                      let retryResult = await supabase
+                        .from('productos')
+                        .select(productColumns)
+                        .range(from, to);
+                      if (retryResult.error && retryResult.error.message && retryResult.error.message.includes('multiplo')) {
+                          console.warn("Column 'multiplo' not found either. Retrying query without both.");
+                          productColumns = productColumns.replace(', multiplo', '');
+                          const secondRetry = await supabase
+                            .from('productos')
+                            .select(productColumns)
+                            .range(from, to);
+                          if (secondRetry.error) throw secondRetry.error;
+                          data = secondRetry.data;
+                      } else if (retryResult.error) {
+                          throw retryResult.error;
+                      } else {
+                          data = retryResult.data;
+                      }
+                  } else if (error.message && error.message.includes('multiplo')) {
                       console.warn("Column 'multiplo' not found in database. Retrying query without it.");
-                      productColumns = 'id, codigo, sku, nombre, categoria, marca, unidad_venta, unidades_por_caja, cajas_por_palet, requiere_pesaje, zona_predeterminada, es_seco, es_refrigerado, es_congelado, es_peso, tvm_dias, vida_util_dias, peso_unitario, unidad_medida_sap, unidad_compra, factor_unidad, factor_inventario, usa_control_tara, peso_tara_caja_std, peso_tara_pallet_std, foto_uno, foto_dos, extranjero, venta_media, ean_bulto, camara_texto, tvu_promesa, ventas_semanal';
+                      productColumns = productColumns.replace(', multiplo', '');
                       const retryResult = await supabase
                         .from('productos')
                         .select(productColumns)
@@ -611,7 +633,8 @@ const App: React.FC = () => {
               if (data && data.length > 0) {
                   const mapped = data.map((p: any) => ({
                       ...p,
-                      multiplo: p.multiplo !== undefined ? p.multiplo : null
+                      multiplo: p.multiplo !== undefined ? p.multiplo : null,
+                      costo: p.costo !== undefined ? p.costo : null
                   }));
                   allProducts = [...allProducts, ...mapped];
                   if (data.length < pageSize) hasMore = false;
@@ -1661,6 +1684,7 @@ const App: React.FC = () => {
       label: '🔍 CONTROL E INVENTARIO',
       items: [
         { view: ViewState.INVENTORY, icon: <ClipboardList className="w-5 h-5" />, label: "Inventario" },
+        { view: ViewState.EXPIRATIONS, icon: <Clock className="w-5 h-5 text-rose-600 dark:text-rose-450" />, label: "Vencimientos" },
         { view: ViewState.LAYOUT, icon: <LayoutGrid className="w-5 h-5" />, label: "Mapa Almacén" },
         { view: ViewState.CONCILIATION, icon: <Scale className="w-5 h-5" />, label: "Conciliación" },
         { view: ViewState.DIFFERENCE_HISTORY, icon: <HistoryIcon className="w-5 h-5" />, label: "Historial Diferencias" },
@@ -2155,6 +2179,7 @@ const App: React.FC = () => {
                     {view === ViewState.REVERSE_LOGISTICS && <ReverseLogistics currentUser={currentUser} catalog={catalog} onRefreshCatalog={loadInitialData} />}
                     {view === ViewState.CORTES && <Cortes catalog={catalog} currentUser={currentUser} />}
                     {view === ViewState.INVENTORY && <InventoryList inventory={inventory} onUpdateItem={handleUpdateItem} catalog={catalog} onSaveStocktake={handleSaveStocktake} currentUser={currentUser} />}
+                    {view === ViewState.EXPIRATIONS && <Expirations catalog={catalog} currentUser={currentUser} />}
                     {view === ViewState.MONITOR && <Monitor />}
                     {view === ViewState.METRICS && <Metrics />}
                     {view === ViewState.COUNT_HISTORY && <CountHistory />}
