@@ -1232,12 +1232,10 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
           return;
       }
 
-      // Foto obligatoria para productos pesables (KGM)
-      if (activeItemPicking.unidad_medida?.toUpperCase() === 'KGM' || activeItemPicking.unidad_medida?.toUpperCase() === 'KG') {
-          if (pickPhotos.length === 0) {
-              showAlert("La foto es obligatoria para productos pesables (KGM)", "Foto Requerida", "warning");
-              return;
-          }
+      // Foto obligatoria para todo registro de despacho
+      if (pickPhotos.length === 0) {
+          showAlert("La foto de evidencia es obligatoria", "Foto Requerida", "warning");
+          return;
       }
 
       // TVU Validation
@@ -2473,7 +2471,9 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
                             {/* Section 6: Photos */}
                             <div className="space-y-4 pt-5 border-t border-slate-100 dark:border-slate-800">
                                 <div className="flex justify-between items-center">
-                                    <h3 className="text-[10px] font-bold text-slate-900 dark:text-white uppercase tracking-widest">Evidencia Fotográfica</h3>
+                                    <h3 className="text-[10px] font-bold text-slate-900 dark:text-white uppercase tracking-widest flex items-center gap-1">
+                                        Evidencia Fotográfica <span className="text-red-500 font-bold">*</span>
+                                    </h3>
                                     <span className="text-[9px] font-bold text-slate-400 uppercase">{pickPhotos.length}/4</span>
                                 </div>
                                 

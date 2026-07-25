@@ -196,8 +196,13 @@ const Samples: React.FC<SamplesProps> = ({ currentUser }) => {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (hasExpirationDate && (!selDay || !selMonth || !selYear)) {
-      alert("Por favor complete la fecha de vencimiento o desmarque la opción.");
+    if (!hasExpirationDate || !selDay || !selMonth || !selYear) {
+      alert("La fecha de vencimiento es obligatoria.");
+      return;
+    }
+
+    if (photos.length === 0) {
+      alert("La foto de la muestra es obligatoria.");
       return;
     }
 
@@ -742,60 +747,46 @@ const Samples: React.FC<SamplesProps> = ({ currentUser }) => {
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
                   <div className="flex items-center justify-between">
-                    <label className="text-[10px] font-bold text-gray-500 uppercase">Vencimiento</label>
-                    <div className="flex items-center gap-1">
-                      <input 
-                        type="checkbox" 
-                        id="hasExp" 
-                        checked={hasExpirationDate} 
-                        onChange={e => setHasExpirationDate(e.target.checked)}
-                        className="w-3 h-3"
-                      />
-                      <label htmlFor="hasExp" className="text-[9px] font-bold text-blue-600 uppercase cursor-pointer">¿Tiene fecha?</label>
-                    </div>
+                    <label className="text-[10px] font-bold text-gray-500 uppercase flex items-center gap-1">
+                      Vencimiento <span className="text-red-500 font-bold">*</span>
+                    </label>
                   </div>
-                  {hasExpirationDate ? (
-                    <>
-                      <div className="flex gap-2">
-                        <select 
-                          value={selDay} 
-                          onChange={e => setSelDay(e.target.value)}
-                          className="flex-1 p-2 border rounded-lg outline-none focus:border-blue-500 bg-white text-sm font-bold"
-                        >
-                          <option value="">DÍA</option>
-                          {Array.from({length: 31}, (_, i) => (i + 1).toString().padStart(2, '0')).map(d => (
-                            <option key={d} value={d}>{d}</option>
-                          ))}
-                        </select>
-                        <select 
-                          value={selMonth} 
-                          onChange={e => setSelMonth(e.target.value)}
-                          className="flex-[2] p-2 border rounded-lg outline-none focus:border-blue-500 bg-white text-sm font-bold"
-                        >
-                          <option value="">MES</option>
-                          {months.map(m => (
-                            <option key={m.v} value={m.v}>{m.l}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="flex flex-wrap gap-1 mt-2">
-                        {years.map(y => (
-                          <button
-                            key={y}
-                            type="button"
-                            onClick={() => setSelYear(y)}
-                            className={`flex-1 py-1.5 px-1 rounded text-[11px] font-black border transition-all ${selYear === y ? 'bg-blue-600 text-white border-blue-600 shadow-md scale-105' : 'bg-gray-100 text-gray-600 border-gray-300'}`}
-                          >
-                            {y}
-                          </button>
-                        ))}
-                      </div>
-                    </>
-                  ) : (
-                    <div className="p-3 bg-gray-50 border border-dashed border-gray-200 rounded-lg text-center">
-                      <span className="text-[10px] font-black text-gray-400 uppercase italic">Sin fecha de vencimiento</span>
-                    </div>
-                  )}
+                  <div className="flex gap-2">
+                    <select 
+                      required
+                      value={selDay} 
+                      onChange={e => setSelDay(e.target.value)}
+                      className="flex-1 p-2 border rounded-lg outline-none focus:border-blue-500 bg-white text-sm font-bold"
+                    >
+                      <option value="">DÍA</option>
+                      {Array.from({length: 31}, (_, i) => (i + 1).toString().padStart(2, '0')).map(d => (
+                        <option key={d} value={d}>{d}</option>
+                      ))}
+                    </select>
+                    <select 
+                      required
+                      value={selMonth} 
+                      onChange={e => setSelMonth(e.target.value)}
+                      className="flex-[2] p-2 border rounded-lg outline-none focus:border-blue-500 bg-white text-sm font-bold"
+                    >
+                      <option value="">MES</option>
+                      {months.map(m => (
+                        <option key={m.v} value={m.v}>{m.l}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {years.map(y => (
+                      <button
+                        key={y}
+                        type="button"
+                        onClick={() => setSelYear(y)}
+                        className={`flex-1 py-1.5 px-1 rounded text-[11px] font-black border transition-all ${selYear === y ? 'bg-blue-600 text-white border-blue-600 shadow-md scale-105' : 'bg-gray-100 text-gray-600 border-gray-300'}`}
+                      >
+                        {y}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-gray-500 uppercase">Área Solicitada</label>
@@ -832,7 +823,9 @@ const Samples: React.FC<SamplesProps> = ({ currentUser }) => {
               </div>
 
               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-gray-500 uppercase">Fotos de la Muestra ({photos.length}/2)</label>
+                <label className="text-[10px] font-bold text-gray-500 uppercase flex items-center gap-1">
+                  Fotos de la Muestra ({photos.length}/2) <span className="text-red-500 font-bold">*</span>
+                </label>
                 <div className="flex gap-4">
                   {photoPreviews.map((p, i) => (
                     <div key={i} className="relative w-20 h-20 border rounded-lg overflow-hidden group">

@@ -91,7 +91,7 @@ export const Expirations: React.FC<ExpirationsProps> = ({ catalog, currentUser }
       // 1. Obtener recepciones activas
       let recQuery = supabase
         .from('recepcion_productos')
-        .select('id, codigo, nombre, cantidad, fecha_vencimiento, fecha_registro, usuario_receptor')
+        .select('*')
         .eq('estado', 'ACTIVO');
 
       if (currentUser?.sede_id) {
@@ -104,7 +104,7 @@ export const Expirations: React.FC<ExpirationsProps> = ({ catalog, currentUser }
       // 2. Obtener conteos de inventario
       let countQuery = supabase
         .from('conteo_inventario')
-        .select('id, codigo, cantidad, fecha_vencimiento, fecha_registro, usuario_conteo, comentario');
+        .select('*');
 
       if (currentUser?.sede_id) {
         countQuery = countQuery.eq('sede_id', currentUser.sede_id);
@@ -152,7 +152,7 @@ export const Expirations: React.FC<ExpirationsProps> = ({ catalog, currentUser }
           fecha: r.fecha_registro,
           source: 'RECEPCION',
           cantidad: r.cantidad,
-          usuario: r.usuario_receptor || 'Receptor'
+          usuario: r.usuario_receptor || r.usuario_registro || r.usuario || 'Receptor'
         });
       });
 
@@ -189,8 +189,8 @@ export const Expirations: React.FC<ExpirationsProps> = ({ catalog, currentUser }
           fecha: c.fecha_registro,
           source: 'INVENTARIO',
           cantidad: c.cantidad,
-          usuario: c.usuario_conteo || 'Inventariador',
-          comentario: c.comentario
+          usuario: c.usuario_registro || c.usuario_conteo || c.usuario || 'Inventariador',
+          comentario: c.comentario || c.observacion || c.observaciones || ''
         });
       });
 

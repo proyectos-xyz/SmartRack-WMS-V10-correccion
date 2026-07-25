@@ -354,15 +354,10 @@ const InventoryList: React.FC<InventoryListProps> = ({
         daysAgo30.setDate(daysAgo30.getDate() - 30);
         const daysAgo30Str = daysAgo30.toISOString();
 
-        const ninetyDaysFromNow = new Date(today);
-        ninetyDaysFromNow.setDate(ninetyDaysFromNow.getDate() + 90);
-        ninetyDaysFromNow.setHours(23, 59, 59, 999);
-        const ninetyDaysStr = ninetyDaysFromNow.toISOString().split('T')[0];
-
-        // 1. Fetch from conteo_inventario - filtering out nulls, empties, N/A and placeholders on DB directly
+        // 1. Fetch from conteo_inventario
         let query = supabase
             .from('conteo_inventario')
-            .select('id, producto_id, codigo, nombre, cantidad, fecha_vencimiento, zona, accion, cantidad_accion, usuario_registro, fecha_registro, sede_id')
+            .select('*')
             .not('fecha_vencimiento', 'is', null)
             .neq('fecha_vencimiento', '')
             .neq('fecha_vencimiento', 'N/A')
@@ -370,9 +365,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
             .neq('fecha_vencimiento', 'REMAR')
             .neq('fecha_vencimiento', 'VENTA_PERSONAL')
             .neq('fecha_vencimiento', 'DESTRUCCION')
-            .or('accion.is.null,accion.eq.""') // Only show pending actions
-            .gte('fecha_registro', daysAgo30Str) // Registered in last 30 days
-            .lte('fecha_vencimiento', ninetyDaysStr); // Expiring within 90 days
+            .gte('fecha_registro', daysAgo30Str);
 
         if (currentUser?.sede_id) {
             query = query.eq('sede_id', currentUser.sede_id);
@@ -384,20 +377,19 @@ const InventoryList: React.FC<InventoryListProps> = ({
         if (error) throw error;
 
         const conteoFiltered = (data || []).filter(record => {
-            // Filter out non-date statuses in JS to avoid Supabase query errors
-            if (['ROTO', 'VENTA_PERSONAL','REMAR', 'DESTRUCCION'].includes(record.fecha_vencimiento)) return false;
+            if (!record.fecha_vencimiento || ['ROTO', 'VENTA_PERSONAL', 'REMAR', 'DESTRUCCION', 'N/A', ''].includes(record.fecha_vencimiento)) return false;
             
-            // Filter out items where action is 'vendido', 'vencido' or 'merma' (per user request)
+            // Filter out items where action is already processed ('vendido', 'vencido', 'merma', etc.)
             if (record.accion) {
                 const actionLower = record.accion.toLowerCase().trim();
-                if (['vendido', 'vencido', 'merma'].includes(actionLower)) return false;
+                if (actionLower !== '' && ['vendido', 'vencido', 'merma'].includes(actionLower)) return false;
             }
 
             let exp = parseDate(record.fecha_vencimiento);
             if (!exp) return false;
             
             const diffDays = Math.ceil((exp.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-            // Show if expired or expiring in next 90 days (per user request)
+            // Show if expired or expiring in next 90 days
             return diffDays <= 90;
         });
 

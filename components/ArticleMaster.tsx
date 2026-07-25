@@ -14,6 +14,18 @@ interface ArticleMasterProps {
   maintenanceMode?: boolean;
 }
 
+const extractMissingColumnName = (error: any): string | null => {
+  if (!error) return null;
+  const msg = typeof error === 'string' ? error : (error.message || error.details || error.hint || '');
+  const match = 
+    msg.match(/column ['"]?([a-zA-Z0-9_]+)['"]? (?:of|in|does not exist)/i) ||
+    msg.match(/column ['"]([a-zA-Z0-9_]+)['"]/i) ||
+    msg.match(/Could not find the ['"]?([a-zA-Z0-9_]+)['"]? column/i) ||
+    msg.match(/['"]([a-zA-Z0-9_]+)['"] column/i) ||
+    msg.match(/schema cache.*['"]([a-zA-Z0-9_]+)['"]/i);
+  return match ? match[1] : null;
+};
+
 const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog, userRole, maintenanceMode = false }) => {
   const [activeTab, setActiveTab] = useState<'LIST' | 'IMPORT'>('LIST');
   const [searchTerm, setSearchTerm] = useState('');
@@ -137,49 +149,49 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
     } as Product;
 
     try {
-        let { error } = await supabase
-            .from('productos')
-            .update(productToSave)
-            .eq('id', productToSave.id);
+        let currentToSave = { ...productToSave };
+        let attempts = 0;
+        let success = false;
+        let lastError = null;
+        let removedCols: string[] = [];
 
-        if (error) {
-            // Si la columna 'multiplo' o cualquier otra no existe en la BD o cache de Supabase, intentamos omitirla
-            if (error.code === 'PGRST204') {
-                console.warn("Columna no encontrada en cache de Supabase (PGRST204). Reintentando sin la columna conflictiva...");
-                const match = error.message.match(/column '([^']+)' of/i) || error.message.match(/column "([^"]+)" of/i);
-                const missingColumn = match ? match[1] : 'multiplo'; // Fallback a multiplo si no se parsea
-                
-                if (missingColumn && missingColumn in productToSave) {
-                    const cleanedProduct = { ...productToSave };
-                    delete (cleanedProduct as any)[missingColumn];
-                    
-                    const retryResult = await supabase
-                        .from('productos')
-                        .update(cleanedProduct)
-                        .eq('id', cleanedProduct.id);
-                        
-                    if (!retryResult.error) {
-                        onUpdateCatalog(catalog.map(p => p.id === productToSave.id ? productToSave : p));
-                        setEditingProduct(null);
-                        setImportStatus({ 
-                            msg: `Producto actualizado (Se omitió temporalmente '${missingColumn}' en BD por falta de columna o cache).`, 
-                            type: 'success' 
-                        });
-                        setTimeout(() => setImportStatus(null), 5000);
-                        return;
-                    } else {
-                        throw retryResult.error;
-                    }
-                }
+        while (attempts < 15 && !success) {
+            let { error } = await supabase
+                .from('productos')
+                .update(currentToSave)
+                .eq('id', currentToSave.id);
+
+            if (!error) {
+                success = true;
+                break;
             }
-            throw error;
+
+            lastError = error;
+            const missingColumn = extractMissingColumnName(error);
+            if (missingColumn && missingColumn in currentToSave) {
+                console.warn(`Columna '${missingColumn}' no existe en productos. Omitiendo y reintentando...`);
+                delete (currentToSave as any)[missingColumn];
+                removedCols.push(missingColumn);
+                attempts++;
+            } else {
+                break;
+            }
+        }
+
+        if (!success && lastError) {
+            throw lastError;
         }
 
         // Actualizar catálogo local inmediatamente
         onUpdateCatalog(catalog.map(p => p.id === productToSave.id ? productToSave : p));
         setEditingProduct(null);
-        setImportStatus({ msg: 'Producto actualizado correctamente.', type: 'success' });
-        setTimeout(() => setImportStatus(null), 3000);
+        setImportStatus({ 
+            msg: removedCols.length > 0 
+                ? `Producto actualizado (Se omitieron campos no existentes en BD: ${removedCols.join(', ')}).` 
+                : 'Producto actualizado correctamente.', 
+            type: 'success' 
+        });
+        setTimeout(() => setImportStatus(null), 4000);
     } catch (err: any) {
         console.error("Error updating product:", err);
         setImportStatus({ msg: `Error al actualizar producto: ${err.message}`, type: 'error' });
@@ -205,32 +217,39 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
             es_congelado: newProduct.zona_predeterminada === 'CONGELADO',
         } as Product;
 
-        let insertResult = await supabase
-            .from('productos')
-            .insert([productToSave])
-            .select();
+        let currentToSave = { ...productToSave };
+        let attempts = 0;
+        let insertData: any = null;
+        let lastError: any = null;
+        let removedCols: string[] = [];
 
-        if (insertResult.error && insertResult.error.code === 'PGRST204') {
-            console.warn("Columna no encontrada al insertar (PGRST204). Reintentando sin la columna conflictiva...");
-            const match = insertResult.error.message.match(/column '([^']+)' of/i) || insertResult.error.message.match(/column "([^"]+)" of/i);
-            const missingColumn = match ? match[1] : 'multiplo';
-            
-            if (missingColumn && missingColumn in productToSave) {
-                const cleanedProduct = { ...productToSave };
-                delete (cleanedProduct as any)[missingColumn];
-                
-                insertResult = await supabase
-                    .from('productos')
-                    .insert([cleanedProduct])
-                    .select();
+        while (attempts < 15) {
+            let insertResult = await supabase
+                .from('productos')
+                .insert([currentToSave])
+                .select();
+
+            if (!insertResult.error) {
+                insertData = insertResult.data;
+                break;
+            }
+
+            lastError = insertResult.error;
+            const missingColumn = extractMissingColumnName(insertResult.error);
+            if (missingColumn && missingColumn in currentToSave) {
+                console.warn(`Columna '${missingColumn}' no existe en productos. Omitiendo y reintentando...`);
+                delete (currentToSave as any)[missingColumn];
+                removedCols.push(missingColumn);
+                attempts++;
+            } else {
+                break;
             }
         }
 
-        if (insertResult.error) throw insertResult.error;
+        if (lastError && !insertData) throw lastError;
 
-        const data = insertResult.data;
-        if (data) {
-            onUpdateCatalog([data[0], ...catalog]);
+        if (insertData) {
+            onUpdateCatalog([{ ...productToSave, ...insertData[0] }, ...catalog]);
             setShowAddModal(false);
             setNewProduct({
                 codigo: '',
@@ -727,14 +746,40 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
                       }
                   }
 
-                  const { data: dbData, error } = await supabase
-                    .from('productos')
-                    .upsert(finalChunk, { onConflict: 'codigo' })
-                    .select();
-                  
-                  if (error) {
-                      console.error(`Error en bloque ${i + 1}:`, error);
-                      throw error;
+                  let currentChunk = [...finalChunk];
+                  let chunkAttempts = 0;
+                  let dbData: any = null;
+                  let chunkError: any = null;
+
+                  while (chunkAttempts < 15) {
+                      const { data, error } = await supabase
+                        .from('productos')
+                        .upsert(currentChunk, { onConflict: 'codigo' })
+                        .select();
+
+                      if (!error) {
+                          dbData = data;
+                          break;
+                      }
+
+                      chunkError = error;
+                      const missingCol = extractMissingColumnName(error);
+                      if (missingCol) {
+                          console.warn(`Omitiendo columna inexistente '${missingCol}' en bloque de importación...`);
+                          currentChunk = currentChunk.map(item => {
+                              const cleaned = { ...item };
+                              delete (cleaned as any)[missingCol];
+                              return cleaned;
+                          });
+                          chunkAttempts++;
+                      } else {
+                          break;
+                      }
+                  }
+
+                  if (chunkError && !dbData) {
+                      console.error(`Error en bloque ${i + 1}:`, chunkError);
+                      throw chunkError;
                   }
                   
                   if (dbData) insertedProducts.push(...(dbData as Product[]));
