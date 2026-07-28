@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { InventoryItem, Product, ZoneType, StocktakeRecord, Usuario, SystemStock } from '../types';
 import { BarChart as RechartsBarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LineChart, Line, Legend } from 'recharts';
-import { Search, AlertTriangle, Camera, CheckCircle, ClipboardList, PlusCircle, History, FileSpreadsheet, XCircle, Scan, ChevronLeft, ChevronRight, FileText, Calculator, Bell, Delete, RefreshCw, User, Upload, Download, BarChart3 } from './Icons';
+import { Search, AlertTriangle, Camera, CheckCircle, ClipboardList, PlusCircle, History, FileSpreadsheet, XCircle, Scan, ChevronLeft, ChevronRight, FileText, Calculator, Bell, Delete, RefreshCw, User, Upload, Download, BarChart3, X } from './Icons';
 import { supabase } from '../supabaseClient';
 import { compressImage, generateStorageFileName } from '../utils';
 import jsPDF from 'jspdf';
@@ -68,6 +68,11 @@ const InventoryList: React.FC<InventoryListProps> = ({
   const [isDownloading, setIsDownloading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadSuccess, setUploadSuccess] = useState(false);
+
+  // Custom Report Modal State
+  const [showReportProductModal, setShowReportProductModal] = useState(false);
+  const [reportProductSearch, setReportProductSearch] = useState('');
+  const [selectedReportProductCodes, setSelectedReportProductCodes] = useState<string[]>([]);
 
   // Calculator State
   const [showCalculator, setShowCalculator] = useState(false);
@@ -1344,6 +1349,175 @@ const InventoryList: React.FC<InventoryListProps> = ({
     }
   };
 
+  const handleDownloadCustomMatrixPDF = async () => {
+    if (selectedReportProductCodes.length === 0) {
+      alert("Debe seleccionar al menos un producto para el reporte.");
+      return;
+    }
+    setIsDownloading(true);
+    try {
+        // 1. Fetch records
+        let query = supabase
+            .from('conteo_inventario')
+            .select('*')
+            .gte('fecha_registro', `${downloadStartDate}T00:00:00`)
+            .lte('fecha_registro', `${downloadEndDate}T23:59:59`);
+
+        if (currentUser?.sede_id) {
+            query = query.eq('sede_id', currentUser.sede_id);
+        }
+
+        const { data, error } = await query
+            .order('fecha_registro', { ascending: true });
+
+        if (error) throw error;
+        if (!data || data.length === 0) {
+            alert("No se encontraron registros en el rango seleccionado.");
+            return;
+        }
+
+        // 2. Filter by selected product codes
+        const selectedSet = new Set(selectedReportProductCodes);
+        const filteredRecords = data.filter(record => selectedSet.has(record.codigo));
+
+        if (filteredRecords.length === 0) {
+            alert("No se encontraron registros de los productos seleccionados en este rango.");
+            return;
+        }
+
+        // 3. Group by product for Matrix format
+        const matrix: Record<string, Record<string, number>> = {};
+        const productInfo: Record<string, { nombre: string, um: string }> = {};
+
+        filteredRecords.forEach(record => {
+            const code = record.codigo;
+            const expDate = record.fecha_vencimiento || 'SIN FECHA';
+            
+            if (!matrix[code]) {
+                matrix[code] = {};
+                const product = catalog.find(p => p.codigo === code);
+                productInfo[code] = { 
+                    nombre: record.nombre || product?.nombre || code,
+                    um: product?.unidad_medida_sap || product?.unidad_venta || 'UND'
+                };
+            }
+            matrix[code][expDate] = (matrix[code][expDate] || 0) + record.cantidad;
+        });
+
+        // 4. Generate PDF
+        const doc = new jsPDF('l', 'mm', 'a4');
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const pageHeight = doc.internal.pageSize.getHeight();
+
+        const addHeader = (pageNum: number) => {
+            doc.setFontSize(20);
+            doc.setFont('helvetica', 'bold');
+            doc.setTextColor(0, 0, 0);
+            doc.text('CONTROL DE FECHAS DE VENCIMIENTO - ICO', pageWidth / 2, 15, { align: 'center' });
+            
+            doc.setFontSize(12);
+            doc.setFont('helvetica', 'normal');
+            const operario = currentUser?.nombre || 'SISTEMA';
+            const now = new Date().toLocaleString();
+            doc.text(`Operario: ${operario} - ${now}`, pageWidth / 2, 22, { align: 'center' });
+            
+            doc.setFontSize(9);
+            doc.setTextColor(150, 150, 150);
+            doc.text(`Página ${pageNum}`, pageWidth - 20, 10);
+        };
+
+        const addFooter = () => {
+            doc.setFontSize(9);
+            doc.setFont('helvetica', 'italic');
+            doc.setTextColor(100, 100, 100);
+            doc.text('impreso desde logistic-pro', pageWidth / 2, pageHeight - 8, { align: 'center' });
+        };
+
+        // Prepare all rows
+        const allRows: any[] = [];
+        const sortedCodes = Object.keys(matrix).sort();
+        
+        for (const code of sortedCodes) {
+            const info = productInfo[code];
+            const dates = matrix[code];
+            const sortedDates = Object.keys(dates).sort();
+            
+            const row = [
+                code,
+                info.nombre.toUpperCase(),
+            ];
+
+            // Add up to 5 date/qty pairs
+            for (let i = 0; i < 5; i++) {
+                if (sortedDates[i]) {
+                    const d = sortedDates[i];
+                    let displayDate = d;
+                    if (d !== 'SIN FECHA' && d.includes('-')) {
+                        const [y, m, d_] = d.split('-');
+                        displayDate = `${d_}/${m}/${y}`;
+                    }
+                    const qty = dates[d];
+                    row.push(`${displayDate}\n(${qty.toFixed(2)} ${info.um})`);
+                } else {
+                    row.push('');
+                }
+            }
+            allRows.push(row);
+        }
+
+        // Split into pages of 5 products
+        const productsPerPage = 5;
+        for (let i = 0; i < allRows.length; i += productsPerPage) {
+            if (i > 0) doc.addPage();
+            
+            const pageNum = Math.floor(i / productsPerPage) + 1;
+            addHeader(pageNum);
+            
+            const pageRows = allRows.slice(i, i + productsPerPage);
+            
+            autoTable(doc, {
+                startY: 30,
+                head: [['COD', 'PRODUCTO', 'VENC. 1', 'VENC. 2', 'VENC. 3', 'VENC. 4', 'VENC. 5']],
+                body: pageRows,
+                theme: 'grid',
+                headStyles: {
+                    fillColor: [0, 158, 214],
+                    textColor: 255,
+                    fontSize: 11,
+                    fontStyle: 'bold',
+                    halign: 'center',
+                    valign: 'middle',
+                    cellPadding: 3
+                },
+                bodyStyles: {
+                    fontSize: 11,
+                    fontStyle: 'bold',
+                    halign: 'center',
+                    valign: 'middle',
+                    cellPadding: 4,
+                    textColor: 50
+                },
+                columnStyles: {
+                    0: { cellWidth: 25, fontSize: 10 },
+                    1: { cellWidth: 75, halign: 'left', fontSize: 10 },
+                },
+                margin: { top: 30, bottom: 15 },
+                didDrawPage: () => {
+                    addFooter();
+                }
+            });
+        }
+        
+        doc.save(`reporte_matriz_productos_${downloadStartDate}.pdf`);
+        setShowReportProductModal(false);
+        setShowDownloadModal(false);
+    } catch (err: any) {
+        alert("Error al generar reporte PDF: " + err.message);
+    } finally {
+        setIsDownloading(false);
+    }
+  };
+
   const handleDownloadEggPDF = async () => {
     setIsDownloading(true);
     try {
@@ -1508,131 +1682,6 @@ const InventoryList: React.FC<InventoryListProps> = ({
     } finally {
         setIsDownloading(false);
     }
-  };
-
-  const handleDownloadPDF = async () => {
-    setIsDownloading(true);
-    try {
-        let query = supabase
-            .from('conteo_inventario')
-            .select('*')
-            .gte('fecha_registro', `${downloadStartDate}T00:00:00`)
-            .lte('fecha_registro', `${downloadEndDate}T23:59:59`);
-
-        if (currentUser?.sede_id) {
-            query = query.eq('sede_id', currentUser.sede_id);
-        }
-
-        const { data, error } = await query
-            .order('fecha_registro', { ascending: false });
-
-        if (error) throw error;
-        if (!data || data.length === 0) {
-            alert("No se encontraron registros.");
-            return;
-        }
-
-        const bodyRows: any[] = [];
-        for (const record of data) {
-            const dateObj = new Date(record.fecha_registro);
-            const product = catalog.find(p => p.id === record.producto_id || p.codigo === record.codigo);
-            const unidadMedida = product?.unidad_medida_sap || product?.unidad_venta || 'UND';
-            
-            // Calculate expiration status
-            const expStatus = getExpirationStatus(record.fecha_vencimiento);
-            const diasRestantes = expStatus.days === 999 ? 'N/A' : expStatus.days;
-            const estadoVencimiento = expStatus.status === 'EXPIRED' ? 'VENCIDO' : (expStatus.status === 'WARNING' ? 'POR VENCER' : 'OK');
-
-            bodyRows.push({
-                fecha: dateObj.toLocaleDateString(),
-                hora: dateObj.toLocaleTimeString(),
-                codigo: record.codigo,
-                producto: record.nombre,
-                um: unidadMedida,
-                cant: Number(record.cantidad).toFixed(2),
-                vencimiento: record.fecha_vencimiento || 'N/A',
-                dias: diasRestantes,
-                estado: estadoVencimiento,
-                accion: record.accion || '-',
-                cant_accion: Number(record.cantidad_accion || 0).toFixed(2),
-                usuario: record.usuario_registro,
-                fotos: record.fotos || []
-            });
-        }
-
-        // Pre-fetch images
-        const imageMap = new Map();
-        for (const row of bodyRows) {
-            if (row.fotos && row.fotos.length > 0) {
-                try {
-                    const url = row.fotos[0];
-                    const base64 = await getBase64Image(url);
-                    imageMap.set(url, base64);
-                } catch (e) {
-                    console.error("Error loading image", e);
-                }
-            }
-        }
-
-        const reportDoc = new jsPDF('l', 'mm', 'a4');
-        reportDoc.setFontSize(16);
-        reportDoc.text('REPORTE DE CONTEO DE INVENTARIO', 14, 15);
-        reportDoc.setFontSize(10);
-        reportDoc.text(`Generado el: ${new Date().toLocaleString()}`, 14, 22);
-        reportDoc.text(`Rango: ${downloadStartDate} al ${downloadEndDate}`, 14, 27);
-
-        autoTable(reportDoc, {
-            startY: 35,
-            head: [['FECHA', 'HORA', 'CODIGO', 'PRODUCTO', 'U.M', 'CANT', 'VENC.', 'DIAS', 'ESTADO', 'ACCION', 'C. ACCION', 'FOTO', 'USUARIO']],
-            body: bodyRows.map(r => [r.fecha, r.hora, r.codigo, r.producto, r.um, r.cant, r.vencimiento, r.dias, r.estado, r.accion, r.cant_accion, '', r.usuario]),
-            theme: 'grid',
-            styles: { fontSize: 6, valign: 'middle' },
-            columnStyles: {
-                3: { cellWidth: 35 },
-                11: { cellWidth: 25, minCellHeight: 20 }
-            },
-            didDrawCell: (dataCell) => {
-                if (dataCell.section === 'body' && dataCell.column.index === 11) {
-                    const rowIndex = dataCell.row.index;
-                    const rowData = bodyRows[rowIndex];
-                    if (rowData.fotos && rowData.fotos.length > 0) {
-                        const base64 = imageMap.get(rowData.fotos[0]);
-                        if (base64) {
-                            const x = dataCell.cell.x + 2;
-                            const y = dataCell.cell.y + 2;
-                            const w = dataCell.cell.width - 4;
-                            const h = dataCell.cell.height - 4;
-                            reportDoc.addImage(base64, 'JPEG', x, y, w, h);
-                        }
-                    }
-                }
-            }
-        });
-
-        reportDoc.save(`reporte_inventario_${downloadStartDate}_${downloadEndDate}.pdf`);
-        setShowDownloadModal(false);
-    } catch (err: any) {
-        alert("Error al generar PDF: " + err.message);
-    } finally {
-        setIsDownloading(false);
-    }
-  };
-
-  const getBase64Image = (url: string): Promise<string> => {
-    return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.setAttribute('crossOrigin', 'anonymous');
-        img.onload = () => {
-            const canvas = document.createElement('canvas');
-            canvas.width = img.width;
-            canvas.height = img.height;
-            const ctx = canvas.getContext('2d');
-            ctx?.drawImage(img, 0, 0);
-            resolve(canvas.toDataURL('image/jpeg', 0.7));
-        };
-        img.onerror = reject;
-        img.src = url;
-    });
   };
 
   const handleExportInventory = () => {
@@ -3250,12 +3299,12 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                 Excel Matriz
                             </button>
                             <button 
-                                onClick={handleDownloadPDF}
+                                onClick={() => setShowReportProductModal(true)}
                                 disabled={isDownloading}
-                                className="bg-red-600 hover:bg-red-700 text-white px-4 py-3 rounded-xl font-bold shadow-lg shadow-red-200 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                                className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-3 rounded-xl font-bold shadow-lg shadow-purple-200 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
                             >
                                 <FileText className="w-5 h-5"/>
-                                PDF
+                                REPORTE
                             </button>
                             <button 
                                 onClick={handleDownloadEggPDF}
@@ -3271,6 +3320,133 @@ const InventoryList: React.FC<InventoryListProps> = ({
                             className="w-full px-6 py-2 rounded-xl font-bold text-gray-400 hover:text-gray-600 transition-colors text-sm"
                         >
                             Cancelar
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* Custom Report Product Selection Modal */}
+        {showReportProductModal && (
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-[110] animate-fade-in">
+                <div className="bg-white rounded-3xl max-w-2xl w-full overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+                    <div className="p-6 bg-gradient-to-r from-purple-600 to-indigo-700 text-white flex justify-between items-center">
+                        <div className="flex items-center gap-3">
+                            <div className="p-2.5 bg-white/10 rounded-2xl">
+                                <FileText className="w-6 h-6 text-white"/>
+                            </div>
+                            <div>
+                                <h3 className="font-extrabold text-lg">Seleccionar Productos para Reporte</h3>
+                                <p className="text-purple-100 text-xs">Elija los productos para la matriz de vencimientos</p>
+                            </div>
+                        </div>
+                        <button 
+                            onClick={() => setShowReportProductModal(false)}
+                            className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                        >
+                            <X className="w-5 h-5"/>
+                        </button>
+                    </div>
+
+                    <div className="p-6 space-y-4 flex-1 overflow-hidden flex flex-col">
+                        <div className="flex flex-col sm:flex-row gap-2 justify-between items-stretch sm:items-center">
+                            <div className="relative flex-1">
+                                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                                <input
+                                    type="text"
+                                    placeholder="Buscar producto por código o nombre..."
+                                    value={reportProductSearch}
+                                    onChange={(e) => setReportProductSearch(e.target.value)}
+                                    className="w-full pl-9 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-medium outline-none focus:border-purple-500"
+                                />
+                            </div>
+                            <div className="flex items-center gap-2 text-xs">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        const filtered = catalog.filter(p => 
+                                            !reportProductSearch ||
+                                            p.codigo?.toLowerCase().includes(reportProductSearch.toLowerCase()) ||
+                                            p.nombre?.toLowerCase().includes(reportProductSearch.toLowerCase())
+                                        );
+                                        setSelectedReportProductCodes(Array.from(new Set([...selectedReportProductCodes, ...filtered.map(p => p.codigo)])));
+                                    }}
+                                    className="px-3 py-1.5 bg-purple-50 text-purple-700 font-bold rounded-lg hover:bg-purple-100 transition-colors"
+                                >
+                                    Marcar todos
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setSelectedReportProductCodes([])}
+                                    className="px-3 py-1.5 bg-gray-100 text-gray-600 font-bold rounded-lg hover:bg-gray-200 transition-colors"
+                                >
+                                    Desmarcar todos
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="text-xs text-gray-500 font-bold flex justify-between items-center px-1">
+                            <span>Productos seleccionados: {selectedReportProductCodes.length}</span>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto border border-gray-200 rounded-2xl p-2 space-y-1 custom-scrollbar">
+                            {catalog
+                                .filter(p => 
+                                    !reportProductSearch || 
+                                    p.codigo?.toLowerCase().includes(reportProductSearch.toLowerCase()) ||
+                                    p.nombre?.toLowerCase().includes(reportProductSearch.toLowerCase())
+                                )
+                                .map((product) => {
+                                    const isSelected = selectedReportProductCodes.includes(product.codigo);
+                                    return (
+                                        <label 
+                                            key={product.id || product.codigo} 
+                                            className={`flex items-center gap-3 p-2.5 rounded-xl cursor-pointer transition-colors ${isSelected ? 'bg-purple-50/80 border border-purple-200' : 'hover:bg-gray-50'}`}
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                checked={isSelected}
+                                                onChange={(e) => {
+                                                    if (e.target.checked) {
+                                                        setSelectedReportProductCodes(prev => [...prev, product.codigo]);
+                                                    } else {
+                                                        setSelectedReportProductCodes(prev => prev.filter(c => c !== product.codigo));
+                                                    }
+                                                }}
+                                                className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500"
+                                            />
+                                            <div className="flex-1 min-w-0 text-xs">
+                                                <div className="font-bold text-gray-900 truncate">
+                                                    <span className="text-purple-600 font-black mr-2">{product.codigo}</span>
+                                                    {product.nombre}
+                                                </div>
+                                                {product.categoria && (
+                                                    <span className="text-[10px] text-gray-400 uppercase font-medium">{product.categoria}</span>
+                                                )}
+                                            </div>
+                                        </label>
+                                    );
+                                })
+                            }
+                        </div>
+                    </div>
+
+                    <div className="p-6 border-t bg-gray-50 flex justify-end gap-3">
+                        <button 
+                            type="button"
+                            onClick={() => setShowReportProductModal(false)}
+                            className="px-5 py-2.5 rounded-xl font-bold text-gray-500 hover:text-gray-700 hover:bg-gray-200 transition-colors text-xs"
+                        >
+                            Cancelar
+                        </button>
+                        <button 
+                            type="button"
+                            onClick={handleDownloadCustomMatrixPDF}
+                            disabled={isDownloading || selectedReportProductCodes.length === 0}
+                            className="bg-purple-600 hover:bg-purple-700 text-white px-6 py-2.5 rounded-xl font-bold shadow-lg shadow-purple-200 transition-all flex items-center gap-2 text-xs disabled:opacity-50"
+                        >
+                            <FileText className="w-4 h-4" />
+                            Generar Reporte ({selectedReportProductCodes.length})
                         </button>
                     </div>
                 </div>
