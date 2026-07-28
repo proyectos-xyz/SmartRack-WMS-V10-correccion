@@ -93,12 +93,14 @@ const consolidateItems = (items: AfternoonOrder[]): AfternoonOrder[] => {
         if (groupItems.length === 1) {
             return {
                 ...groupItems[0],
+                cantidad_pedida: Math.round(((groupItems[0].cantidad_pedida || 0) + Number.EPSILON) * 100) / 100,
+                cantidad_picada: Math.round(((groupItems[0].cantidad_picada || 0) + Number.EPSILON) * 100) / 100,
                 originalOrders: groupItems
             };
         }
         const first = groupItems[0];
-        const totalPedida = groupItems.reduce((sum, item) => sum + (item.cantidad_pedida || 0), 0);
-        const totalPicada = groupItems.reduce((sum, item) => sum + (item.cantidad_picada || 0), 0);
+        const totalPedida = Math.round((groupItems.reduce((sum, item) => sum + (item.cantidad_pedida || 0), 0) + Number.EPSILON) * 100) / 100;
+        const totalPicada = Math.round((groupItems.reduce((sum, item) => sum + (item.cantidad_picada || 0), 0) + Number.EPSILON) * 100) / 100;
         const uniqueClients = Array.from(new Set(groupItems.map(item => item.cliente).filter(Boolean)));
         
         return {
@@ -112,6 +114,11 @@ const consolidateItems = (items: AfternoonOrder[]): AfternoonOrder[] => {
             originalOrders: groupItems
         };
     });
+};
+
+const formatNum = (val: number | undefined | null): string => {
+    if (val === undefined || val === null || isNaN(val)) return '0';
+    return String(Math.round((val + Number.EPSILON) * 100) / 100);
 };
 
 const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewMode }) => {
@@ -141,6 +148,9 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
     const [validadorScans, setValidadorScans] = useState<Record<string, number>>({});
     const [validadorManualEditSku, setValidadorManualEditSku] = useState<string | null>(null);
     const [validadorManualQty, setValidadorManualQty] = useState<string>('');
+    const [validadorManualPallets, setValidadorManualPallets] = useState<string>('');
+    const [validadorManualCajas, setValidadorManualCajas] = useState<string>('');
+    const [validadorManualUnidades, setValidadorManualUnidades] = useState<string>('');
     const [validadorIsFinished, setValidadorIsFinished] = useState(false);
     const [validadorToast, setValidadorToast] = useState<{ show: boolean, message: string, type: 'success' | 'error' } | null>(null);
     const [validadorLogs, setValidadorLogs] = useState<{ id: string, message: string, type: 'success' | 'warn' | 'error', timestamp: string }[]>([]);
@@ -1232,6 +1242,38 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
         }
     };
 
+    const openValidadorManualEdit = (key: string, currentQty: number) => {
+        const matchedOrder = orders.find(o => o.sku === key || o.codigo === key);
+        const prodData = catalog.find(p => p.sku === key || p.codigo === key);
+        const rtu = matchedOrder?.rtu || prodData?.unidades_por_caja || 1;
+        const cajasPorPallet = prodData?.cajas_por_palet || (matchedOrder as any)?.cajas_por_palet || (key === 'LAB001' ? 78 : 0);
+
+        let initialPallets = 0;
+        let initialCajas = 0;
+        let initialUnidades = 0;
+
+        if (currentQty > 0) {
+            if (cajasPorPallet > 0 && rtu > 0) {
+                const unitsPerPallet = cajasPorPallet * rtu;
+                initialPallets = Math.floor(currentQty / unitsPerPallet);
+                const remUnitsAfterPallets = currentQty % unitsPerPallet;
+                initialCajas = Math.floor(remUnitsAfterPallets / rtu);
+                initialUnidades = Math.round(((remUnitsAfterPallets % rtu) + Number.EPSILON) * 100) / 100;
+            } else if (rtu > 0) {
+                initialCajas = Math.floor(currentQty / rtu);
+                initialUnidades = Math.round(((currentQty % rtu) + Number.EPSILON) * 100) / 100;
+            } else {
+                initialUnidades = currentQty;
+            }
+        }
+
+        setValidadorManualEditSku(key);
+        setValidadorManualPallets(initialPallets > 0 ? String(initialPallets) : '');
+        setValidadorManualCajas(initialCajas > 0 ? String(initialCajas) : '');
+        setValidadorManualUnidades(initialUnidades > 0 ? String(initialUnidades) : '');
+        setValidadorManualQty(currentQty > 0 ? String(currentQty) : '');
+    };
+
     const handleValidadorScan = (cleanCode: string) => {
         if (!validadorSelectedPlate) {
             setValidadorToast({
@@ -1476,97 +1518,23 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
 
             if (isCaseScan || isUnitScan) {
                 setEanValidated(true);
-                const rtu = validatingOrder.rtu || 1;
-                const increment = isCaseScan ? rtu : 1;
-                const newCount = unitScanCount + increment;
-                const totalQty = validatingOrder.cantidad_pedida;
-                
-                setUnitScanCount(newCount);
-
-                // Si es PESO, INFORME, KGM o ENSAYO, no auto-completamos, esperamos el input extra para peso/vencimiento
-                const isSpecial = validatingOrder.camara.includes('PESO') || 
-                                  validatingOrder.camara.includes('INFORME') || 
-                                  validatingOrder.unidad?.toUpperCase() === 'KGM' ||
-                                  (validatingOrder.subTipo || '').toUpperCase().includes('ENSAYO') ||
-                                  (validatingOrder.categoria || '').toUpperCase().includes('ENSAYO') ||
-                                  (validatingOrder.descripcion || '').toUpperCase().includes('ENSAYO');
-
-                if (isSpecial) {
-                    setValidationState('SUCCESS');
-                    const msg = isCaseScan ? `+${rtu} CAJA VALIDADA` : 'UNIDAD VALIDADA';
-                    setLastScanMsg(msg);
-                    setToast({ show: true, message: `PRODUCTO VALIDADO (+${increment}). Ingresa datos adicionales.`, type: 'success' });
-                    setTimeout(() => setValidationState('IDLE'), 1000);
-                    return;
-                }
-
-                // Autocompletado si llega a la meta
-                if (newCount >= totalQty) {
-                    setValidationState('SUCCESS');
-                    setLastScanMsg('¡PEDIDO COMPLETADO!');
-                    logAudit({ tipo: 'VALIDACION_EXITOSA', ean_escaneado: cleanCode, order: validatingOrder });
-                    
-                    // Guardar en DB
-                    const targetOrders = (validatingOrder as any).originalOrders || [validatingOrder];
-                    const now = new Date().toISOString();
-                    const operatorName = user?.nombre || user?.username || 'OPERADOR';
-                    
-                    const updatePromises = targetOrders.map((o: any) => {
-                        if (o.id) {
-                            return supabase.from('despachos_item')
-                                .update({ 
-                                    ean_validado: true, 
-                                    cantidad_despachada: o.cantidad_pedida, 
-                                    estado: 'COMPLETADO', 
-                                    fecha_preparacion: now, 
-                                    usuario_preparacion: operatorName
-                                })
-                                .eq('id', o.id);
-                        }
-                        return Promise.resolve();
-                    });
-
-                    Promise.all(updatePromises).then(() => {
-                        setTimeout(() => {
-                            const updatedOrders = orders.map(o => {
-                                const isTarget = targetOrders.some((to: any) => to.sku === o.sku && to.documento === o.documento);
-                                if (isTarget && o.placa === validatingOrder.placa) {
-                                    return { ...o, completado: true, cantidad_picada: o.cantidad_pedida, validado: true, ean_validado: true };
-                                }
-                                return o;
-                            });
-                            setOrders(updatedOrders);
-                            processGrouping(updatedOrders);
-                            setValidatingOrder(null);
-                            setUnitScanCount(0);
-                            setValidationState('IDLE');
-                            setLastScanMsg('');
-                            setToast({ show: true, message: 'PICKING COMPLETADO ✅', type: 'success' });
-                        }, 1200); 
-                    });
-                } else {
-                    setValidationState('SUCCESS');
-                    const qtyMsg = isCaseScan ? `+${rtu} (CAJA) | ${newCount}/${totalQty}` : `${newCount}/${totalQty}`;
-                    setLastScanMsg(qtyMsg);
-                    setToast({ show: true, message: isCaseScan ? `SUMASTE UNA CAJA (+${rtu})` : `SUMASTE UNA UNIDAD`, type: 'success' });
-                    logAudit({ tipo: 'VALIDACION_EXITOSA', ean_escaneado: cleanCode, order: validatingOrder });
-                    setTimeout(() => {
-                        setValidationState('IDLE');
-                    }, 600);
-                }
+                setValidationState('SUCCESS');
+                setLastScanMsg('PRODUCTO CORRECTO ✅');
+                setToast({ show: true, message: 'PRODUCTO CORRECTO ✅', type: 'success' });
+                logAudit({ tipo: 'VALIDACION_EXITOSA', ean_escaneado: cleanCode, order: validatingOrder });
+                setTimeout(() => {
+                    setValidationState('IDLE');
+                }, 1000);
+                return;
             } else {
                 setValidationState('ERROR');
                 setLastScanMsg('CÓDIGO INCORRECTO');
                 setToast({ show: true, message: 'CÓDIGO INCORRECTO: ' + cleanCode, type: 'error' });
-                logAudit({ 
-                    tipo: 'MAL_PICKING', 
-                    ean_escaneado: cleanCode, 
-                    ean_esperado: validatingOrder.codigo || validatingOrder.sku,
-                    order: validatingOrder 
-                });
+                logAudit({ tipo: 'MAL_PICKING', ean_escaneado: cleanCode, ean_esperado: validatingOrder.codigo || validatingOrder.sku, order: validatingOrder });
                 setTimeout(() => {
                     setValidationState('IDLE');
-                }, 2000);
+                }, 1000);
+                return;
             }
             return;
         }
@@ -1659,9 +1627,10 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
             await Promise.all(targetOrders.map(async (o) => {
                 if (o.id) {
                     // Si es consolidado y la cantidad es el total, marcamos 100% para cada uno
-                    const finalQtyForThis = order.originalOrders 
+                    const rawQty = order.originalOrders 
                         ? (qty >= order.cantidad_pedida ? o.cantidad_pedida : (qty / order.cantidad_pedida) * o.cantidad_pedida)
                         : qty;
+                    const finalQtyForThis = Math.round((rawQty + Number.EPSILON) * 100) / 100;
 
                     const isTotal = finalQtyForThis >= o.cantidad_pedida;
 
@@ -1697,9 +1666,10 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                 : ((o.sku || '').trim().toUpperCase() === (order.sku || '').trim().toUpperCase() && o.placa === order.placa && o.documento === order.documento);
 
             if (matches) {
-                const finalQtyForThis = order.originalOrders 
+                const rawQtyForThis = order.originalOrders 
                     ? (qty >= order.cantidad_pedida ? o.cantidad_pedida : (qty / order.cantidad_pedida) * o.cantidad_pedida)
                     : qty;
+                const finalQtyForThis = Math.round((rawQtyForThis + Number.EPSILON) * 100) / 100;
 
                 const isTotal = finalQtyForThis >= o.cantidad_pedida;
 
@@ -2396,16 +2366,22 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                                                                                             </div>
                                                                                         </div>
 
-                                                                                        <div className="flex items-center justify-between sm:justify-end gap-3 min-w-[185px] shrink-0">
-                                                                                            {/* Cantidades teóricas vs reales guiadas */}
+                                                                                        <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2.5 min-w-[220px] shrink-0">
+                                                                                            {/* Cantidades de Pedido y Picado previas */}
                                                                                             {!validadorBlindMode && (
-                                                                                                <div className="text-right text-[10px] pr-1 border-r border-slate-100 pr-2 uppercase">
-                                                                                                    <span className="text-slate-400 font-bold block">CARGADOS:</span>
-                                                                                                    <span className="font-extrabold text-slate-800 dark:text-slate-100">{item.cantidad_pedida}</span>
+                                                                                                <div className="flex items-center gap-2 text-[10px] pr-2 border-r border-slate-150 dark:border-slate-800 uppercase text-right shrink-0">
+                                                                                                    <div className="leading-tight">
+                                                                                                        <span className="text-slate-400 font-bold block text-[8px]">PEDIDO:</span>
+                                                                                                        <span className="font-extrabold text-slate-800 dark:text-slate-200 font-mono text-xs">{formatNum(item.cantidad_pedida)}</span>
+                                                                                                    </div>
+                                                                                                    <div className="leading-tight border-l border-slate-150 dark:border-slate-800 pl-2">
+                                                                                                        <span className="text-amber-600 dark:text-amber-400 font-bold block text-[8px]">PICADO:</span>
+                                                                                                        <span className="font-extrabold text-amber-700 dark:text-amber-300 font-mono text-xs">{formatNum(item.cantidad_picada)}</span>
+                                                                                                    </div>
                                                                                                 </div>
                                                                                             )}
 
-                                                                                            {/* Control de cantidad con botones rápidos de ajuste */}
+                                                                                            {/* Control de cantidad física con botones rápidos - / + */}
                                                                                             <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
                                                                                                 <button
                                                                                                     onClick={() => {
@@ -2422,11 +2398,11 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                                                                                                 </button>
                                                                                                 
                                                                                                 <div className="w-12 text-center">
-                                                                                                    <span className={`text-[9px] uppercase font-bold block ${hasScans ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-405'}`}>
+                                                                                                    <span className={`text-[8px] uppercase font-bold block ${hasScans ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`}>
                                                                                                         FÍSICO
                                                                                                     </span>
-                                                                                                    <span className={`text-sm font-black font-mono leading-none ${hasScans ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`}>
-                                                                                                        {scanCount}
+                                                                                                    <span className={`text-xs font-black font-mono leading-none ${hasScans ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`}>
+                                                                                                        {formatNum(scanCount)}
                                                                                                     </span>
                                                                                                 </div>
 
@@ -2444,16 +2420,43 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                                                                                                 </button>
                                                                                             </div>
 
-                                                                                            {/* Botón de digitación manual mediante teclado modal */}
+                                                                                            {/* Botón OK de confirmación de revisión física */}
                                                                                             <button
                                                                                                 onClick={() => {
-                                                                                                    setValidadorManualEditSku(key);
-                                                                                                    setValidadorManualQty(String(scanCount));
+                                                                                                    const targetQty = item.cantidad_picada > 0 ? item.cantidad_picada : item.cantidad_pedida;
+                                                                                                    setValidadorScans(prev => ({
+                                                                                                        ...prev,
+                                                                                                        [key]: targetQty
+                                                                                                    }));
+                                                                                                    setValidadorLogs(prev => [
+                                                                                                        {
+                                                                                                            id: Math.random().toString(),
+                                                                                                            message: `Revisado OK: ${item.descripcion}. Registrado: ${targetQty} UND`,
+                                                                                                            type: 'success',
+                                                                                                            timestamp: new Date().toLocaleTimeString()
+                                                                                                        },
+                                                                                                        ...prev
+                                                                                                    ]);
                                                                                                 }}
-                                                                                                className="p-2.5 bg-amber-50 hover:bg-amber-100 dark:bg-amber-955/20 dark:hover:bg-amber-900/40 text-amber-650 dark:text-amber-400 border border-amber-200 dark:border-amber-900/40 rounded-xl transition-all cursor-pointer shadow-xs shrink-0"
-                                                                                                title="Digitar cantidad física de forma exacta"
+                                                                                                className={`px-2.5 py-2 rounded-xl font-extrabold text-[10px] transition-all cursor-pointer shadow-xs shrink-0 flex items-center gap-1 uppercase tracking-wider ${
+                                                                                                    scanCount > 0 && (scanCount === item.cantidad_picada || scanCount === item.cantidad_pedida)
+                                                                                                        ? 'bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-600 shadow-emerald-600/20'
+                                                                                                        : 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:hover:bg-emerald-900/50 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800'
+                                                                                                }`}
+                                                                                                title="Confirmar revisión física (Mismo valor que picado/pedido)"
+                                                                                            >
+                                                                                                <CheckCircle className="w-3.5 h-3.5" />
+                                                                                                <span>OK</span>
+                                                                                            </button>
+
+                                                                                            {/* Botón de digitación manual por PALLETS, CAJAS o UNIDADES */}
+                                                                                            <button
+                                                                                                onClick={() => openValidadorManualEdit(key, scanCount > 0 ? scanCount : item.cantidad_picada)}
+                                                                                                className="p-2 bg-amber-50 hover:bg-amber-100 dark:bg-amber-955/20 dark:hover:bg-amber-900/40 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-900/40 rounded-xl transition-all cursor-pointer shadow-xs shrink-0 flex items-center gap-1 font-bold text-[9px] uppercase tracking-wider"
+                                                                                                title="Digitar cantidad física por PALLETS, CAJAS o UNIDADES"
                                                                                             >
                                                                                                 <Keyboard className="w-3.5 h-3.5" />
+                                                                                                <span className="hidden md:inline">DIGITAR</span>
                                                                                             </button>
                                                                                         </div>
                                                                                     </div>
@@ -2788,80 +2791,216 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
 
                                 {validadorManualEditSku !== null && (() => {
                                     const matchedOrder = orders.find(o => o.sku === validadorManualEditSku || o.codigo === validadorManualEditSku);
+                                    const prodData = catalog.find(p => p.sku === validadorManualEditSku || p.codigo === validadorManualEditSku);
+                                    const rtu = matchedOrder?.rtu || prodData?.unidades_por_caja || 1;
+                                    const cajasPorPallet = prodData?.cajas_por_palet || (matchedOrder as any)?.cajas_por_palet || (validadorManualEditSku === 'LAB001' ? 78 : 0);
+
+                                    const plNum = parseFloat(validadorManualPallets || '0') || 0;
+                                    const cjNum = parseFloat(validadorManualCajas || '0') || 0;
+                                    const undNum = parseFloat(validadorManualUnidades || '0') || 0;
+
+                                    const computedTotal = Math.round((
+                                        (plNum * (cajasPorPallet > 0 ? cajasPorPallet : 0) * rtu) +
+                                        (cjNum * rtu) +
+                                        undNum + Number.EPSILON
+                                    ) * 100) / 100;
+
+                                    const updateCalculatedQty = (pStr: string, cStr: string, uStr: string) => {
+                                        const p = parseFloat(pStr || '0') || 0;
+                                        const c = parseFloat(cStr || '0') || 0;
+                                        const u = parseFloat(uStr || '0') || 0;
+                                        const tot = Math.round((
+                                            (p * (cajasPorPallet > 0 ? cajasPorPallet : 0) * rtu) +
+                                            (c * rtu) +
+                                            u + Number.EPSILON
+                                        ) * 100) / 100;
+                                        setValidadorManualQty(String(tot));
+                                    };
+
+                                    const handleSave = async () => {
+                                        const finalQty = validadorManualQty !== '' ? (parseFloat(validadorManualQty) || 0) : computedTotal;
+                                        setValidadorScans(prev => ({ ...prev, [validadorManualEditSku]: finalQty }));
+
+                                        setValidadorLogs(prev => [
+                                            {
+                                                id: Math.random().toString(),
+                                                message: `Editado manual: ${matchedOrder?.descripcion || prodData?.nombre || 'Producto'}. Registrado: ${finalQty} UND (${plNum} PLT, ${cjNum} CJ, ${undNum} UND)`,
+                                                type: 'success',
+                                                timestamp: new Date().toLocaleTimeString()
+                                            },
+                                            ...prev
+                                        ]);
+
+                                        try {
+                                            await supabase.from('historial_validacion_picking').insert({
+                                                usuario: user?.nombre || user?.username,
+                                                placa: validadorSelectedPlate,
+                                                sku: validadorManualEditSku,
+                                                descripcion: matchedOrder?.descripcion || prodData?.nombre,
+                                                cantidad_pedida: matchedOrder?.cantidad_pedida || 0,
+                                                cantidad_picada: matchedOrder?.cantidad_picada || 0,
+                                                cantidad_validada: finalQty,
+                                                pallets: plNum,
+                                                cajas: cjNum,
+                                                unidades: undNum,
+                                                rtu: rtu,
+                                                cajas_por_palet: cajasPorPallet,
+                                                fecha_registro: new Date().toISOString()
+                                            });
+                                        } catch (e) {
+                                            console.error("Error guardando historial de validacion:", e);
+                                        }
+
+                                        setValidadorManualEditSku(null);
+                                        setValidadorManualQty('');
+                                        setValidadorManualPallets('');
+                                        setValidadorManualCajas('');
+                                        setValidadorManualUnidades('');
+                                    };
+
                                     return (
-                                        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-950/80 backdrop-blur-xs p-4">
-                                            <div className="bg-white dark:bg-slate-900 rounded-3xl max-w-md w-full p-6 border border-slate-200 dark:border-slate-800 shadow-2xl relative">
-                                                <h3 className="text-lg font-black text-slate-900 dark:text-white uppercase mb-2">
-                                                    Ingresar Cantidad Validada
-                                                </h3>
-                                                <p className="text-xs text-slate-500 dark:text-slate-400 mb-4 font-bold uppercase tracking-wider">
-                                                    {matchedOrder?.descripcion || 'Producto'}
-                                                </p>
-                                                
-                                                <div className="space-y-4">
-                                                    <label className="block text-[10px] font-black uppercase text-slate-400 tracking-widest">
-                                                        Digite la cantidad física que observa en el carro (mayor a 10):
-                                                    </label>
-                                                    <input
-                                                        type="number"
-                                                        autoFocus
-                                                        value={validadorManualQty}
-                                                        onFocus={(e) => e.target.select()}
-                                                        onChange={(e) => setValidadorManualQty(e.target.value)}
-                                                        onKeyDown={(e) => {
-                                                            if (e.key === 'Enter') {
-                                                                const parsed = parseFloat(validadorManualQty) || 0;
-                                                                setValidadorScans(prev => ({ ...prev, [validadorManualEditSku]: parsed }));
-                                                                setValidadorManualEditSku(null);
-                                                                setValidadorManualQty('');
-                                                                
-                                                                setValidadorLogs(prev => [
-                                                                    {
-                                                                        id: Math.random().toString(),
-                                                                        message: `Editado manual: ${matchedOrder?.descripcion || 'Producto'}. Registrado: ${parsed}`,
-                                                                        type: 'success',
-                                                                        timestamp: new Date().toLocaleTimeString()
-                                                                    },
-                                                                    ...prev
-                                                                ]);
-                                                            }
-                                                        }}
-                                                        className="w-full px-4 py-3 bg-slate-100 dark:bg-slate-800 border border-slate-205 dark:border-slate-750 rounded-xl focus:ring-2 focus:ring-emerald-500 text-slate-900 dark:text-white text-lg font-mono font-bold"
-                                                        placeholder="0"
-                                                    />
-                                                    
-                                                    <div className="flex justify-end gap-3 pt-2">
-                                                        <button
-                                                            onClick={() => {
-                                                                setValidadorManualEditSku(null);
-                                                                setValidadorManualQty('');
-                                                            }}
-                                                            className="px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-705 text-slate-500 dark:text-slate-300 font-bold uppercase text-[10px] tracking-widest rounded-xl transition-colors cursor-pointer"
-                                                        >
-                                                            Cancelar
-                                                        </button>
-                                                        <button
-                                                            onClick={() => {
-                                                                const parsed = parseFloat(validadorManualQty) || 0;
-                                                                setValidadorScans(prev => ({ ...prev, [validadorManualEditSku]: parsed }));
-                                                                setValidadorManualEditSku(null);
-                                                                setValidadorManualQty('');
-                                                                
-                                                                setValidadorLogs(prev => [
-                                                                    {
-                                                                        id: Math.random().toString(),
-                                                                        message: `Editado manual: ${matchedOrder?.descripcion || 'Producto'}. Registrado: ${parsed}`,
-                                                                        type: 'success',
-                                                                        timestamp: new Date().toLocaleTimeString()
-                                                                    },
-                                                                    ...prev
-                                                                ]);
-                                                            }}
-                                                            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold uppercase text-[10px] tracking-widest rounded-xl transition-all active:scale-95 cursor-pointer"
-                                                        >
-                                                            Guardar Cantidad
-                                                        </button>
+                                        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-950/80 backdrop-blur-xs p-4 overflow-y-auto">
+                                            <div className="bg-white dark:bg-slate-900 rounded-3xl max-w-lg w-full p-6 border border-slate-200 dark:border-slate-800 shadow-2xl relative my-auto space-y-5">
+                                                <div className="border-b border-slate-100 dark:border-slate-800 pb-3">
+                                                    <span className="text-[9px] font-black uppercase tracking-widest text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 px-2.5 py-1 rounded-full inline-block mb-1">
+                                                        VALIDACIÓN FÍSICA DETALLADA
+                                                    </span>
+                                                    <h3 className="text-base font-black text-slate-900 dark:text-white uppercase leading-snug">
+                                                        {matchedOrder?.descripcion || prodData?.nombre || 'Producto'}
+                                                    </h3>
+                                                    <div className="flex flex-wrap gap-2 text-[10px] font-mono text-slate-500 mt-1">
+                                                        <span>SKU: {validadorManualEditSku}</span>
+                                                        <span>•</span>
+                                                        <span>PEDIDO: <strong className="text-slate-800 dark:text-slate-200">{formatNum(matchedOrder?.cantidad_pedida || 0)}</strong></span>
+                                                        <span>•</span>
+                                                        <span>PICADO: <strong className="text-amber-600 dark:text-amber-400">{formatNum(matchedOrder?.cantidad_picada || 0)}</strong></span>
                                                     </div>
+                                                </div>
+
+                                                <div className="bg-slate-50 dark:bg-slate-850/50 p-3 rounded-2xl border border-slate-150 dark:border-slate-800 flex items-center justify-between text-[10px] font-mono">
+                                                    <span className="text-slate-500 uppercase font-bold">FACTORES EMPAQUE:</span>
+                                                    <span className="font-bold text-slate-800 dark:text-slate-200">
+                                                        RTU: {rtu} und/cj {cajasPorPallet > 0 ? `| Pallet: ${cajasPorPallet} cj` : ''}
+                                                    </span>
+                                                </div>
+
+                                                {/* DIGITACIÓN POR PALLETS, CAJAS Y UNIDADES */}
+                                                <div className="space-y-3">
+                                                    <label className="block text-[10px] font-black uppercase text-slate-400 tracking-widest">
+                                                        DIGITE LA CANTIDAD FÍSICA REVISADA:
+                                                    </label>
+
+                                                    <div className="grid grid-cols-3 gap-2.5">
+                                                        {/* PALLETS */}
+                                                        <div className="space-y-1">
+                                                            <span className="block text-[9px] font-black uppercase text-slate-500 text-center">
+                                                                PALLETS
+                                                            </span>
+                                                            <input
+                                                                type="number"
+                                                                min="0"
+                                                                value={validadorManualPallets}
+                                                                onChange={(e) => {
+                                                                    setValidadorManualPallets(e.target.value);
+                                                                    updateCalculatedQty(e.target.value, validadorManualCajas, validadorManualUnidades);
+                                                                }}
+                                                                placeholder="0"
+                                                                className="w-full text-center py-2.5 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-emerald-500 text-slate-900 dark:text-white font-mono font-bold text-base"
+                                                            />
+                                                            <span className="block text-[8px] text-slate-400 text-center font-mono">
+                                                                {cajasPorPallet > 0 ? `= ${(parseFloat(validadorManualPallets || '0') || 0) * cajasPorPallet * rtu} und` : 'N/A'}
+                                                            </span>
+                                                        </div>
+
+                                                        {/* CAJAS */}
+                                                        <div className="space-y-1">
+                                                            <span className="block text-[9px] font-black uppercase text-slate-500 text-center">
+                                                                CAJAS
+                                                            </span>
+                                                            <input
+                                                                type="number"
+                                                                min="0"
+                                                                value={validadorManualCajas}
+                                                                onChange={(e) => {
+                                                                    setValidadorManualCajas(e.target.value);
+                                                                    updateCalculatedQty(validadorManualPallets, e.target.value, validadorManualUnidades);
+                                                                }}
+                                                                placeholder="0"
+                                                                className="w-full text-center py-2.5 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-emerald-500 text-slate-900 dark:text-white font-mono font-bold text-base"
+                                                            />
+                                                            <span className="block text-[8px] text-slate-400 text-center font-mono">
+                                                                = {(parseFloat(validadorManualCajas || '0') || 0) * rtu} und
+                                                            </span>
+                                                        </div>
+
+                                                        {/* UNIDADES */}
+                                                        <div className="space-y-1">
+                                                            <span className="block text-[9px] font-black uppercase text-slate-500 text-center">
+                                                                UNIDADES
+                                                            </span>
+                                                            <input
+                                                                type="number"
+                                                                min="0"
+                                                                value={validadorManualUnidades}
+                                                                onChange={(e) => {
+                                                                    setValidadorManualUnidades(e.target.value);
+                                                                    updateCalculatedQty(validadorManualPallets, validadorManualCajas, e.target.value);
+                                                                }}
+                                                                placeholder="0"
+                                                                className="w-full text-center py-2.5 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-emerald-500 text-slate-900 dark:text-white font-mono font-bold text-base"
+                                                            />
+                                                            <span className="block text-[8px] text-slate-400 text-center font-mono">
+                                                                sueltas
+                                                            </span>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* TOTAL UNIDADES RESULTANTE */}
+                                                    <div className="p-3 bg-emerald-50/60 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 rounded-2xl flex items-center justify-between gap-3">
+                                                        <div>
+                                                            <span className="text-[9px] font-black uppercase text-emerald-800 dark:text-emerald-400 block tracking-wider">
+                                                                TOTAL FÍSICO CALCULADO:
+                                                            </span>
+                                                            <span className="text-xl font-black font-mono text-emerald-700 dark:text-emerald-300">
+                                                                {validadorManualQty !== '' ? validadorManualQty : computedTotal} <span className="text-xs">UND</span>
+                                                            </span>
+                                                        </div>
+
+                                                        <div className="flex gap-1.5">
+                                                            {matchedOrder?.cantidad_picada ? (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => openValidadorManualEdit(validadorManualEditSku, matchedOrder.cantidad_picada)}
+                                                                    className="px-2.5 py-1.5 bg-white dark:bg-slate-800 hover:bg-slate-100 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all"
+                                                                >
+                                                                    Usar Picado ({formatNum(matchedOrder.cantidad_picada)})
+                                                                </button>
+                                                            ) : null}
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div className="flex justify-end gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setValidadorManualEditSku(null);
+                                                            setValidadorManualQty('');
+                                                            setValidadorManualPallets('');
+                                                            setValidadorManualCajas('');
+                                                            setValidadorManualUnidades('');
+                                                        }}
+                                                        className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-300 font-bold uppercase text-[10px] tracking-widest rounded-xl transition-colors cursor-pointer"
+                                                    >
+                                                        Cancelar
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleSave}
+                                                        className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold uppercase text-[10px] tracking-widest rounded-xl transition-all active:scale-95 cursor-pointer shadow-md shadow-emerald-600/20"
+                                                    >
+                                                        Guardar Cantidad Validada
+                                                    </button>
                                                 </div>
                                             </div>
                                         </div>
@@ -3321,7 +3460,7 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                                                             <div className="flex items-center gap-4">
                                                                 <div className="text-right">
                                                                     <div className={`text-base sm:text-lg font-black ${order.completado ? 'text-emerald-500' : 'text-amber-600 dark:text-amber-400'}`}>
-                                                                        {order.completado ? order.cantidad_pedida : `${order.cantidad_picada || 0} / ${order.cantidad_pedida}`}
+                                                                        {order.completado ? formatNum(order.cantidad_pedida) : `${formatNum(order.cantidad_picada)} / ${formatNum(order.cantidad_pedida)}`}
                                                                     </div>
                                                                     <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{order.unidad}</div>
                                                                 </div>
@@ -3502,7 +3641,7 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                             </AnimatePresence>
 
                             {/* Header estático, visible sin scroll para no perder de vista el ítem */}
-                            <div className={`py-2 px-3 border-b flex-shrink-0 flex items-center justify-between transition-colors ${
+                            <div className={`py-1 px-3 border-b flex-shrink-0 flex items-center justify-between transition-colors ${
                                 modalTheme === 'dark' ? 'bg-[#0F1C3F] border-slate-800' : 'bg-blue-600 border-blue-700 text-white'
                             }`}>
                                 <div className="flex items-center gap-1.5">
@@ -3522,7 +3661,7 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                                 {/* Botón cambiar tema Claro / Oscuro */}
                                 <button
                                     onClick={() => setModalTheme(modalTheme === 'dark' ? 'light' : 'dark')}
-                                    className={`p-1.5 rounded-lg border transition-all active:scale-90 ${
+                                    className={`p-1 rounded-lg border transition-all active:scale-90 ${
                                         modalTheme === 'dark' 
                                             ? 'bg-[#182A5C] border-slate-700 text-amber-400 hover:bg-slate-800' 
                                             : 'bg-white/15 border-white/20 text-amber-300 hover:bg-white/25 shadow-xs'
@@ -3533,52 +3672,60 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                                 </button>
                             </div>
 
-                            {/* Cuerpo scrollable de información del producto */}
-                            <div className="p-2 space-y-2 flex-1 overflow-y-auto max-h-[calc(98vh-190px)] sm:max-h-[520px]">
-                                {/* FICHA TÉCNICA CONCATENADA (Código de Producto Grande con RTU Informático adentro) */}
-                                <div className={`p-2 rounded-2xl border select-none transition-colors ${
-                                    modalTheme === 'dark' 
-                                        ? 'bg-slate-950/80 border-slate-800 text-white shadow-inner' 
-                                        : 'bg-[#F1F5F9]/75 border-slate-205/60 text-slate-800 shadow-inner'
+                            {/* FICHA TÉCNICA CONCATENADA (FIJA - Siempre visible al hacer scroll) */}
+                            <div className={`p-2 border-b flex-shrink-0 select-none transition-colors ${
+                                modalTheme === 'dark' 
+                                    ? 'bg-[#0B1329] border-slate-800 text-white' 
+                                    : 'bg-[#F8FAFC] border-slate-200 text-slate-800'
+                            }`}>
+                                <h2 className={`text-xs font-bold uppercase tracking-tight leading-tight line-clamp-2 px-1 max-w-xs mb-1.5 text-left ${
+                                    modalTheme === 'dark' ? 'text-slate-200' : 'text-slate-850'
                                 }`}>
-                                    <h2 className={`text-xs font-bold uppercase tracking-tight leading-tight line-clamp-2 px-1 max-w-xs mb-1.5 text-left ${
-                                        modalTheme === 'dark' ? 'text-slate-200' : 'text-slate-850'
-                                    }`}>
-                                        {validatingOrder.descripcion}{' '}
-                                        <span className="text-blue-600 dark:text-blue-400 font-extrabold uppercase ml-1 whitespace-nowrap">
-                                            ({validatingOrder.unidad || 'NIU'})
-                                        </span>
-                                    </h2>
-                                    <div className="flex items-center justify-between border-t border-dashed border-slate-200 dark:border-slate-800 pt-1.5 px-0.5">
-                                        <div className="flex flex-col items-start text-left">
-                                            <span className="text-[7.5px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest leading-none mb-1">CÓDIGO ICO</span>
-                                            <div className={`text-xl font-black font-mono tracking-tight select-all leading-none ${
-                                                modalTheme === 'dark' ? 'text-blue-400' : 'text-blue-600'
-                                            }`}>
-                                                {validatingOrder.codigo || validatingOrder.sku}
-                                            </div>
+                                    {validatingOrder.descripcion}{' '}
+                                    <span className="text-blue-600 dark:text-blue-400 font-extrabold uppercase ml-1 whitespace-nowrap">
+                                        ({validatingOrder.unidad || 'NIU'})
+                                    </span>
+                                </h2>
+                                <div className="flex items-center justify-between border-t border-dashed border-slate-200 dark:border-slate-800 pt-1.5 px-0.5">
+                                    <div className="flex flex-col items-start text-left">
+                                        <span className="text-[7.5px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest leading-none mb-1">CÓDIGO ICO</span>
+                                        <div className={`text-xl font-black font-mono tracking-tight select-all leading-none ${
+                                            modalTheme === 'dark' ? 'text-blue-400' : 'text-blue-600'
+                                        }`}>
+                                            {validatingOrder.codigo || validatingOrder.sku}
                                         </div>
+                                    </div>
 
-                                        <div className="flex flex-col items-center">
-                                            <span className="text-[7.5px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest leading-none mb-1">PEDIDO TOTAL</span>
-                                            <div className={`text-2xl font-black font-mono leading-none ${
-                                                modalTheme === 'dark' ? 'text-emerald-300' : 'text-emerald-600'
-                                            }`}>
-                                                {validatingOrder.cantidad_pedida} <span className="text-[10px] font-black text-slate-550 dark:text-slate-405 ml-0.5">{validatingOrder.unidad || 'NIU'}</span>
-                                            </div>
+                                    <div className="flex flex-col items-center">
+                                        <span className="text-[7.5px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest leading-none mb-1">PEDIDO TOTAL</span>
+                                        <div className={`text-2xl font-black font-mono leading-none ${
+                                            modalTheme === 'dark' ? 'text-emerald-300' : 'text-emerald-600'
+                                        }`}>
+                                            {formatNum(validatingOrder.cantidad_pedida)} <span className="text-[10px] font-black text-slate-550 dark:text-slate-405 ml-0.5">{validatingOrder.unidad || 'NIU'}</span>
                                         </div>
+                                    </div>
 
-                                        <div className="flex flex-col items-end text-right">
-                                            <span className="text-[7.5px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest leading-none mb-1">UNIDAD / CAJA</span>
-                                            <div className={`px-1.5 py-0.5 text-[9px] font-black tracking-wide rounded-md uppercase flex items-center gap-0.5 leading-none ${
-                                                modalTheme === 'dark' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/25' : 'bg-amber-100 text-amber-850 border border-amber-200 shadow-xs'
-                                            }`}>
-                                                <span className="text-[8px] opacity-75 font-bold">RTU:</span>
-                                                <span className="font-mono font-black">{validatingOrder.rtu || 1}</span>
-                                            </div>
+                                    <div className="flex flex-col items-end text-right">
+                                        <span className="text-[7.5px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest leading-none mb-1">FACTORES CAJA/PLT</span>
+                                        <div className={`px-1.5 py-0.5 text-[9px] font-black tracking-wide rounded-md uppercase flex items-center gap-1 leading-none ${
+                                            modalTheme === 'dark' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/25' : 'bg-amber-100 text-amber-850 border border-amber-200 shadow-xs'
+                                        }`}>
+                                            <span className="text-[8px] opacity-75 font-bold">RTU:</span>
+                                            <span className="font-mono font-black">{validatingOrder.rtu || currentProduct?.unidades_por_caja || 1}</span>
+                                            {((currentProduct?.cajas_por_palet || (validatingOrder as any).cajas_por_palet || ((validatingOrder.codigo === 'LAB001' || validatingOrder.sku === 'LAB001') ? 78 : 0)) > 0) && (
+                                                <>
+                                                    <span className="text-[8px] opacity-40">|</span>
+                                                    <span className="text-[8px] opacity-75 font-bold">PLT:</span>
+                                                    <span className="font-mono font-black">{currentProduct?.cajas_por_palet || (validatingOrder as any).cajas_por_palet || ((validatingOrder.codigo === 'LAB001' || validatingOrder.sku === 'LAB001') ? 78 : 0)}</span>
+                                                </>
+                                            )}
                                         </div>
                                     </div>
                                 </div>
+                            </div>
+
+                            {/* Cuerpo scrollable de información del producto */}
+                            <div className="p-2 space-y-2 flex-1 overflow-y-auto max-h-[calc(98vh-260px)] sm:max-h-[440px]">
 
                                 {/* REGISTRO DE EAN FALTANTES */}
                                 {(() => {
@@ -3680,40 +3827,79 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                                     );
                                 })()}
 
-                                {/* CAJAS Y UNIDADES A PICAR - REEMPLAZO DE LA UBICACIÓN ANTERIOR DEL PEDIDO TOTAL */}
-                                <div className="grid grid-cols-2 gap-2">
-                                    {/* CAJAS */}
-                                    <div className={`p-2 rounded-xl border text-center transition-colors ${
-                                        modalTheme === 'dark' 
-                                            ? 'bg-[#18234D]/40 border-slate-800' 
-                                            : 'bg-white border-blue-105 shadow-sm'
-                                    }`}>
-                                        <span className={`text-[8.5px] font-black uppercase tracking-widest block mb-0.5 ${
-                                            modalTheme === 'dark' ? 'text-amber-400' : 'text-amber-600'
-                                        }`}>CAJAS</span>
-                                        <div className={`text-2xl font-black font-mono tracking-tight leading-none ${
-                                            modalTheme === 'dark' ? 'text-amber-400' : 'text-amber-600'
-                                        }`}>
-                                            {validatingOrder.rtu && validatingOrder.rtu > 1 ? Math.floor(validatingOrder.cantidad_pedida / validatingOrder.rtu) : 0}
-                                        </div>
-                                    </div>
+                                {/* PALLETS, CAJAS Y UNIDADES A PICAR - REQUERIDOS */}
+                                {(() => {
+                                    const rtu = (validatingOrder.rtu && validatingOrder.rtu > 0) ? validatingOrder.rtu : (currentProduct?.unidades_por_caja || 1);
+                                    const cajasPorPallet = currentProduct?.cajas_por_palet || (validatingOrder as any).cajas_por_palet || ((validatingOrder.codigo === 'LAB001' || validatingOrder.sku === 'LAB001') ? 78 : 0);
 
-                                    {/* UNIDADES */}
-                                    <div className={`p-2 rounded-xl border text-center transition-colors ${
-                                        modalTheme === 'dark' 
-                                            ? 'bg-[#18234D]/40 border-slate-800' 
-                                            : 'bg-white border-blue-105 shadow-sm'
-                                    }`}>
-                                        <span className={`text-[8.5px] font-black uppercase tracking-widest block mb-0.5 ${
-                                            modalTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
-                                        }`}>UNIDADES</span>
-                                        <div className={`text-2xl font-black font-mono tracking-tight leading-none ${
-                                            modalTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
-                                        }`}>
-                                            {validatingOrder.rtu && validatingOrder.rtu > 1 ? (validatingOrder.cantidad_pedida % validatingOrder.rtu) : validatingOrder.cantidad_pedida}
+                                    const totalUnitsRequested = validatingOrder.cantidad_pedida;
+                                    const totalBoxesRequested = rtu > 1 ? Math.floor(totalUnitsRequested / rtu) : totalUnitsRequested;
+
+                                    const reqPallets = (cajasPorPallet > 0) ? Math.floor(totalBoxesRequested / cajasPorPallet) : 0;
+                                    const reqCajas = (cajasPorPallet > 0) ? (totalBoxesRequested % cajasPorPallet) : (rtu > 1 ? totalBoxesRequested : 0);
+                                    const reqUnidades = rtu > 1 ? (totalUnitsRequested % rtu) : (cajasPorPallet > 0 ? 0 : totalUnitsRequested);
+
+                                    return (
+                                        <div className="grid grid-cols-3 gap-1.5">
+                                            {/* PALLETS */}
+                                            <div className={`p-2 rounded-xl border text-center transition-colors ${
+                                                modalTheme === 'dark' 
+                                                    ? 'bg-[#18234D]/40 border-slate-800' 
+                                                    : 'bg-white border-blue-105 shadow-sm'
+                                            }`}>
+                                                <span className={`text-[8.5px] font-black uppercase tracking-widest block mb-0.5 ${
+                                                    modalTheme === 'dark' ? 'text-indigo-400' : 'text-indigo-600'
+                                                }`}>PALLETS</span>
+                                                <div className={`text-2xl font-black font-mono tracking-tight leading-none ${
+                                                    modalTheme === 'dark' ? 'text-indigo-400' : 'text-indigo-600'
+                                                }`}>
+                                                    {reqPallets}
+                                                </div>
+                                                <span className="text-[7.5px] font-extrabold text-slate-400 block mt-1">
+                                                    {cajasPorPallet > 0 ? `${cajasPorPallet} cj/plt` : 'N/A'}
+                                                </span>
+                                            </div>
+
+                                            {/* CAJAS */}
+                                            <div className={`p-2 rounded-xl border text-center transition-colors ${
+                                                modalTheme === 'dark' 
+                                                    ? 'bg-[#18234D]/40 border-slate-800' 
+                                                    : 'bg-white border-blue-105 shadow-sm'
+                                            }`}>
+                                                <span className={`text-[8.5px] font-black uppercase tracking-widest block mb-0.5 ${
+                                                    modalTheme === 'dark' ? 'text-amber-400' : 'text-amber-600'
+                                                }`}>CAJAS</span>
+                                                <div className={`text-2xl font-black font-mono tracking-tight leading-none ${
+                                                    modalTheme === 'dark' ? 'text-amber-400' : 'text-amber-600'
+                                                }`}>
+                                                    {reqCajas}
+                                                </div>
+                                                <span className="text-[7.5px] font-extrabold text-slate-400 block mt-1">
+                                                    RTU: {rtu}
+                                                </span>
+                                            </div>
+
+                                            {/* UNIDADES */}
+                                            <div className={`p-2 rounded-xl border text-center transition-colors ${
+                                                modalTheme === 'dark' 
+                                                    ? 'bg-[#18234D]/40 border-slate-800' 
+                                                    : 'bg-white border-blue-105 shadow-sm'
+                                            }`}>
+                                                <span className={`text-[8.5px] font-black uppercase tracking-widest block mb-0.5 ${
+                                                    modalTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
+                                                }`}>UNIDADES</span>
+                                                <div className={`text-2xl font-black font-mono tracking-tight leading-none ${
+                                                    modalTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
+                                                }`}>
+                                                    {reqUnidades}
+                                                </div>
+                                                <span className="text-[7.5px] font-extrabold text-slate-400 block mt-1">
+                                                    {validatingOrder.unidad || 'NIU'}
+                                                </span>
+                                            </div>
                                         </div>
-                                    </div>
-                                </div>
+                                    );
+                                })()}
 
                                 {/* BARRA DE PROGRESO DE PICKING (Más gruesa y visible) */}
                                 <div className={`px-2.5 py-1.5 rounded-xl border transition-colors ${
@@ -3727,11 +3913,11 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                                             <span className={`text-xl font-black font-mono tracking-tight ${
                                                 modalTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
                                             }`}>
-                                                {unitScanCount}
+                                                {formatNum(unitScanCount)}
                                             </span>
                                             <span className="text-slate-400 text-[10px] font-bold">/</span>
                                             <span className={`text-sm font-extrabold font-mono text-slate-500`}>
-                                                {validatingOrder.cantidad_pedida}
+                                                {formatNum(validatingOrder.cantidad_pedida)}
                                             </span>
                                         </div>
                                     </div>
@@ -3743,15 +3929,32 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                                             style={{ width: `${Math.min(100, (unitScanCount / validatingOrder.cantidad_pedida) * 100)}%` }} 
                                         />
                                     </div>
-                                    {validatingOrder.rtu && validatingOrder.rtu > 1 && (
-                                        <div className={`mt-1.5 text-center text-[10px] font-black uppercase tracking-widest py-0.5 px-2 rounded border ${
-                                            modalTheme === 'dark' 
-                                                ? 'bg-indigo-500/10 border-indigo-500/20 text-indigo-300' 
-                                                : 'bg-indigo-50 border-indigo-200 text-indigo-700'
-                                        }`}>
-                                            PREPARADO: <span className="font-mono text-xs text-amber-600 dark:text-amber-500">{Math.floor(unitScanCount / validatingOrder.rtu)} CAJAS</span> + <span className="font-mono text-xs text-emerald-600 dark:text-emerald-400">{unitScanCount % validatingOrder.rtu} UNIDADES</span>
-                                        </div>
-                                    )}
+                                    {(() => {
+                                        const rtu = (validatingOrder.rtu && validatingOrder.rtu > 0) ? validatingOrder.rtu : (currentProduct?.unidades_por_caja || 1);
+                                        const cajasPorPallet = currentProduct?.cajas_por_palet || (validatingOrder as any).cajas_por_palet || ((validatingOrder.codigo === 'LAB001' || validatingOrder.sku === 'LAB001') ? 78 : 0);
+
+                                        const pickedTotalBoxes = rtu > 1 ? Math.floor(unitScanCount / rtu) : unitScanCount;
+                                        const pickedPallets = (cajasPorPallet > 0) ? Math.floor(pickedTotalBoxes / cajasPorPallet) : 0;
+                                        const pickedCajas = (cajasPorPallet > 0) ? (pickedTotalBoxes % cajasPorPallet) : (rtu > 1 ? pickedTotalBoxes : 0);
+                                        const pickedUnidades = rtu > 1 ? (unitScanCount % rtu) : (cajasPorPallet > 0 ? 0 : unitScanCount);
+
+                                        return (
+                                            <div className={`mt-1.5 text-center text-[10px] font-black uppercase tracking-widest py-0.5 px-2 rounded border ${
+                                                modalTheme === 'dark' 
+                                                    ? 'bg-indigo-500/10 border-indigo-500/20 text-indigo-300' 
+                                                    : 'bg-indigo-50 border-indigo-200 text-indigo-700'
+                                            }`}>
+                                                PREPARADO:{' '}
+                                                {cajasPorPallet > 0 && (
+                                                    <>
+                                                        <span className="font-mono text-xs text-indigo-600 dark:text-indigo-400">{pickedPallets} PALLETS</span> +{' '}
+                                                    </>
+                                                )}
+                                                <span className="font-mono text-xs text-amber-600 dark:text-amber-500">{pickedCajas} CAJAS</span> +{' '}
+                                                <span className="font-mono text-xs text-emerald-600 dark:text-emerald-400">{pickedUnidades} UNIDADES</span>
+                                            </div>
+                                        );
+                                    })()}
                                 </div>
 
                                 {/* SECCIONES AUXILIARES DE CAPTURA (PESO / EXPY) */}
@@ -3872,23 +4075,95 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                                                         ))}
                                                     </div>
                                                 </div>
-                                            )}                                             {/* CONTEO DIRECTO UNITARIO */}
-                                             <div className={`rounded-xl p-2 border flex items-center justify-between ${validatingOrder.unidad?.toUpperCase() === "KGM" ? "hidden" : ""} ${modalTheme === "dark" ? "bg-slate-950/80 border-slate-800" : "bg-[#FAFCFF] border-slate-250"}`}>
-                                                 <div className="flex-1 text-left">
-                                                     <p className={`text-[8px] font-black uppercase tracking-widest mb-0.5 ${modalTheme === "dark" ? "text-blue-300" : "text-blue-600"}`}>CONTEO MANUAL</p>
-                                                     <input 
-                                                         type="number"
-                                                         value={unitScanCount}
-                                                         onChange={e => setUnitScanCount(parseInt(e.target.value) || 0)}
-                                                         className={`w-full bg-transparent border-none p-0 text-2.5xl font-black outline-none font-mono focus:ring-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${modalTheme === "dark" ? "text-white" : "text-slate-900"}`}
-                                                         onFocus={e => e.target.select()}
-                                                     />
-                                                 </div>
-                                                 <div className="text-right pl-3 border-l border-slate-300 dark:border-slate-800">
-                                                     <p className="text-[8px] font-black text-slate-450 uppercase tracking-widest mb-0.5">MEDIDA</p>
-                                                     <p className="text-sm font-black text-indigo-500 font-mono uppercase">{validatingOrder.unidad || "UND"}</p>
-                                                 </div>
-                                             </div>
+                                            )}                                            {/* CONTEO Y REGISTRO MANUAL DE PICKING (CONSOLIDADO PARA PDA) */}
+                                            {(() => {
+                                                const rtu = (validatingOrder.rtu && validatingOrder.rtu > 0) ? validatingOrder.rtu : (currentProduct?.unidades_por_caja || 1);
+                                                const cajasPorPallet = currentProduct?.cajas_por_palet || (validatingOrder as any).cajas_por_palet || ((validatingOrder.codigo === 'LAB001' || validatingOrder.sku === 'LAB001') ? 78 : 0);
+
+                                                const totalUnitsRequested = validatingOrder.cantidad_pedida;
+                                                const reqUnidades = rtu > 1 ? (totalUnitsRequested % rtu) : (cajasPorPallet > 0 ? 0 : totalUnitsRequested);
+                                                const isUnitsInputEnabled = reqUnidades > 0;
+
+                                                const pickedTotalBoxes = rtu > 1 ? Math.floor(unitScanCount / rtu) : unitScanCount;
+                                                const currentPickedPallets = (cajasPorPallet > 0) ? Math.floor(pickedTotalBoxes / cajasPorPallet) : 0;
+                                                const currentPickedCajas = (cajasPorPallet > 0) ? (pickedTotalBoxes % cajasPorPallet) : (rtu > 1 ? pickedTotalBoxes : 0);
+                                                const currentPickedUnidades = isUnitsInputEnabled ? (rtu > 1 ? (unitScanCount % rtu) : (cajasPorPallet > 0 ? 0 : unitScanCount)) : 0;
+
+                                                return (
+                                                    <div className={`rounded-xl p-2 border space-y-1.5 ${validatingOrder.unidad?.toUpperCase() === "KGM" ? "hidden" : ""} ${modalTheme === "dark" ? "bg-slate-950/80 border-slate-800" : "bg-[#FAFCFF] border-slate-250"}`}>
+                                                        <div className="flex items-center justify-between px-1">
+                                                            <span className={`text-[8px] font-black uppercase tracking-widest ${modalTheme === "dark" ? "text-blue-300" : "text-blue-600"}`}>
+                                                                REGISTRAR PICKING (MANUAL)
+                                                            </span>
+                                                            <div className="flex items-center gap-1 font-mono text-[9px] font-black text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/50 px-1.5 py-0.5 rounded border border-indigo-200 dark:border-indigo-800">
+                                                                <span>TOTAL:</span>
+                                                                <span>{formatNum(unitScanCount)} {validatingOrder.unidad || "UND"}</span>
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="grid grid-cols-3 gap-1">
+                                                            {/* PALLETS INPUT */}
+                                                            <div className={`p-1.5 rounded-lg border text-center ${cajasPorPallet > 0 ? (modalTheme === 'dark' ? 'bg-slate-900 border-indigo-500/30' : 'bg-white border-indigo-200 shadow-2xs') : 'opacity-40 bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800'}`}>
+                                                                <span className="text-[7.5px] font-black text-indigo-500 dark:text-indigo-400 uppercase tracking-widest block mb-0.5">PALLETS</span>
+                                                                <input 
+                                                                    type="number"
+                                                                    disabled={cajasPorPallet <= 0}
+                                                                    value={cajasPorPallet > 0 ? currentPickedPallets : 0}
+                                                                    onChange={e => {
+                                                                        const p = Math.max(0, parseInt(e.target.value) || 0);
+                                                                        const newUnits = (p * cajasPorPallet * rtu) + (currentPickedCajas * rtu) + currentPickedUnidades;
+                                                                        setUnitScanCount(Math.min(newUnits, totalUnitsRequested));
+                                                                    }}
+                                                                    className={`w-full bg-transparent border-none p-0 text-center text-lg font-black outline-none font-mono focus:ring-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${modalTheme === 'dark' ? 'text-white' : 'text-slate-900'}`}
+                                                                    onFocus={e => e.target.select()}
+                                                                />
+                                                                <span className="text-[7px] font-extrabold text-slate-400 block -mt-0.5">
+                                                                    {cajasPorPallet > 0 ? `${cajasPorPallet} cj/plt` : 'N/A'}
+                                                                </span>
+                                                            </div>
+
+                                                            {/* CAJAS INPUT */}
+                                                            <div className={`p-1.5 rounded-lg border text-center ${modalTheme === 'dark' ? 'bg-slate-900 border-amber-500/30' : 'bg-white border-amber-200 shadow-2xs'}`}>
+                                                                <span className="text-[7.5px] font-black text-amber-500 dark:text-amber-400 uppercase tracking-widest block mb-0.5">CAJAS</span>
+                                                                <input 
+                                                                    type="number"
+                                                                    value={currentPickedCajas}
+                                                                    onChange={e => {
+                                                                        const c = Math.max(0, parseInt(e.target.value) || 0);
+                                                                        const newUnits = (currentPickedPallets * cajasPorPallet * rtu) + (c * rtu) + currentPickedUnidades;
+                                                                        setUnitScanCount(Math.min(newUnits, totalUnitsRequested));
+                                                                    }}
+                                                                    className={`w-full bg-transparent border-none p-0 text-center text-lg font-black outline-none font-mono focus:ring-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${modalTheme === 'dark' ? 'text-white' : 'text-slate-900'}`}
+                                                                    onFocus={e => e.target.select()}
+                                                                />
+                                                                <span className="text-[7px] font-extrabold text-slate-400 block -mt-0.5">
+                                                                    RTU: {rtu}
+                                                                </span>
+                                                            </div>
+
+                                                            {/* UNIDADES INPUT */}
+                                                            <div className={`p-1.5 rounded-lg border text-center ${isUnitsInputEnabled ? (modalTheme === 'dark' ? 'bg-slate-900 border-emerald-500/30' : 'bg-white border-emerald-200 shadow-2xs') : 'opacity-40 bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800'}`}>
+                                                                <span className="text-[7.5px] font-black text-emerald-500 dark:text-emerald-400 uppercase tracking-widest block mb-0.5">UNIDADES</span>
+                                                                <input 
+                                                                    type="number"
+                                                                    disabled={!isUnitsInputEnabled}
+                                                                    value={isUnitsInputEnabled ? currentPickedUnidades : 0}
+                                                                    onChange={e => {
+                                                                        const u = Math.max(0, parseInt(e.target.value) || 0);
+                                                                        const newUnits = (currentPickedPallets * cajasPorPallet * rtu) + (currentPickedCajas * rtu) + u;
+                                                                        setUnitScanCount(Math.min(newUnits, totalUnitsRequested));
+                                                                    }}
+                                                                    className={`w-full bg-transparent border-none p-0 text-center text-lg font-black outline-none font-mono focus:ring-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${modalTheme === 'dark' ? 'text-white' : 'text-slate-900'}`}
+                                                                    onFocus={e => e.target.select()}
+                                                                />
+                                                                <span className="text-[7px] font-extrabold text-slate-400 block -mt-0.5">
+                                                                    {validatingOrder.unidad || "UND"}
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })()}
  
                                              <button 
                                                  onClick={() => {
@@ -3902,8 +4177,12 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                                                              return;
                                                          }
                                                      }
-                                                     const finalQty = validatingOrder.unidad?.toUpperCase() === "KGM" ? (parseFloat(realWeight) || 0) : unitScanCount;
-                                                     completePicking(validatingOrder, finalQty);
+                                                     const rawQty = validatingOrder.unidad?.toUpperCase() === "KGM" ? (parseFloat(realWeight) || 0) : unitScanCount;
+                                                     if (validatingOrder.unidad?.toUpperCase() !== "KGM" && rawQty > validatingOrder.cantidad_pedida) {
+                                                         alert(`La cantidad registrada (${rawQty}) no puede ser mayor al pedido (${validatingOrder.cantidad_pedida}).`);
+                                                         return;
+                                                     }
+                                                     completePicking(validatingOrder, rawQty);
                                                  }}
                                                  className={`w-full py-3.5 rounded-xl text-white font-black uppercase text-xs tracking-widest shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2 ${(validatingOrder.camara.includes("PESO") || validatingOrder.camara.includes("PESOS") || validatingOrder.unidad?.toUpperCase() === "KGM") ? "bg-amber-500 shadow-amber-500/15 hover:bg-amber-600" : validatingOrder.camara.includes("INFORME") ? "bg-purple-600 shadow-purple-500/15 hover:bg-purple-700" : "bg-emerald-600 dark:bg-emerald-500 shadow-emerald-500/30 hover:bg-emerald-700 dark:hover:bg-emerald-600"}`}
                                              >
@@ -4804,7 +5083,7 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                                                                         <tr key={`preview-row-${idx}`} className="border-b border-black">
                                                                             <td className="p-2 font-mono font-bold border-r border-black">{item.sku}</td>
                                                                             <td className="p-2 font-bold uppercase border-r border-black leading-tight">{item.descripcion}</td>
-                                                                            <td className="p-2 font-black text-center border-r border-black text-sm sm:text-base">{item.cantidad_picada}</td>
+                                                                            <td className="p-2 font-black text-center border-r border-black text-sm sm:text-base">{formatNum(item.cantidad_picada)}</td>
                                                                             <td className="p-2 font-bold text-center uppercase border-r border-black">{item.unidad}</td>
                                                                             <td className="p-2 font-mono text-center font-bold">
                                                                                 {item.fecha_vencimiento || 'N/A'}
@@ -4926,7 +5205,7 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                                                 <tr key={`print-row-${idx}`} className="border-b border-black text-base">
                                                     <td className="p-3 font-mono font-bold border-r border-black">{item.sku}</td>
                                                     <td className="p-3 font-bold uppercase border-r border-black leading-tight">{item.descripcion}</td>
-                                                    <td className="p-3 font-black text-center border-r border-black text-xl">{item.cantidad_picada}</td>
+                                                    <td className="p-3 font-black text-center border-r border-black text-xl">{formatNum(item.cantidad_picada)}</td>
                                                     <td className="p-3 font-bold text-center uppercase border-r border-black">{item.unidad}</td>
                                                     <td className="p-3 font-mono text-center font-bold text-sm">
                                                         {item.fecha_vencimiento || 'N/A'}
