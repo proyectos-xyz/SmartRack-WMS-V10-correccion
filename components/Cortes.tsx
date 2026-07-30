@@ -374,6 +374,62 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
     }
   };
 
+  const [dailyInventoryMap, setDailyInventoryMap] = useState<Map<string, number>>(new Map());
+
+  const fetchDailyInventory = async () => {
+    if (!consolidatedDate) return;
+    try {
+      let query = supabase
+        .from('conteo_inventario')
+        .select('codigo, producto_id, cantidad, fecha_registro, sede_id')
+        .gte('fecha_registro', `${consolidatedDate}T00:00:00`)
+        .lte('fecha_registro', `${consolidatedDate}T23:59:59.999`);
+
+      const sedeId = currentUser?.sede_id;
+      if (sedeId) {
+        query = query.eq('sede_id', sedeId);
+      }
+
+      const { data, error } = await query;
+      if (error) {
+        console.error("Error loading inventory counts:", error);
+        return;
+      }
+
+      const countMap = new Map<string, number>();
+      (data || []).forEach((row: any) => {
+        if (row.fecha_registro) {
+          try {
+            const d = new Date(row.fecha_registro);
+            const yyyy = d.getFullYear();
+            const mm = String(d.getMonth() + 1).padStart(2, '0');
+            const dd = String(d.getDate()).padStart(2, '0');
+            if (`${yyyy}-${mm}-${dd}` !== consolidatedDate) return;
+          } catch (e) {}
+        }
+        const qty = Number(row.cantidad) || 0;
+        if (row.codigo) {
+          const codeKey = row.codigo.trim().toLowerCase();
+          countMap.set(codeKey, (countMap.get(codeKey) || 0) + qty);
+        }
+        if (row.producto_id) {
+          const idKey = row.producto_id.trim().toLowerCase();
+          countMap.set(idKey, (countMap.get(idKey) || 0) + qty);
+        }
+      });
+
+      setDailyInventoryMap(countMap);
+    } catch (e) {
+      console.error("Error fetching daily inventory:", e);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'CONSOLIDATED') {
+      fetchDailyInventory();
+    }
+  }, [consolidatedDate, activeTab, currentUser]);
+
   // Consolidated grouped calculations
   const consolidatedData = useMemo(() => {
     if (!consolidatedDate) return [];
@@ -436,7 +492,14 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
       }
     });
 
-    let result = Array.from(map.values());
+    let result = Array.from(map.values()).map(item => {
+      const codeKey = (item.codigo || '').trim().toLowerCase();
+      const cantContada = dailyInventoryMap.get(codeKey) ?? 0;
+      return {
+        ...item,
+        cantContada
+      };
+    });
 
     if (consolidatedSearch.trim()) {
       const term = consolidatedSearch.toLowerCase().trim();
@@ -447,10 +510,14 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
     }
 
     return result.sort((a, b) => b.totalCantidad - a.totalCantidad);
-  }, [history, consolidatedDate, consolidatedSearch]);
+  }, [history, consolidatedDate, consolidatedSearch, dailyInventoryMap]);
 
   const totalConsolidatedQuantity = useMemo(() => {
     return consolidatedData.reduce((acc, curr) => acc + curr.totalCantidad, 0);
+  }, [consolidatedData]);
+
+  const totalConsolidatedInventory = useMemo(() => {
+    return consolidatedData.reduce((acc, curr) => acc + curr.cantContada, 0);
   }, [consolidatedData]);
 
   const totalConsolidatedOrders = useMemo(() => {
@@ -469,6 +536,7 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
         <td style="padding: 8px; font-family: monospace;">${item.codigo}</td>
         <td style="padding: 8px; font-weight: bold; text-transform: uppercase;">${item.nombre}</td>
         <td style="padding: 8px; text-align: right; font-size: 14px; font-weight: 900; color: #0089ba;">${item.totalCantidad.toFixed(2)}</td>
+        <td style="padding: 8px; text-align: right; font-size: 14px; font-weight: 900; color: #2563eb;">${item.cantContada.toFixed(2)}</td>
         <td style="padding: 8px; text-transform: uppercase; font-weight: bold;">${item.unidad_medida}</td>
         <td style="padding: 8px; text-align: center;">${item.pedidosCount}</td>
       </tr>
@@ -488,6 +556,7 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
             .summary { display: flex; gap: 20px; background: #f8fafc; padding: 12px; border-radius: 8px; margin-top: 10px; border: 1px solid #e2e8f0; }
             .summary-item { font-size: 12px; font-weight: bold; }
             .summary-item span { font-weight: 900; color: #0089ba; }
+            .summary-item span.blue { font-weight: 900; color: #2563eb; }
           </style>
         </head>
         <body>
@@ -498,6 +567,7 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
           <div class="summary">
             <div class="summary-item">Total Productos: <span>${consolidatedData.length}</span></div>
             <div class="summary-item">Total Solicitado: <span>${totalConsolidatedQuantity.toFixed(2)}</span></div>
+            <div class="summary-item">Total Contado Inventario: <span class="blue">${totalConsolidatedInventory.toFixed(2)}</span></div>
             <div class="summary-item">Total Pedidos: <span>${totalConsolidatedOrders}</span></div>
           </div>
 
@@ -508,12 +578,13 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
                 <th>Código</th>
                 <th>Producto</th>
                 <th style="text-align: right;">Total a Cortar</th>
+                <th style="text-align: right;">Contado Inventario</th>
                 <th>U.M</th>
                 <th style="text-align: center;">Pedidos</th>
               </tr>
             </thead>
             <tbody>
-              ${itemsHtml.length > 0 ? itemsHtml : '<tr><td colspan="6" style="text-align:center; padding: 20px;">No hay registros para este día.</td></tr>'}
+              ${itemsHtml.length > 0 ? itemsHtml : '<tr><td colspan="7" style="text-align:center; padding: 20px;">No hay registros para este día.</td></tr>'}
             </tbody>
           </table>
           <script>
@@ -981,7 +1052,7 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
           </div>
 
           {/* SUMMARY KPI CARDS */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
             <div className="p-4 bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-zinc-100 dark:border-slate-800 flex items-center justify-between">
               <div>
                 <span className="text-[9px] font-black uppercase text-slate-400">Productos Distintos</span>
@@ -1004,13 +1075,25 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
               </div>
             </div>
 
+            <div className="p-4 bg-blue-50/50 dark:bg-blue-950/20 rounded-2xl border border-blue-100 dark:border-blue-900/40 flex items-center justify-between">
+              <div>
+                <span className="text-[9px] font-black uppercase text-blue-700/80 dark:text-blue-400/80">Contado Inventario (Día)</span>
+                <p className="text-xl sm:text-2xl font-black text-blue-700 dark:text-blue-400 mt-0.5">
+                  {totalConsolidatedInventory.toFixed(2)}
+                </p>
+              </div>
+              <div className="p-3 bg-blue-100/60 dark:bg-blue-900/40 text-blue-700 dark:text-blue-400 rounded-xl">
+                <ClipboardList className="w-5 h-5" />
+              </div>
+            </div>
+
             <div className="p-4 bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-zinc-100 dark:border-slate-800 flex items-center justify-between">
               <div>
                 <span className="text-[9px] font-black uppercase text-slate-400">Total Pedidos</span>
                 <p className="text-xl sm:text-2xl font-black text-slate-800 dark:text-white mt-0.5">{totalConsolidatedOrders}</p>
               </div>
               <div className="p-3 bg-slate-200/50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300 rounded-xl">
-                <ClipboardList className="w-5 h-5" />
+                <History className="w-5 h-5" />
               </div>
             </div>
           </div>
@@ -1036,6 +1119,7 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
                       <th className="p-4 border-b border-zinc-100 dark:border-slate-800">Código</th>
                       <th className="p-4 border-b border-zinc-100 dark:border-slate-800">Producto a Producir</th>
                       <th className="p-4 border-b border-zinc-100 dark:border-slate-800 text-right">Total Cantidad a Cortar</th>
+                      <th className="p-4 border-b border-zinc-100 dark:border-slate-800 text-right">Contado Inventario (Día)</th>
                       <th className="p-4 border-b border-zinc-100 dark:border-slate-800">U.M</th>
                       <th className="p-4 border-b border-zinc-100 dark:border-slate-800 text-center">Nº Pedidos</th>
                       <th className="p-4 border-b border-zinc-100 dark:border-slate-800 text-center">Detalle</th>
@@ -1053,6 +1137,11 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
                             <td className="p-4 text-right">
                               <span className="inline-block px-3 py-1 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20 rounded-xl text-sm font-black">
                                 {item.totalCantidad.toFixed(2)}
+                              </span>
+                            </td>
+                            <td className="p-4 text-right">
+                              <span className="inline-block px-3 py-1 bg-blue-500/10 text-blue-700 dark:text-blue-400 border border-blue-500/20 rounded-xl text-sm font-black">
+                                {item.cantContada.toFixed(2)}
                               </span>
                             </td>
                             <td className="p-4 uppercase font-bold text-slate-400">{item.unidad_medida}</td>
@@ -1075,7 +1164,7 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
                           {/* EXPANDED BREAKDOWN ROW */}
                           {isExpanded && (
                             <tr className="bg-slate-50/80 dark:bg-slate-800/50">
-                              <td colSpan={7} className="p-4">
+                              <td colSpan={8} className="p-4">
                                 <div className="p-3 bg-white dark:bg-slate-900 rounded-xl border border-zinc-200/80 dark:border-slate-700 space-y-2">
                                   <p className="text-[10px] font-black uppercase text-[#009ED6] tracking-wider">
                                     Desglose de Pedidos para "{item.nombre}"
@@ -1114,9 +1203,14 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
                           <span className="text-[9px] font-bold text-slate-400 font-mono">#{index + 1} | CÓD: {item.codigo}</span>
                           <h3 className="text-xs font-black text-slate-800 dark:text-white uppercase leading-snug">{item.nombre}</h3>
                         </div>
-                        <span className="px-2.5 py-1 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-black text-sm rounded-lg whitespace-nowrap">
-                          {item.totalCantidad.toFixed(2)} {item.unidad_medida}
-                        </span>
+                        <div className="flex flex-col items-end gap-1">
+                          <span className="px-2.5 py-0.5 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-black text-xs rounded-lg whitespace-nowrap">
+                            Cortar: {item.totalCantidad.toFixed(2)} {item.unidad_medida}
+                          </span>
+                          <span className="px-2.5 py-0.5 bg-blue-500/10 text-blue-700 dark:text-blue-400 font-black text-xs rounded-lg whitespace-nowrap">
+                            Contado Inv: {item.cantContada.toFixed(2)} {item.unidad_medida}
+                          </span>
+                        </div>
                       </div>
 
                       <div className="flex justify-between items-center pt-2 border-t border-zinc-100 dark:border-slate-800/60 text-xs">
