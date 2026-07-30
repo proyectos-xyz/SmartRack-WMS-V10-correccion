@@ -2734,14 +2734,22 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                         const matchedProduct = catalog.find(p => p.id === record.producto_id || p.codigo === record.codigo);
                                         const totalLife = matchedProduct ? (matchedProduct.tvm_dias || matchedProduct.vida_util_dias || 0) : 0;
                                         let tvuCalculated: number | null = null;
-                                        if (totalLife > 0 && record.fecha_vencimiento && record.fecha_registro) {
+                                        let tvuActualCalculated: number | null = null;
+                                        if (totalLife > 0 && record.fecha_vencimiento) {
                                             try {
                                                 const expDate = new Date(record.fecha_vencimiento + 'T00:00:00');
-                                                const regDate = new Date(record.fecha_registro);
-                                                regDate.setHours(0, 0, 0, 0);
-                                                const diffTime = expDate.getTime() - regDate.getTime();
-                                                const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-                                                tvuCalculated = Math.round((diffDays / totalLife) * 100);
+                                                if (record.fecha_registro) {
+                                                    const regDate = new Date(record.fecha_registro);
+                                                    regDate.setHours(0, 0, 0, 0);
+                                                    const diffTime = expDate.getTime() - regDate.getTime();
+                                                    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                                                    tvuCalculated = Math.round((diffDays / totalLife) * 100);
+                                                }
+                                                const today = new Date();
+                                                today.setHours(0, 0, 0, 0);
+                                                const diffTimeActual = expDate.getTime() - today.getTime();
+                                                const diffDaysActual = Math.ceil(diffTimeActual / (1000 * 60 * 60 * 24));
+                                                tvuActualCalculated = Math.round((diffDaysActual / totalLife) * 100);
                                             } catch (e) {
                                                 console.error(e);
                                             }
@@ -2831,8 +2839,13 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                                                         Vence: {formatDate(record.fecha_vencimiento)}
                                                                     </span>
                                                                     {tvuCalculated !== null && (
-                                                                        <span className={`text-[9px] font-extrabold border px-1.5 py-0.5 rounded uppercase flex items-center gap-0.5 ${tvuCalculated < productTvuThreshold ? 'text-red-700 bg-red-50 border-red-200 animate-pulse' : 'text-emerald-700 bg-emerald-50 border-emerald-200'}`}>
+                                                                        <span className={`text-[9px] font-extrabold border px-1.5 py-0.5 rounded uppercase flex items-center gap-0.5 ${tvuCalculated < productTvuThreshold ? 'text-red-700 bg-red-50 border-red-200 animate-pulse' : 'text-emerald-700 bg-emerald-50 border-emerald-200'}`} title="TVU con el que llegó el producto">
                                                                             TVU: {tvuCalculated}%
+                                                                        </span>
+                                                                    )}
+                                                                    {tvuActualCalculated !== null && (
+                                                                        <span className={`text-[9px] font-extrabold border px-1.5 py-0.5 rounded uppercase flex items-center gap-0.5 ${tvuActualCalculated < productTvuThreshold ? 'text-rose-800 bg-rose-50 border-rose-200' : 'text-blue-700 bg-blue-50 border-blue-200'}`} title="Calculo del TVU actual a la fecha de hoy">
+                                                                            TVU ACTUAL: {tvuActualCalculated}%
                                                                         </span>
                                                                     )}
                                                                 </>
@@ -2857,7 +2870,7 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                                             >
                                                                 {record.estado === 'PENDIENTE_AUTORIZACION' ? <span className="text-[9px] font-black tracking-tighter bg-amber-50 px-1 py-0.5 border border-amber-200 rounded text-amber-600">⚠ RETENIDO</span> : <Printer className="w-3.5 h-3.5" />}
                                                             </button>
-                                                            {(currentUser?.rol === 'ADMIN' || currentUser?.rol === 'ASISTENTE') && (
+                                                            {currentUser?.rol === 'ADMIN' && (
                                                                 <button 
                                                                     onClick={() => {
                                                                         setSelectedLpns(new Set([record.lpn]));
@@ -2974,7 +2987,7 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                             >
                                 <ArrowRightFromLine className="w-3 h-3"/>
                             </button>
-                            {(currentUser?.rol === 'ADMIN' || currentUser?.rol === 'ASISTENTE') && (
+                            {currentUser?.rol === 'ADMIN' && (
                                 <button 
                                     onClick={handleDeleteSelected}
                                     disabled={isProcessingBulk}
