@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { InventoryItem, Product, ZoneType, StocktakeRecord, Usuario, SystemStock } from '../types';
 import { BarChart as RechartsBarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LineChart, Line, Legend } from 'recharts';
-import { Search, AlertTriangle, Camera, CheckCircle, ClipboardList, PlusCircle, History, FileSpreadsheet, XCircle, Scan, ChevronLeft, ChevronRight, FileText, Calculator, Bell, Delete, RefreshCw, User, Upload, Download, BarChart3, X } from './Icons';
+import { Search, AlertTriangle, Camera, CheckCircle, ClipboardList, PlusCircle, History, FileSpreadsheet, XCircle, Scan, ChevronLeft, ChevronRight, FileText, Calculator, Bell, Delete, RefreshCw, User, Upload, Download, BarChart3, X, Clock } from './Icons';
 import { supabase } from '../supabaseClient';
 import { compressImage, generateStorageFileName } from '../utils';
 import jsPDF from 'jspdf';
@@ -16,6 +16,21 @@ interface InventoryListProps {
   onSaveStocktake: (record: Omit<StocktakeRecord, 'id'>) => Promise<void>;
   currentUser: Usuario | null;
 }
+
+const MONTH_OPTIONS = [
+  { value: '1', label: '01-ENE' },
+  { value: '2', label: '02-FEB' },
+  { value: '3', label: '03-MAR' },
+  { value: '4', label: '04-ABR' },
+  { value: '5', label: '05-MAY' },
+  { value: '6', label: '06-JUN' },
+  { value: '7', label: '07-JUL' },
+  { value: '8', label: '08-AGO' },
+  { value: '9', label: '09-SEP' },
+  { value: '10', label: '10-OCT' },
+  { value: '11', label: '11-NOV' },
+  { value: '12', label: '12-DIC' },
+];
 
 const InventoryList: React.FC<InventoryListProps> = ({ 
     inventory, 
@@ -42,6 +57,20 @@ const InventoryList: React.FC<InventoryListProps> = ({
   const [editDate, setEditDate] = useState('');
 
   // -- Stocktake State --
+  const [recentProducts, setRecentProducts] = useState<Product[]>([]);
+
+  const addRecentProduct = (product: Product) => {
+    if (!product || (!product.codigo && !product.sku)) return;
+    setRecentProducts(prev => {
+      const filtered = prev.filter(p => p.codigo !== product.codigo && p.id !== product.id);
+      const updated = [product, ...filtered].slice(0, 3);
+      try {
+        localStorage.setItem('smartwms_recent_prods', JSON.stringify(updated.map(p => p.codigo)));
+      } catch {}
+      return updated;
+    });
+  };
+
   const [countProduct, setCountProduct] = useState<Product | null>(null);
   const [countSearch, setCountSearch] = useState('');
   const [countPallets, setCountPallets] = useState<string>('');
@@ -49,6 +78,8 @@ const InventoryList: React.FC<InventoryListProps> = ({
   const [countQty, setCountQty] = useState<string>('');
   const [countDay, setCountDay] = useState('');
   const [countMonth, setCountMonth] = useState('');
+  const [showDayModal, setShowDayModal] = useState(false);
+  const [showMonthModal, setShowMonthModal] = useState(false);
   const [countYear, setCountYear] = useState('');
   const [countDate, setCountDate] = useState('');
   const [countStatus, setCountStatus] = useState<string>('');
@@ -106,15 +137,21 @@ const InventoryList: React.FC<InventoryListProps> = ({
   const [photoItemLPN, setPhotoItemLPN] = useState<string | null>(null);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   
+  const catalogCodeMap = useMemo(() => {
+    const map = new Map<string, Product>();
+    catalog.forEach(p => {
+      if (p.codigo) map.set(p.codigo.trim().toLowerCase(), p);
+      if (p.sku) map.set(p.sku.trim().toLowerCase(), p);
+    });
+    return map;
+  }, [catalog]);
+
   // Logic: Auto-select product if scanned code matches exactly
-  // Fix: p.codigo or p.sku
   useEffect(() => {
       if (activeTab === 'COUNT' && countSearch) {
           const cleanSearch = countSearch.trim().toLowerCase();
-          const exactMatch = catalog.find(p => 
-              p.codigo.trim().toLowerCase() === cleanSearch ||
-              (p.sku && p.sku.trim().toLowerCase() === cleanSearch)
-          );
+          if (!cleanSearch) return;
+          const exactMatch = catalogCodeMap.get(cleanSearch);
           if (exactMatch) {
               setCountProduct(exactMatch);
               setCountSearch(''); // Clear scanner buffer
@@ -124,7 +161,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
               }, 100);
           }
       }
-  }, [countSearch, catalog, activeTab]);
+  }, [countSearch, catalogCodeMap, activeTab]);
 
   // Sync countDate from day/month/year or status
   useEffect(() => {
@@ -140,6 +177,142 @@ const InventoryList: React.FC<InventoryListProps> = ({
         setCountDate('');
     }
   }, [countDay, countMonth, countYear, countStatus]);
+
+  interface RecentExpiryOption {
+    displayDate: string;
+    cantidad: number;
+    um: string;
+    day: string;
+    month: string;
+    year: string;
+  }
+
+  const [recentExpiries, setRecentExpiries] = useState<RecentExpiryOption[]>([]);
+
+  // Fetch recent expiration dates registered in the last 2 weeks for countProduct
+  useEffect(() => {
+    if (!countProduct?.codigo) {
+      setRecentExpiries([]);
+      return;
+    }
+
+    let isMounted = true;
+    const fetchRecent = async () => {
+      try {
+        const twoWeeksAgo = new Date();
+        twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+        twoWeeksAgo.setHours(0, 0, 0, 0);
+
+        let query = supabase
+          .from('conteo_inventario')
+          .select('fecha_vencimiento, cantidad, fecha_registro')
+          .or(`codigo.eq.${countProduct.codigo}${countProduct.sku ? `,codigo.eq.${countProduct.sku}` : ''}`)
+          .gte('fecha_registro', twoWeeksAgo.toISOString())
+          .not('fecha_vencimiento', 'is', null)
+          .neq('fecha_vencimiento', '')
+          .neq('fecha_vencimiento', 'N/A')
+          .neq('fecha_vencimiento', 'ROTO')
+          .neq('fecha_vencimiento', 'REMAR')
+          .neq('fecha_vencimiento', 'VENTA_PERSONAL')
+          .neq('fecha_vencimiento', 'DESTRUCCION');
+
+        if (currentUser?.sede_id) {
+          query = query.eq('sede_id', currentUser.sede_id);
+        }
+
+        const { data, error } = await query.order('fecha_registro', { ascending: false });
+
+        if (error || !data || !isMounted) return;
+
+        const groupedMap = new Map<string, { displayDate: string; cantidad: number; parsedDate: Date }>();
+        const um = countProduct.unidad_venta || 'UND';
+
+        data.forEach((r: any) => {
+          const parsed = parseDate(r.fecha_vencimiento);
+          if (!parsed) return;
+
+          const day = String(parsed.getDate()).padStart(2, '0');
+          const month = String(parsed.getMonth() + 1).padStart(2, '0');
+          const year = parsed.getFullYear();
+          const displayDate = `${day}-${month}-${year}`;
+          const key = `${year}-${month}-${day}`;
+
+          const currentQty = Number(r.cantidad) || 0;
+
+          if (groupedMap.has(key)) {
+            const existing = groupedMap.get(key)!;
+            existing.cantidad += currentQty;
+          } else {
+            groupedMap.set(key, {
+              displayDate,
+              cantidad: currentQty,
+              parsedDate: parsed
+            });
+          }
+        });
+
+        const list = Array.from(groupedMap.values()).map(item => ({
+          displayDate: item.displayDate,
+          cantidad: Number(item.cantidad.toFixed(2)),
+          um,
+          day: item.parsedDate.getDate().toString(),
+          month: (item.parsedDate.getMonth() + 1).toString(),
+          year: item.parsedDate.getFullYear().toString()
+        }));
+
+        if (isMounted) {
+          setRecentExpiries(list);
+        }
+      } catch (err) {
+        console.error("Error fetching recent expiries:", err);
+      }
+    };
+
+    fetchRecent();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [countProduct, currentUser?.sede_id]);
+
+  // Load recent products for quick selection
+  useEffect(() => {
+    if (!catalog || catalog.length === 0) return;
+
+    let initialProds: Product[] = [];
+
+    try {
+      const saved = localStorage.getItem('smartwms_recent_prods');
+      if (saved) {
+        const codes: string[] = JSON.parse(saved);
+        codes.forEach(code => {
+          if (!code) return;
+          const clean = code.trim().toLowerCase();
+          const found = catalogCodeMap.get(clean) || catalog.find(p => p.codigo?.trim().toLowerCase() === clean || (p.sku && p.sku.trim().toLowerCase() === clean));
+          if (found && !initialProds.some(p => p.codigo === found.codigo)) {
+            initialProds.push(found);
+          }
+        });
+      }
+    } catch {}
+
+    if (initialProds.length < 3) {
+      const records = [...sessionHistory, ...todayCounts];
+      records.forEach(r => {
+        if (initialProds.length >= 3) return;
+        if (!r.codigo) return;
+        const code = r.codigo.trim().toLowerCase();
+        const found = catalogCodeMap.get(code) || catalog.find(p => p.codigo?.trim().toLowerCase() === code || (p.sku && p.sku.trim().toLowerCase() === code));
+        if (found && !initialProds.some(p => p.codigo === found.codigo)) {
+          initialProds.push(found);
+        }
+      });
+    }
+
+    if (initialProds.length > 0) {
+      setRecentProducts(initialProds.slice(0, 3));
+    }
+  }, [catalog, sessionHistory, todayCounts]);
 
   // Fetch today's counts
   const fetchTodayCounts = async () => {
@@ -304,45 +477,53 @@ const InventoryList: React.FC<InventoryListProps> = ({
     }
   }, [countDate]);
 
-  // Helper for robust date parsing
+  // Helper for robust date parsing (prevents timezone 1-day rollback)
   const parseDate = (dateStr: any): Date | null => {
     if (!dateStr) return null;
     if (dateStr instanceof Date) return dateStr;
     if (typeof dateStr !== 'string') return null;
     
     const trimmed = dateStr.trim();
-    if (!trimmed || ['ROTO', 'REMAR', 'DESTRUCCION'].includes(trimmed)) return null;
+    if (!trimmed || ['ROTO', 'REMAR', 'DESTRUCCION', 'N/A'].includes(trimmed)) return null;
 
-    // Try to parse directly first (handles ISO strings)
-    let exp = new Date(trimmed);
-    if (!isNaN(exp.getTime())) return exp;
+    let exp: Date | null = null;
 
-    // Try YYYY-MM-DD
+    // Try YYYY-MM-DD (e.g. "2026-08-10")
     if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) {
         const parts = trimmed.split(/[- : T]/);
-        const year = parseInt(parts[0]);
-        const month = parseInt(parts[1]);
-        const day = parseInt(parts[2]);
-        exp = new Date(year, month - 1, day);
+        const year = parseInt(parts[0], 10);
+        const month = parseInt(parts[1], 10);
+        const day = parseInt(parts[2], 10);
+        if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+            exp = new Date(year, month - 1, day, 12, 0, 0);
+        }
     } 
     // Try DD/MM/YYYY
     else if (/^\d{2}\/\d{2}\/\d{4}/.test(trimmed)) {
         const parts = trimmed.split(/[\/ :]/);
-        const day = parseInt(parts[0]);
-        const month = parseInt(parts[1]);
-        const year = parseInt(parts[2]);
-        exp = new Date(year, month - 1, day);
+        const day = parseInt(parts[0], 10);
+        const month = parseInt(parts[1], 10);
+        const year = parseInt(parts[2], 10);
+        if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+            exp = new Date(year, month - 1, day, 12, 0, 0);
+        }
     }
     // Try DD-MM-YYYY
     else if (/^\d{2}-\d{2}-\d{4}/.test(trimmed)) {
         const parts = trimmed.split(/[- :]/);
-        const day = parseInt(parts[0]);
-        const month = parseInt(parts[1]);
-        const year = parseInt(parts[2]);
-        exp = new Date(year, month - 1, day);
+        const day = parseInt(parts[0], 10);
+        const month = parseInt(parts[1], 10);
+        const year = parseInt(parts[2], 10);
+        if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+            exp = new Date(year, month - 1, day, 12, 0, 0);
+        }
     }
-    
+
     if (exp && !isNaN(exp.getTime())) return exp;
+
+    // Fallback for full ISO strings or uncommon formats
+    const fallback = new Date(trimmed);
+    if (!isNaN(fallback.getTime())) return fallback;
     return null;
   };
 
@@ -727,18 +908,32 @@ const InventoryList: React.FC<InventoryListProps> = ({
     setCurrentPage(1);
   }, [debouncedSearchTerm]);
 
-  // Fix: p.nombre, p.codigo
+  // Fast bounded catalog search for instant typing response
   const filteredCatalog = useMemo(() => {
     const term = countSearch.toLowerCase().trim();
     if (!term) return [];
     
-    return catalog.filter(p => 
-       p.nombre.toLowerCase().includes(term) || 
-       p.codigo.toLowerCase().includes(term) ||
-       (p.sku && p.sku.toLowerCase().includes(term)) ||
-       (p.marca && p.marca.toLowerCase().includes(term)) ||
-       (p.categoria && p.categoria.toLowerCase().includes(term))
-    );
+    const results: Product[] = [];
+    for (let i = 0; i < catalog.length; i++) {
+      const p = catalog[i];
+      const code = p.codigo ? p.codigo.toLowerCase() : '';
+      const sku = p.sku ? p.sku.toLowerCase() : '';
+      const name = p.nombre ? p.nombre.toLowerCase() : '';
+      const brand = p.marca ? p.marca.toLowerCase() : '';
+      const cat = p.categoria ? p.categoria.toLowerCase() : '';
+
+      if (
+        code.includes(term) ||
+        sku.includes(term) ||
+        name.includes(term) ||
+        brand.includes(term) ||
+        cat.includes(term)
+      ) {
+        results.push(p);
+        if (results.length >= 25) break;
+      }
+    }
+    return results;
   }, [catalog, countSearch]);
 
   // --- PHOTO HANDLING (STOCKTAKE) ---
@@ -763,6 +958,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
   };
 
   const handleFastScanSubmit = async (product: Product) => {
+      addRecentProduct(product);
       const userToSave = currentUser?.nombre || 'Auditor';
       const timestamp = new Date().toISOString();
       
@@ -822,6 +1018,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
 
       // Capture current form state for background processing
       const productToSave = { ...countProduct };
+      addRecentProduct(productToSave);
       const qtyToSave = totalQty.toString();
       const dateToSave = countDate;
       const photosToSave = [...countPhotos];
@@ -2466,7 +2663,8 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                         </div>
                                     </div>
                                 ) : (
-                                    <div className="relative">
+                                    <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
+                                        <div className="relative flex-1">
                                         <input
                                             ref={searchInputRef}
                                             autoFocus
@@ -2484,7 +2682,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                                     e.preventDefault();
                                                     const cleanSearch = countSearch.trim().toLowerCase();
                                                     if (cleanSearch) {
-                                                        const match = catalog.find(p => 
+                                                        const match = catalogCodeMap.get(cleanSearch) || catalog.find(p => 
                                                             p.codigo.trim().toLowerCase() === cleanSearch ||
                                                             (p.sku && p.sku.trim().toLowerCase() === cleanSearch)
                                                         );
@@ -2497,12 +2695,10 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                                                 setCountSearch('');
                                                             }
                                                         } else {
-                                                            if (match) {
-                                                                setCountProduct(match);
-                                                                setCountSearch('');
-                                                                setTimeout(() => qtyInputRef.current?.focus(), 100);
-                                                            } else if (filteredCatalog.length > 0) {
-                                                                setCountProduct(filteredCatalog[0]);
+                                                            const matchProduct = match || filteredCatalog[0];
+                                                            if (matchProduct) {
+                                                                addRecentProduct(matchProduct);
+                                                                setCountProduct(matchProduct);
                                                                 setCountSearch('');
                                                                 setTimeout(() => qtyInputRef.current?.focus(), 100);
                                                             }
@@ -2517,6 +2713,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                                     <button
                                                         key={p.id}
                                                         onClick={() => {
+                                                            addRecentProduct(p);
                                                             setCountProduct(p);
                                                             setCountSearch('');
                                                             setTimeout(() => qtyInputRef.current?.focus(), 100);
@@ -2544,6 +2741,29 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                                                 <span className="text-slate-400 font-medium">x{p.unidades_por_caja} Un/Caja</span>
                                                             )}
                                                         </div>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+                                        </div>
+
+                                        {recentProducts.length > 0 && (
+                                            <div className="flex items-center gap-1.5 shrink-0 overflow-x-auto py-1 sm:py-0">
+                                                {recentProducts.slice(0, 3).map((p) => (
+                                                    <button
+                                                        key={p.id || p.codigo}
+                                                        type="button"
+                                                        onClick={() => {
+                                                            addRecentProduct(p);
+                                                            setCountProduct(p);
+                                                            setCountSearch('');
+                                                            setTimeout(() => qtyInputRef.current?.focus(), 100);
+                                                        }}
+                                                        className="px-2.5 py-2 md:py-3 bg-sky-50 dark:bg-slate-800 hover:bg-blue-600 hover:text-white dark:hover:bg-blue-600 text-blue-800 dark:text-blue-200 border border-sky-300 dark:border-slate-700 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer active:scale-95 shadow-xs"
+                                                        title={`Seleccionar ${p.nombre} (${p.codigo})`}
+                                                    >
+                                                        <Clock className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                                                        <span className="font-mono text-xs">{p.codigo || p.sku}</span>
                                                     </button>
                                                 ))}
                                             </div>
@@ -2679,30 +2899,57 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                     <div className="space-y-4">
                                         <div>
                                             <label className="block text-[10px] md:text-xs font-bold text-gray-500 uppercase mb-1 md:mb-2">Vencimiento</label>
+                                            {recentExpiries.length > 0 && (
+                                                <div className="mb-2 p-2 bg-sky-50 dark:bg-slate-800 border border-sky-200/80 dark:border-slate-700 rounded-xl space-y-1">
+                                                    <div className="text-[10px] font-black uppercase text-sky-800 dark:text-sky-300 flex items-center gap-1">
+                                                        <Clock className="w-3.5 h-3.5 text-sky-600" />
+                                                        <span>Fechas registradas (últimas 2 semanas):</span>
+                                                    </div>
+                                                    <div className="flex flex-wrap gap-1.5 pt-0.5">
+                                                        {recentExpiries.map((exp, idx) => (
+                                                            <button
+                                                                key={idx}
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    setCountDay(exp.day);
+                                                                    setCountMonth(exp.month);
+                                                                    setCountYear(exp.year);
+                                                                    setCountStatus('');
+                                                                }}
+                                                                className="px-2.5 py-1 bg-white dark:bg-slate-900 hover:bg-sky-600 hover:text-white dark:hover:bg-sky-600 text-slate-800 dark:text-slate-100 border border-sky-300 dark:border-slate-600 rounded-lg text-xs font-extrabold transition-all shadow-sm flex items-center gap-1 cursor-pointer active:scale-95"
+                                                                title="Haga clic para seleccionar esta fecha de vencimiento"
+                                                            >
+                                                                <span>({exp.displayDate} - {exp.cantidad} {exp.um})</span>
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
                                             <div className={`space-y-2 ${countStatus ? 'opacity-30 pointer-events-none' : ''}`}>
                                                 <div className="grid grid-cols-2 gap-2">
-                                                    <select 
+                                                    <button
+                                                        type="button"
                                                         disabled={!!countStatus}
-                                                        className={`w-full p-2 md:p-3 border rounded-lg text-sm md:text-base font-bold outline-none focus:border-blue-500 bg-white ${expiryWarning ? 'border-red-500 ring-1 ring-red-100' : 'border-gray-300'}`}
-                                                        value={countDay}
-                                                        onChange={e => setCountDay(e.target.value)}
+                                                        onClick={() => setShowDayModal(true)}
+                                                        className={`w-full p-2.5 md:p-3 border rounded-xl text-sm md:text-base font-extrabold outline-none bg-white flex items-center justify-between transition-all cursor-pointer ${
+                                                            countDay ? 'text-blue-600 border-blue-500 bg-blue-50/20' : 'text-gray-700 border-gray-300 hover:border-blue-400'
+                                                        } ${expiryWarning ? 'border-red-500 ring-1 ring-red-100' : ''}`}
                                                     >
-                                                        <option value="">DIA</option>
-                                                        {[...Array(31)].map((_, i) => (
-                                                            <option key={i+1} value={i+1}>{i+1}</option>
-                                                        ))}
-                                                    </select>
-                                                    <select 
+                                                        <span>{countDay ? `DÍA: ${countDay}` : 'DIA'}</span>
+                                                        <span className="text-xs text-gray-400">▼</span>
+                                                    </button>
+
+                                                    <button
+                                                        type="button"
                                                         disabled={!!countStatus}
-                                                        className={`w-full p-2 md:p-3 border rounded-lg text-sm md:text-base font-bold outline-none focus:border-blue-500 bg-white ${expiryWarning ? 'border-red-500 ring-1 ring-red-100' : 'border-gray-300'}`}
-                                                        value={countMonth}
-                                                        onChange={e => setCountMonth(e.target.value)}
+                                                        onClick={() => setShowMonthModal(true)}
+                                                        className={`w-full p-2.5 md:p-3 border rounded-xl text-sm md:text-base font-extrabold outline-none bg-white flex items-center justify-between transition-all cursor-pointer ${
+                                                            countMonth ? 'text-blue-600 border-blue-500 bg-blue-50/20' : 'text-gray-700 border-gray-300 hover:border-blue-400'
+                                                        } ${expiryWarning ? 'border-red-500 ring-1 ring-red-100' : ''}`}
                                                     >
-                                                        <option value="">MES</option>
-                                                        {['ENE', 'FEB', 'MAR', 'ABR', 'MAY', 'JUN', 'JUL', 'AGO', 'SEP', 'OCT', 'NOV', 'DIC'].map((m, i) => (
-                                                            <option key={i+1} value={i+1}>{m}</option>
-                                                        ))}
-                                                    </select>
+                                                        <span>{countMonth ? (MONTH_OPTIONS.find(m => m.value === countMonth)?.label || countMonth) : 'MES'}</span>
+                                                        <span className="text-xs text-gray-400">▼</span>
+                                                    </button>
                                                 </div>
                                                 <div className="flex flex-wrap gap-1">
                                                     {[2026, 2027, 2028, 2029, 2030, 2031, 2032, 2033].map(year => (
@@ -3990,6 +4237,133 @@ const InventoryList: React.FC<InventoryListProps> = ({
                             className="w-full py-4 bg-[#82BD02] text-white font-black rounded-xl shadow-lg hover:bg-[#74a902] transition-all uppercase tracking-widest text-sm"
                         >
                             {calcTarget === 'PALLETS' ? 'Agregar a Pallets' : calcTarget === 'BOXES' ? 'Agregar a Cajas' : 'Agregar a Unidades'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* Day Selection Modal */}
+        {showDayModal && (
+            <div className="fixed inset-0 bg-black/60 z-[500] flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
+                <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 md:p-6 max-w-sm w-full shadow-2xl border border-slate-100 dark:border-slate-800 animate-in zoom-in-95 duration-150">
+                    <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-100 dark:border-slate-800">
+                        <h3 className="text-sm font-black text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                            <span>Seleccionar Día</span>
+                        </h3>
+                        <button
+                            type="button"
+                            onClick={() => setShowDayModal(false)}
+                            className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                        >
+                            <X className="w-5 h-5" />
+                        </button>
+                    </div>
+                    
+                    <div className="grid grid-cols-5 gap-2 my-2">
+                        {[...Array(31)].map((_, i) => {
+                            const dayVal = (i + 1).toString();
+                            const isSelected = countDay === dayVal;
+                            return (
+                                <button
+                                    key={i + 1}
+                                    type="button"
+                                    onClick={() => {
+                                        setCountDay(dayVal);
+                                        setShowDayModal(false);
+                                    }}
+                                    className={`py-2.5 rounded-xl font-black text-sm md:text-base transition-all border cursor-pointer ${
+                                        isSelected
+                                            ? 'bg-blue-600 border-blue-600 text-white shadow-md scale-105'
+                                            : 'bg-slate-50 dark:bg-slate-800/80 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 hover:bg-blue-50 dark:hover:bg-blue-900/40 hover:border-blue-400'
+                                    }`}
+                                >
+                                    {i + 1}
+                                </button>
+                            );
+                        })}
+                    </div>
+
+                    <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800 flex justify-between items-center">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setCountDay('');
+                                setShowDayModal(false);
+                            }}
+                            className="px-4 py-2 rounded-xl text-xs font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 uppercase transition-colors cursor-pointer"
+                        >
+                            Limpiar
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setShowDayModal(false)}
+                            className="px-5 py-2 rounded-xl text-xs font-black text-white bg-blue-600 hover:bg-blue-700 uppercase shadow-sm transition-colors cursor-pointer"
+                        >
+                            Cerrar
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* Month Selection Modal */}
+        {showMonthModal && (
+            <div className="fixed inset-0 bg-black/60 z-[500] flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
+                <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 md:p-6 max-w-md w-full shadow-2xl border border-slate-100 dark:border-slate-800 animate-in zoom-in-95 duration-150">
+                    <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-100 dark:border-slate-800">
+                        <h3 className="text-sm font-black text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                            <span>Seleccionar Mes</span>
+                        </h3>
+                        <button
+                            type="button"
+                            onClick={() => setShowMonthModal(false)}
+                            className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                        >
+                            <X className="w-5 h-5" />
+                        </button>
+                    </div>
+                    
+                    <div className="grid grid-cols-4 gap-2.5 my-2">
+                        {MONTH_OPTIONS.map((m) => {
+                            const isSelected = countMonth === m.value;
+                            return (
+                                <button
+                                    key={m.value}
+                                    type="button"
+                                    onClick={() => {
+                                        setCountMonth(m.value);
+                                        setShowMonthModal(false);
+                                    }}
+                                    className={`py-3.5 px-2 rounded-xl font-black text-xs md:text-sm transition-all border text-center cursor-pointer ${
+                                        isSelected
+                                            ? 'bg-blue-600 border-blue-600 text-white shadow-md scale-105'
+                                            : 'bg-slate-50 dark:bg-slate-800/80 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 hover:bg-blue-50 dark:hover:bg-blue-900/40 hover:border-blue-400'
+                                    }`}
+                                >
+                                    {m.label}
+                                </button>
+                            );
+                        })}
+                    </div>
+
+                    <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800 flex justify-between items-center">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setCountMonth('');
+                                setShowMonthModal(false);
+                            }}
+                            className="px-4 py-2 rounded-xl text-xs font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 uppercase transition-colors cursor-pointer"
+                        >
+                            Limpiar
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setShowMonthModal(false)}
+                            className="px-5 py-2 rounded-xl text-xs font-black text-white bg-blue-600 hover:bg-blue-700 uppercase shadow-sm transition-colors cursor-pointer"
+                        >
+                            Cerrar
                         </button>
                     </div>
                 </div>

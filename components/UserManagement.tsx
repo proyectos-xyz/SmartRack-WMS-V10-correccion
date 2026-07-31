@@ -378,7 +378,8 @@ const UserManagement: React.FC<UserManagementProps> = ({ currentUser, onUpdateCu
             items: [
                 { key: ViewState.PICKING, label: 'Picking / Piking' },
                 { key: ViewState.VALIDADOR, label: 'Validador' },
-                { key: ViewState.PICKING_CONTROL, label: 'Control Picking' }
+                { key: ViewState.PICKING_CONTROL, label: 'Control Picking' },
+                { key: ViewState.PICKING_ENSAYOS, label: 'Ensayos Picking' }
             ]
         },
         {
