@@ -1925,6 +1925,10 @@ const InventoryList: React.FC<InventoryListProps> = ({
     });
   }, [todayCounts, debouncedSearchTerm, catalog]);
 
+  const totalContadoBusqueda = useMemo(() => {
+    return filteredTodayCounts.reduce((acc, c) => acc + (Number(c.cantidad) || 0), 0);
+  }, [filteredTodayCounts]);
+
   const totalPagesCounts = Math.ceil(filteredTodayCounts.length / itemsPerPage);
   const paginatedTodayCounts = useMemo(() => {
     const start = (currentPage - 1) * itemsPerPage;
@@ -2164,15 +2168,48 @@ const InventoryList: React.FC<InventoryListProps> = ({
         {activeTab === 'LIST' && (
             <>
                 <div className="bg-white p-4 shadow-sm border-b border-gray-200">
-                    <div className="relative">
-                        <input 
-                            type="text" 
-                            placeholder="Buscar en conteos de hoy..."
-                            className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 outline-none"
-                            value={searchTerm}
-                            onChange={e => setSearchTerm(e.target.value)}
-                        />
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5"/>
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                        <div className="relative flex-1">
+                            <input 
+                                type="text" 
+                                placeholder="Buscar en conteos de hoy (código, EAN, SKU, nombre)..."
+                                className="w-full pl-10 pr-10 py-3 border border-gray-300 rounded-xl shadow-sm focus:ring-2 focus:ring-blue-500 outline-none font-medium text-sm md:text-base"
+                                value={searchTerm}
+                                onChange={e => setSearchTerm(e.target.value)}
+                            />
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5"/>
+                            {searchTerm && (
+                                <button 
+                                    type="button"
+                                    onClick={() => setSearchTerm('')}
+                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1 rounded-full hover:bg-gray-100"
+                                >
+                                    <X className="w-4 h-4" />
+                                </button>
+                            )}
+                        </div>
+
+                        <div className={`rounded-xl px-4 py-2.5 flex items-center justify-between sm:justify-center gap-3 border shadow-xs transition-all shrink-0 ${
+                            searchTerm.trim() 
+                                ? 'bg-blue-600 border-blue-700 text-white shadow-md' 
+                                : 'bg-blue-50 border-blue-200 text-blue-900'
+                        }`}>
+                            <div className="flex flex-col">
+                                <span className={`text-[9px] font-black uppercase tracking-wider ${searchTerm.trim() ? 'text-blue-100' : 'text-blue-500'}`}>
+                                    {searchTerm.trim() ? 'TOTAL CONTADO FILTRADO' : 'TOTAL CONTADO HOY'}
+                                </span>
+                                <span className="text-lg md:text-xl font-black tracking-tight leading-none mt-0.5">
+                                    {totalContadoBusqueda.toLocaleString('es-PE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </span>
+                            </div>
+                            <span className={`text-[10px] font-bold px-2 py-1 rounded-lg ${
+                                searchTerm.trim() 
+                                    ? 'bg-blue-700 text-blue-100' 
+                                    : 'bg-blue-100 text-blue-700'
+                            }`}>
+                                {filteredTodayCounts.length} {filteredTodayCounts.length === 1 ? 'reg.' : 'regs.'}
+                            </span>
+                        </div>
                     </div>
                     <p className="text-[10px] font-bold text-gray-400 uppercase mt-2">Mostrando solo conteos realizados hoy</p>
                 </div>
