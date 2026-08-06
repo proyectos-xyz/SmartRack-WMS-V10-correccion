@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Product, InventoryItem, Usuario, MixedItem } from '../types';
 import { generateLPN, generateMixedLPN, formatDate } from '../utils';
 import { jsPDF } from 'jspdf';
+import JsBarcode from 'jsbarcode';
 import { supabase } from '../supabaseClient';
 import { 
   Printer, 
@@ -29,6 +30,62 @@ interface RotuladoProps {
   onReceive: (item: InventoryItem) => void;
 }
 
+// Helper to generate a base64 PNG barcode image for jsPDF
+const generateBarcodeDataUrl = (text: string): string => {
+  if (!text) return '';
+  try {
+    const canvas = document.createElement('canvas');
+    JsBarcode(canvas, text, {
+      format: 'CODE128',
+      displayValue: true,
+      fontSize: 16,
+      fontOptions: 'bold',
+      margin: 4,
+      height: 50,
+      width: 2.2,
+      background: '#ffffff',
+      lineColor: '#000000',
+    });
+    return canvas.toDataURL('image/png');
+  } catch (err) {
+    console.error("Error generating barcode data URL:", err);
+    return '';
+  }
+};
+
+// Component for rendering live barcode on screen in A4 sheet preview
+const ProductBarcodePreview: React.FC<{ code: string }> = ({ code }) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    if (canvasRef.current && code) {
+      try {
+        JsBarcode(canvasRef.current, code, {
+          format: 'CODE128',
+          displayValue: true,
+          fontSize: 12,
+          fontOptions: 'bold',
+          margin: 3,
+          height: 38,
+          width: 1.6,
+          background: '#ffffff',
+          lineColor: '#000000',
+        });
+      } catch (err) {
+        console.error("Error drawing barcode preview:", err);
+      }
+    }
+  }, [code]);
+
+  return <canvas ref={canvasRef} className="max-w-full h-auto mx-auto rounded border border-slate-200 dark:border-slate-700 bg-white" />;
+};
+
+interface ProductLabelQueueItem {
+  id: string;
+  product: Product;
+  copies: number;
+}
+
 export const Rotulado: React.FC<RotuladoProps> = ({
   catalog,
   currentUser,
@@ -36,8 +93,17 @@ export const Rotulado: React.FC<RotuladoProps> = ({
   lastMixedSequence,
   onReceive
 }) => {
-  // Active Tab: NUEVO (create label flow) vs HISTORICOS (view and bulk print historical labels)
-  const [activeTab, setActiveTab] = useState<'NUEVO' | 'HISTORICOS'>('NUEVO');
+  // Active Tab: NUEVO (create LPN label) vs PRODUCTOS_A4 (3 labels per A4 page) vs HISTORICOS
+  const [activeTab, setActiveTab] = useState<'NUEVO' | 'PRODUCTOS_A4' | 'HISTORICOS'>('NUEVO');
+
+  // Product Labels (A4 format - 3 per sheet) States
+  const [prodLabelMode, setProdLabelMode] = useState<'INDIVIDUAL' | 'MASIVO'>('INDIVIDUAL');
+  const [prodSearchTerm, setProdSearchTerm] = useState('');
+  const [selectedProdForLabel, setSelectedProdForLabel] = useState<Product | null>(null);
+  const [prodLabelCopies, setProdLabelCopies] = useState<number>(3); // Default 3 copies (1 A4 sheet)
+  const [prodLabelQueue, setProdLabelQueue] = useState<ProductLabelQueueItem[]>([]);
+  const [bulkCodeText, setBulkCodeText] = useState('');
+  const [previewPage, setPreviewPage] = useState<number>(1);
 
   // Search and display list
   const [searchTerm, setSearchTerm] = useState('');
@@ -91,6 +157,209 @@ export const Rotulado: React.FC<RotuladoProps> = ({
       console.error("Error saving pending LPNs to localStorage:", e);
     }
   }, [pendingPrintQueue]);
+
+  // Filter catalog based on search for product labels
+  const filteredProdsForLabel = useMemo(() => {
+    if (prodSearchTerm.trim().length < 2) return [];
+    const term = prodSearchTerm.toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+
+    return catalog.filter(p => {
+      const codeMatch = p.codigo.toLowerCase().includes(term);
+      const skuMatch = p.sku ? p.sku.toLowerCase().includes(term) : false;
+      const eanMatch = p.ean_bulto ? p.ean_bulto.toLowerCase().includes(term) : false;
+      const nameMatch = p.nombre.toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .includes(term);
+
+      return codeMatch || skuMatch || eanMatch || nameMatch;
+    }).slice(0, 15);
+  }, [prodSearchTerm, catalog]);
+
+  // Parse bulk pasted text into individual product label queue items
+  const parseBulkCodesToQueue = (rawText: string, catalogData: Product[]): ProductLabelQueueItem[] => {
+    if (!rawText || !rawText.trim()) return [];
+
+    const catalogMap = new Map<string, Product>();
+    catalogData.forEach(p => {
+      if (p.codigo) catalogMap.set(p.codigo.trim().toUpperCase(), p);
+      if (p.sku) catalogMap.set(p.sku.trim().toUpperCase(), p);
+      if (p.ean_bulto) catalogMap.set(p.ean_bulto.trim().toUpperCase(), p);
+    });
+
+    const tokens = rawText
+      .split(/[\r\n,;\t ]+/)
+      .map(t => t.trim().toUpperCase())
+      .filter(Boolean);
+
+    const items: ProductLabelQueueItem[] = [];
+    tokens.forEach((token, index) => {
+      const foundProduct = catalogMap.get(token);
+      const product: Product = foundProduct || {
+        id: `bulk-${token}-${index}`,
+        codigo: token,
+        sku: token,
+        nombre: token,
+        categoria: null,
+        marca: null,
+        unidad_venta: null,
+        unidades_por_caja: 1,
+        vida_util_dias: 0,
+        requiere_pesaje: false,
+        zona_predeterminada: 'SECO',
+        es_seco: true,
+        es_refrigerado: false,
+        es_congelado: false,
+        es_peso: false,
+        unidad_compra: null,
+        factor_unidad: 1,
+        factor_inventario: 1,
+        tiene_detraccion: false,
+        tvm_dias: 0,
+        peso_unitario: 0,
+        cajas_por_palet: 1,
+        usa_control_tara: false,
+        peso_tara_caja_std: 0,
+        peso_tara_pallet_std: 0
+      };
+
+      items.push({
+        id: `${token}-${Date.now()}-${index}`,
+        product,
+        copies: 1 // 1 rotulo por codigo
+      });
+    });
+
+    return items;
+  };
+
+  // Detected bulk codes array
+  const bulkCodesDetected = useMemo(() => {
+    if (!bulkCodeText.trim()) return [];
+    return bulkCodeText
+      .split(/[\r\n,;\t ]+/)
+      .map(t => t.trim().toUpperCase())
+      .filter(Boolean);
+  }, [bulkCodeText]);
+
+  // Derived preview product list for live A4 mockup
+  const previewProductList = useMemo(() => {
+    if (prodLabelQueue.length > 0) {
+      const list: Product[] = [];
+      prodLabelQueue.forEach(q => {
+        for (let i = 0; i < q.copies; i++) {
+          list.push(q.product);
+        }
+      });
+      return list;
+    }
+
+    if (prodLabelMode === 'MASIVO' && bulkCodeText.trim()) {
+      const items = parseBulkCodesToQueue(bulkCodeText, catalog);
+      return items.map(i => i.product);
+    }
+
+    if (selectedProdForLabel) {
+      return Array(prodLabelCopies).fill(selectedProdForLabel);
+    }
+
+    return [];
+  }, [prodLabelQueue, prodLabelMode, bulkCodeText, catalog, selectedProdForLabel, prodLabelCopies]);
+
+  // Generate and download A4 PDF with 3 product labels per page
+  const handlePrintProductLabelsA4 = (customQueue?: ProductLabelQueueItem[]) => {
+    const queue = customQueue && customQueue.length > 0 
+      ? customQueue 
+      : prodLabelQueue.length > 0 
+      ? prodLabelQueue 
+      : selectedProdForLabel 
+      ? [{ id: `${selectedProdForLabel.id}-${Date.now()}`, product: selectedProdForLabel, copies: prodLabelCopies }]
+      : [];
+
+    if (queue.length === 0) {
+      alert("Seleccione al menos un producto para generar los rótulos A4.");
+      return;
+    }
+
+    // Flatten label list
+    const labelList: Product[] = [];
+    queue.forEach(item => {
+      for (let i = 0; i < item.copies; i++) {
+        labelList.push(item.product);
+      }
+    });
+
+    if (labelList.length === 0) return;
+
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4' // 210 x 297 mm
+    });
+
+    const totalLabels = labelList.length;
+    const labelsPerPage = 3;
+
+    for (let i = 0; i < totalLabels; i++) {
+      const slotOnPage = i % labelsPerPage; // 0, 1, or 2
+
+      if (i > 0 && slotOnPage === 0) {
+        doc.addPage();
+      }
+
+      const p = labelList[i];
+      const codigoIco = p.codigo || p.sku || 'SIN_CODIGO';
+      const nombre = p.nombre || 'PRODUCTO SIN NOMBRE';
+
+      // Dimensions (A4 = 210mm x 297mm)
+      // Height per label slot = 91mm, Gap = 5mm, Top Margin = 6mm
+      const slotHeight = 91;
+      const y = 6 + slotOnPage * (slotHeight + 5);
+
+      // Outer Box Frame
+      doc.setDrawColor(15, 23, 42); // slate-900
+      doc.setLineWidth(1.0);
+      doc.rect(8, y, 194, slotHeight);
+
+      // Top Half: NOMBRE DEL PRODUCTO (Extra bold & thick)
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(26);
+      doc.setTextColor(0, 0, 0);
+
+      const splitName = doc.splitTextToSize(nombre.toUpperCase(), 182);
+      doc.text(splitName.slice(0, 2), 12, y + 18);
+      doc.text(splitName.slice(0, 2), 12.3, y + 18); // Micro-offset for extra thickness
+
+      // Horizontal Divider Line inside label
+      doc.setLineWidth(0.6);
+      doc.setDrawColor(203, 213, 225);
+      doc.line(8, y + 42, 202, y + 42);
+
+      // Vertical Divider Line between ICO Code and Barcode
+      doc.line(100, y + 42, 100, y + 91);
+
+      // Bottom Left: CÓDIGO ICO (EXTRA BOLD & HUGE)
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(50);
+      doc.setTextColor(0, 0, 0);
+      doc.text(codigoIco, 12, y + 74);
+      doc.text(codigoIco, 12.4, y + 74); // Micro-offset for extra thickness
+
+      // Bottom Right: CÓDIGO DE BARRAS DEL CÓDIGO ICO
+      const barcodeDataUrl = generateBarcodeDataUrl(codigoIco);
+      if (barcodeDataUrl) {
+        try {
+          doc.addImage(barcodeDataUrl, 'PNG', 104, y + 46, 92, 38);
+        } catch (e) {
+          console.error("Error inserting barcode into PDF:", e);
+        }
+      }
+    }
+
+    doc.save(`Rotulos_Productos_A4_${new Date().getTime()}.pdf`);
+  };
 
   // Filter catalog based on search
   const filteredProducts = useMemo(() => {
@@ -1014,24 +1283,40 @@ export const Rotulado: React.FC<RotuladoProps> = ({
             <Tag className="w-4 h-4" />
           </div>
           <div>
-            <h1 className="text-xs font-black text-slate-900 dark:text-white uppercase tracking-tight leading-tight">Rotulado de Pallets</h1>
+            <h1 className="text-xs font-black text-slate-900 dark:text-white uppercase tracking-tight leading-tight">
+              {activeTab === 'PRODUCTOS_A4' ? 'Rotulado de Productos (A4)' : 'Rotulado de Pallets'}
+            </h1>
           </div>
         </div>
 
         {/* Tab Selector (Cell-adaptive full-width touch tabs - ultra-compact) */}
-        <div className="grid grid-cols-2 bg-slate-100/80 dark:bg-slate-950 p-0.5 rounded-xl border border-slate-200/30 dark:border-slate-800 shadow-inner">
+        <div className="grid grid-cols-3 bg-slate-100/80 dark:bg-slate-950 p-0.5 rounded-xl border border-slate-200/30 dark:border-slate-800 shadow-inner">
           <button
             type="button"
             onClick={() => {
               setActiveTab('NUEVO');
             }}
-            className={`py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all whitespace-nowrap px-2.5 ${
+            className={`py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all whitespace-nowrap px-2 ${
               activeTab === 'NUEVO'
                 ? 'bg-white dark:bg-slate-800 text-[#82BD02] shadow-sm'
                 : 'text-slate-450 dark:text-slate-500 hover:text-slate-600'
             }`}
           >
-            Nuevo Rótulo
+            Pallets (LPN)
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab('PRODUCTOS_A4');
+            }}
+            className={`py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all whitespace-nowrap px-2 ${
+              activeTab === 'PRODUCTOS_A4'
+                ? 'bg-white dark:bg-slate-800 text-amber-600 dark:text-amber-400 shadow-sm'
+                : 'text-slate-450 dark:text-slate-500 hover:text-slate-600'
+            }`}
+          >
+            Rótulos Productos (A4)
           </button>
           
           <button
@@ -1039,13 +1324,13 @@ export const Rotulado: React.FC<RotuladoProps> = ({
             onClick={() => {
               setActiveTab('HISTORICOS');
             }}
-            className={`py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all whitespace-nowrap px-2.5 ${
+            className={`py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all whitespace-nowrap px-2 ${
               activeTab === 'HISTORICOS'
                 ? 'bg-white dark:bg-slate-800 text-[#009ED6] shadow-sm'
                 : 'text-slate-450 dark:text-slate-500 hover:text-slate-600'
             }`}
           >
-            Históricos Generados
+            Históricos LPN
           </button>
         </div>
       </div>
@@ -1343,7 +1628,454 @@ export const Rotulado: React.FC<RotuladoProps> = ({
       </div>
       )}
 
-      {/* HISTORICOS GENERADOS VIEW */}
+      {/* RÓTULOS DE PRODUCTOS (3 POR HOJA A4) VIEW */}
+      {activeTab === 'PRODUCTOS_A4' && (
+        <div className="w-full flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 min-h-0 animate-in fade-in duration-100">
+          
+          {/* LEFT COL: PRODUCT SELECTION & CONTROLS (5 cols) */}
+          <div className="lg:col-span-5 flex flex-col gap-3">
+            
+            {/* MODE TOGGLE: INDIVIDUAL VS MASIVO */}
+            <div className="grid grid-cols-2 bg-slate-100 dark:bg-slate-950 p-1 rounded-2xl border border-slate-200/50 dark:border-slate-800 shrink-0">
+              <button
+                type="button"
+                onClick={() => setProdLabelMode('INDIVIDUAL')}
+                className={`py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  prodLabelMode === 'INDIVIDUAL'
+                    ? 'bg-white dark:bg-slate-800 text-amber-600 dark:text-amber-400 shadow-sm'
+                    : 'text-slate-450 dark:text-slate-500 hover:text-slate-600'
+                }`}
+              >
+                <Search className="w-3.5 h-3.5" />
+                Búsqueda Individual
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setProdLabelMode('MASIVO')}
+                className={`py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  prodLabelMode === 'MASIVO'
+                    ? 'bg-white dark:bg-slate-800 text-amber-600 dark:text-amber-400 shadow-sm'
+                    : 'text-slate-450 dark:text-slate-500 hover:text-slate-600'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5" />
+                Pegar Lista de Códigos
+              </button>
+            </div>
+
+            {/* MODE A: BÚSQUEDA INDIVIDUAL */}
+            {prodLabelMode === 'INDIVIDUAL' && (
+              <>
+                {/* PANEL A: SEARCH PRODUCT */}
+                <div className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 p-3 rounded-2xl shadow-sm flex flex-col shrink-0">
+                  <h2 className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-1.5 flex items-center gap-1">
+                    <Search className="w-3.5 h-3.5 text-amber-500" />
+                    Buscar Producto para Rótulo
+                  </h2>
+                  
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={prodSearchTerm}
+                      onChange={e => setProdSearchTerm(e.target.value)}
+                      className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 focus:border-amber-500 dark:focus:border-amber-500/70 rounded-xl p-2.5 pl-9 text-xs font-black focus:ring-2 focus:ring-amber-500/20 transition-all outline-none text-slate-800 dark:text-white"
+                      placeholder="Escriba Código ICO, SKU, EAN o nombre..."
+                    />
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
+                    {prodSearchTerm && (
+                      <button 
+                        type="button"
+                        onClick={() => setProdSearchTerm('')} 
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5"
+                      >
+                        <XCircle className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Matching Products List */}
+                  {prodSearchTerm.trim().length >= 2 && (
+                    <div className="mt-2 border border-slate-150 dark:border-slate-800 rounded-xl max-h-48 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 bg-slate-50/50 dark:bg-slate-950/50">
+                      {filteredProdsForLabel.length === 0 ? (
+                        <div className="p-3 text-center text-xs text-slate-400 font-medium">
+                          No se encontraron productos coincidentes.
+                        </div>
+                      ) : (
+                        filteredProdsForLabel.map(p => (
+                          <button
+                            key={p.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedProdForLabel(p);
+                              setProdSearchTerm('');
+                            }}
+                            className="w-full p-2 text-left hover:bg-amber-50/80 dark:hover:bg-amber-950/30 transition-all flex items-center justify-between gap-2 group cursor-pointer"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 mb-0.5">
+                                <span className="px-2 py-0.5 bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-200 rounded text-[9px] font-black font-mono">
+                                  ICO: {p.codigo}
+                                </span>
+                                {p.marca && (
+                                  <span className="text-[9px] font-bold text-slate-400 uppercase truncate">
+                                    {p.marca}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate group-hover:text-amber-700 dark:group-hover:text-amber-300">
+                                {p.nombre}
+                              </p>
+                            </div>
+                            <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-amber-500 shrink-0" />
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* PANEL B: SELECTED PRODUCT & PRINT CONTROLS */}
+                {selectedProdForLabel ? (
+                  <div className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 p-3 rounded-2xl shadow-sm flex flex-col gap-3">
+                    <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                      <h3 className="text-[10px] font-black text-amber-600 dark:text-amber-400 uppercase tracking-widest flex items-center gap-1">
+                        <Package className="w-3.5 h-3.5" />
+                        Producto Seleccionado
+                      </h3>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedProdForLabel(null)}
+                        className="text-[10px] font-extrabold text-slate-400 hover:text-red-500 transition-all uppercase cursor-pointer"
+                      >
+                        Cambiar
+                      </button>
+                    </div>
+
+                    <div className="bg-amber-50/50 dark:bg-amber-950/20 border border-amber-200/60 dark:border-amber-800/40 p-3 rounded-xl space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-mono font-black text-amber-900 dark:text-amber-200 bg-amber-200/50 dark:bg-amber-900/50 px-2 py-0.5 rounded">
+                          CÓDIGO ICO: {selectedProdForLabel.codigo}
+                        </span>
+                        {selectedProdForLabel.sku && (
+                          <span className="text-[9px] font-mono text-slate-500">
+                            SKU: {selectedProdForLabel.sku}
+                          </span>
+                        )}
+                      </div>
+                      <h4 className="text-sm font-black text-slate-900 dark:text-white uppercase leading-snug pt-1">
+                        {selectedProdForLabel.nombre}
+                      </h4>
+                      {selectedProdForLabel.marca && (
+                        <p className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase">
+                          MARCA: {selectedProdForLabel.marca}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Copies / Page selector */}
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-black text-slate-500 dark:text-slate-400 uppercase tracking-wider block">
+                        Cantidad de Rótulos A4 (3 por Hoja):
+                      </label>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {[3, 6, 9].map(num => (
+                          <button
+                            key={num}
+                            type="button"
+                            onClick={() => setProdLabelCopies(num)}
+                            className={`py-2 rounded-xl text-xs font-black transition-all cursor-pointer ${
+                              prodLabelCopies === num
+                                ? 'bg-amber-500 text-white shadow-md shadow-amber-500/20'
+                                : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200'
+                            }`}
+                          >
+                            {num} ({num / 3} {num / 3 === 1 ? 'Hoja' : 'Hojas'})
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Print Direct or Add to Queue buttons */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const item: ProductLabelQueueItem = {
+                            id: `${selectedProdForLabel.id}-${Date.now()}`,
+                            product: selectedProdForLabel,
+                            copies: prodLabelCopies
+                          };
+                          setProdLabelQueue(prev => [...prev, item]);
+                          alert(`Agregado ${prodLabelCopies} rótulos de "${selectedProdForLabel.nombre}" a la lista A4.`);
+                        }}
+                        className="py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-800 dark:text-slate-200 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <PlusCircle className="w-3.5 h-3.5 text-amber-500" />
+                        + Agregar a Lista
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handlePrintProductLabelsA4()}
+                        className="py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl text-[10px] font-black uppercase tracking-wider shadow-md shadow-amber-500/20 transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Printer className="w-4 h-4" />
+                        IMPRIMIR HOJA A4
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 p-6 rounded-2xl shadow-sm text-center text-slate-400">
+                    <Tag className="w-8 h-8 mx-auto mb-2 opacity-30 text-amber-500" />
+                    <p className="text-xs font-bold text-slate-600 dark:text-slate-300">
+                      Seleccione un producto en el buscador
+                    </p>
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      Se generará una hoja A4 con 3 rótulos grandes en negrita con Código ICO, Nombre y Código de Barras.
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* MODE B: PEGAR LISTA DE CÓDIGOS (MASIVO) */}
+            {prodLabelMode === 'MASIVO' && (
+              <div className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 p-3.5 rounded-2xl shadow-sm flex flex-col gap-3">
+                <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                  <h2 className="text-[10px] font-black text-amber-600 dark:text-amber-400 uppercase tracking-widest flex items-center gap-1.5">
+                    <Layers className="w-4 h-4 text-amber-500" />
+                    Pegar Lista de Códigos ICO (1 Rótulo por Código)
+                  </h2>
+                  {bulkCodesDetected.length > 0 && (
+                    <span className="text-[9px] font-black font-mono px-2 py-0.5 bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-200 rounded-md border border-amber-200 dark:border-amber-800">
+                      {bulkCodesDetected.length} código(s) • {Math.ceil(bulkCodesDetected.length / 3)} Hoja(s) A4
+                    </span>
+                  )}
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase block mb-1">
+                    Pegue los códigos en la caja de texto (un código por línea):
+                  </label>
+                  <textarea
+                    rows={8}
+                    value={bulkCodeText}
+                    onChange={e => {
+                      setBulkCodeText(e.target.value);
+                      setPreviewPage(1);
+                    }}
+                    placeholder={`ACA001\nACA002\nADP001\nADP002\nADP003\nADP004\nADP005\nADP006\nADP007\nADP008`}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 focus:border-amber-500 dark:focus:border-amber-500/70 rounded-xl p-3 text-xs font-mono font-bold focus:ring-2 focus:ring-amber-500/20 transition-all outline-none text-slate-800 dark:text-white leading-relaxed resize-y"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const newItems = parseBulkCodesToQueue(bulkCodeText, catalog);
+                      if (newItems.length === 0) {
+                        alert("Pegue al menos un código válido en el recuadro.");
+                        return;
+                      }
+                      setProdLabelQueue(prev => [...prev, ...newItems]);
+                      setBulkCodeText('');
+                      alert(`Se agregaron ${newItems.length} rótulo(s) de productos a la cola A4 (1 rótulo por código).`);
+                    }}
+                    disabled={bulkCodesDetected.length === 0}
+                    className="py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-800 dark:text-slate-200 disabled:opacity-40 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <PlusCircle className="w-3.5 h-3.5 text-amber-500" />
+                    + Cargar a Lista A4
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const newItems = parseBulkCodesToQueue(bulkCodeText, catalog);
+                      if (newItems.length === 0) {
+                        alert("Pegue al menos un código válido en el recuadro.");
+                        return;
+                      }
+                      handlePrintProductLabelsA4(newItems);
+                    }}
+                    disabled={bulkCodesDetected.length === 0}
+                    className="py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 disabled:opacity-40 text-white rounded-xl text-[10px] font-black uppercase tracking-wider shadow-md shadow-amber-500/20 transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Printer className="w-4 h-4" />
+                    IMPRIMIR HOJAS A4 ({bulkCodesDetected.length})
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* PANEL C: PRODUCT LABELS QUEUE (IF ANY) */}
+            {prodLabelQueue.length > 0 && (
+              <div className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 p-3 rounded-2xl shadow-sm space-y-2">
+                <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-1.5">
+                  <span className="text-[10px] font-black text-slate-700 dark:text-slate-300 uppercase tracking-widest flex items-center gap-1">
+                    <Layers className="w-3.5 h-3.5 text-amber-500" />
+                    Lista de Impresión A4 ({prodLabelQueue.reduce((acc, q) => acc + q.copies, 0)} Rótulos)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setProdLabelQueue([])}
+                    className="text-[9px] font-bold text-red-500 hover:underline cursor-pointer"
+                  >
+                    Vaciar Lista
+                  </button>
+                </div>
+
+                <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                  {prodLabelQueue.map((item, idx) => (
+                    <div key={item.id} className="flex items-center justify-between p-2 bg-slate-50 dark:bg-slate-950 rounded-xl text-xs border border-slate-100 dark:border-slate-800">
+                      <div className="min-w-0 flex-1">
+                        <span className="font-mono text-[9px] font-black text-amber-600 block">
+                          ICO: {item.product.codigo}
+                        </span>
+                        <p className="font-bold text-slate-800 dark:text-slate-200 truncate text-[11px]">
+                          {item.product.nombre}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-200 text-[10px] font-black rounded-lg">
+                          {item.copies} rótulo(s)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setProdLabelQueue(prev => prev.filter((_, i) => i !== idx))}
+                          className="text-slate-400 hover:text-red-500 p-1 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => handlePrintProductLabelsA4(prodLabelQueue)}
+                  className="w-full py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-[10px] font-black uppercase tracking-wider shadow transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Printer className="w-4 h-4" />
+                  IMPRIMIR COLA A4 COMPLETA
+                </button>
+              </div>
+            )}
+
+          </div>
+
+          {/* RIGHT COL: A4 SHEET LIVE PREVIEW (7 cols) */}
+          <div className="lg:col-span-7 bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 p-3 sm:p-4 rounded-2xl shadow-sm flex flex-col items-center justify-start min-h-0">
+            <div className="w-full flex items-center justify-between mb-2 border-b border-slate-100 dark:border-slate-800 pb-2">
+              <span className="text-[10px] font-black text-slate-600 dark:text-slate-300 uppercase tracking-widest flex items-center gap-1.5">
+                <Printer className="w-4 h-4 text-amber-500" />
+                VISTA PREVIA HOJA A4 (3 RÓTULOS POR HOJA)
+              </span>
+              <span className="text-[9px] font-bold text-amber-700 bg-amber-50 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800 px-2 py-0.5 rounded-full">
+                {previewProductList.length} Rótulo(s) ({Math.max(1, Math.ceil(previewProductList.length / 3))} Hoja(s) A4)
+              </span>
+            </div>
+
+            {/* Page Navigation if multiple pages */}
+            {Math.ceil(previewProductList.length / 3) > 1 && (
+              <div className="w-full flex items-center justify-between bg-amber-50/60 dark:bg-amber-950/30 p-1.5 px-3 rounded-xl border border-amber-200/50 dark:border-amber-800/40 mb-2">
+                <button
+                  type="button"
+                  onClick={() => setPreviewPage(p => Math.max(1, p - 1))}
+                  disabled={previewPage <= 1}
+                  className="px-2.5 py-1 bg-white dark:bg-slate-800 disabled:opacity-40 rounded-lg text-[10px] font-black uppercase text-amber-800 dark:text-amber-300 shadow-sm"
+                >
+                  &larr; Anterior
+                </button>
+                <span className="text-[10px] font-black text-amber-900 dark:text-amber-200 font-mono">
+                  HOJA {previewPage} DE {Math.ceil(previewProductList.length / 3)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPreviewPage(p => Math.min(Math.ceil(previewProductList.length / 3), p + 1))}
+                  disabled={previewPage >= Math.ceil(previewProductList.length / 3)}
+                  className="px-2.5 py-1 bg-white dark:bg-slate-800 disabled:opacity-40 rounded-lg text-[10px] font-black uppercase text-amber-800 dark:text-amber-300 shadow-sm"
+                >
+                  Siguiente &rarr;
+                </button>
+              </div>
+            )}
+
+            {/* A4 Sheet Container Mockup */}
+            <div className="w-full max-w-md bg-white dark:bg-slate-950 border-2 border-slate-300 dark:border-slate-700 rounded-2xl p-3 shadow-xl space-y-2.5">
+              
+              {/* Slot 1, Slot 2, Slot 3 */}
+              {[0, 1, 2].map(slotIndex => {
+                const itemIndex = (previewPage - 1) * 3 + slotIndex;
+                const targetProduct = previewProductList[itemIndex] || (itemIndex === 0 ? selectedProdForLabel : null);
+                
+                const codeIco = targetProduct ? targetProduct.codigo : 'ACA001';
+                const nameProd = targetProduct ? targetProduct.nombre : 'PRODUCTO DE EJEMPLO RÓTULO A4';
+
+                if (!targetProduct && previewProductList.length > 0) {
+                  return (
+                    <div key={slotIndex} className="border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-xl p-4 text-center text-[10px] font-bold text-slate-400 bg-slate-50/50 dark:bg-slate-900/30">
+                      [ Espacio Libre en Hoja A4 ]
+                    </div>
+                  );
+                }
+
+                return (
+                  <div key={slotIndex} className="border-2 border-slate-900 dark:border-slate-600 rounded-xl overflow-hidden bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-sm p-3 space-y-2">
+                    {/* Product Name (EXTRA BOLD / THICK) */}
+                    <div className="border-b border-slate-200 dark:border-slate-800 pb-2">
+                      <h3 className="text-lg sm:text-xl font-[900] uppercase text-black dark:text-white leading-snug tracking-tight line-clamp-2">
+                        {nameProd}
+                      </h3>
+                    </div>
+
+                    {/* Code & Barcode split (NO text labels) */}
+                    <div className="grid grid-cols-2 divide-x divide-slate-200 dark:divide-slate-800 items-center pt-1">
+                      {/* Left: Huge bold ICO Code */}
+                      <div className="pr-2">
+                        <span className="text-4xl sm:text-5xl font-[900] text-black dark:text-white font-mono tracking-wider block">
+                          {codeIco}
+                        </span>
+                      </div>
+
+                      {/* Right: Barcode preview */}
+                      <div className="pl-2 text-center">
+                        <ProductBarcodePreview code={codeIco} />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+
+            </div>
+
+            <div className="mt-3 text-center">
+              <button
+                type="button"
+                onClick={() => {
+                  if (prodLabelMode === 'MASIVO' && bulkCodeText.trim() && prodLabelQueue.length === 0) {
+                    const newItems = parseBulkCodesToQueue(bulkCodeText, catalog);
+                    if (newItems.length > 0) {
+                      handlePrintProductLabelsA4(newItems);
+                      return;
+                    }
+                  }
+                  handlePrintProductLabelsA4();
+                }}
+                className="px-6 py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white text-xs font-black uppercase tracking-wider rounded-xl shadow-lg shadow-amber-500/20 transition-all active:scale-95 flex items-center gap-2 mx-auto cursor-pointer"
+              >
+                <Printer className="w-4 h-4" />
+                <span>DESCARGAR / IMPRIMIR HOJAS A4 ({previewProductList.length || 3} RÓTULOS)</span>
+              </button>
+            </div>
+
+          </div>
+
+        </div>
+      )}
       {activeTab === 'HISTORICOS' && (
         <div className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 p-3 rounded-2xl shadow-sm flex flex-col flex-1 min-h-0 animate-in fade-in duration-100">
           

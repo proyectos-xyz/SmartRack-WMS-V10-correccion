@@ -23,6 +23,7 @@ export const CapturaEan: React.FC<CapturaEanProps> = ({ catalog, onUpdateCatalog
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCamera, setSelectedCamera] = useState<string>('TODAS');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [visibleCount, setVisibleCount] = useState<number>(30);
   
   // Modal states
   const [eanBulto, setEanBulto] = useState('');
@@ -86,6 +87,15 @@ export const CapturaEan: React.FC<CapturaEanProps> = ({ catalog, onUpdateCatalog
       return true;
     });
   }, [catalog, selectedCamera, searchTerm]);
+
+  // Reset visible count when filter or camera changes
+  useEffect(() => {
+    setVisibleCount(30);
+  }, [searchTerm, selectedCamera]);
+
+  const displayedProducts = useMemo(() => {
+    return filteredProducts.slice(0, visibleCount);
+  }, [filteredProducts, visibleCount]);
 
   const handleSelectProduct = (product: Product) => {
     setSelectedProduct(product);
@@ -243,44 +253,58 @@ export const CapturaEan: React.FC<CapturaEanProps> = ({ catalog, onUpdateCatalog
             <p className="text-slate-400 text-xs">Pruebe modificando su criterio de búsqueda o filtro de cámara.</p>
           </div>
         ) : (
-          filteredProducts.map((p) => (
-            <div
-              key={p.id}
-              onClick={() => handleSelectProduct(p)}
-              className="bg-white hover:bg-slate-50 border border-slate-150/80 active:scale-[0.98] rounded-2xl p-4 flex items-center justify-between gap-4 transition-all shadow-sm cursor-pointer"
-            >
-              <div className="space-y-1.5 flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="px-2 py-0.5 bg-slate-100 text-slate-700 text-[10px] font-black rounded-md font-mono tracking-wider">
-                    {p.codigo}
-                  </span>
-                  <span className="px-2 py-0.5 bg-[#009ED6]/10 text-[#009ED6] text-[10px] font-black rounded-md uppercase tracking-wider">
-                    {p.camara_texto || p.zona_predeterminada || 'SIN CÁMARA'}
-                  </span>
-                  {getEanStatusBadge(p)}
-                </div>
-                
-                <h3 className="text-sm font-bold text-slate-800 line-clamp-2 uppercase leading-snug">
-                  {p.nombre}
-                </h3>
+          <>
+            {displayedProducts.map((p) => (
+              <div
+                key={p.id}
+                onClick={() => handleSelectProduct(p)}
+                className="bg-white hover:bg-slate-50 border border-slate-150/80 active:scale-[0.98] rounded-2xl p-4 flex items-center justify-between gap-4 transition-all shadow-sm cursor-pointer"
+              >
+                <div className="space-y-1.5 flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="px-2 py-0.5 bg-slate-100 text-slate-700 text-[10px] font-black rounded-md font-mono tracking-wider">
+                      {p.codigo}
+                    </span>
+                    <span className="px-2 py-0.5 bg-[#009ED6]/10 text-[#009ED6] text-[10px] font-black rounded-md uppercase tracking-wider">
+                      {p.camara_texto || p.zona_predeterminada || 'SIN CÁMARA'}
+                    </span>
+                    {getEanStatusBadge(p)}
+                  </div>
+                  
+                  <h3 className="text-sm font-bold text-slate-800 line-clamp-2 uppercase leading-snug">
+                    {p.nombre}
+                  </h3>
 
-                <div className="flex gap-4 text-xs font-mono text-slate-500">
-                  <div>
-                    <span className="text-slate-400 font-sans text-[10px] font-bold block uppercase">EAN BULTO</span>
-                    <span>{p.ean_bulto || '—'}</span>
+                  <div className="flex gap-4 text-xs font-mono text-slate-500">
+                    <div>
+                      <span className="text-slate-400 font-sans text-[10px] font-bold block uppercase">EAN BULTO</span>
+                      <span>{p.ean_bulto || '—'}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 font-sans text-[10px] font-bold block uppercase">EAN PRODUCTO</span>
+                      <span>{p.sku || '—'}</span>
+                    </div>
                   </div>
-                  <div>
-                    <span className="text-slate-400 font-sans text-[10px] font-bold block uppercase">EAN PRODUCTO</span>
-                    <span>{p.sku || '—'}</span>
-                  </div>
+                </div>
+
+                <div className="shrink-0 text-slate-400 bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                  <ChevronRight className="w-5 h-5 text-slate-500" />
                 </div>
               </div>
+            ))}
 
-              <div className="shrink-0 text-slate-400 bg-slate-50 p-2.5 rounded-xl border border-slate-100">
-                <ChevronRight className="w-5 h-5 text-slate-500" />
+            {filteredProducts.length > visibleCount && (
+              <div className="text-center pt-3 pb-2">
+                <button
+                  type="button"
+                  onClick={() => setVisibleCount(prev => prev + 30)}
+                  className="px-6 py-3 bg-slate-200 hover:bg-slate-300 active:scale-98 text-slate-800 text-xs font-black uppercase rounded-2xl transition-all shadow-sm cursor-pointer"
+                >
+                  Cargar más productos ({filteredProducts.length - visibleCount} restantes)
+                </button>
               </div>
-            </div>
-          ))
+            )}
+          </>
         )}
       </div>
 

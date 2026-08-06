@@ -34,8 +34,9 @@ import { CapturaEan } from './components/CapturaEan';
 import { AlertMonitor } from './components/AlertMonitor';
 import { Expirations } from './components/Expirations';
 import { EnsayosPicking } from './components/EnsayosPicking';
+import SalidasLpn from './components/SalidasLpn';
 import { InventoryItem, Rack, Zone, ViewState, Slot, RackLocation, Product, Task, Usuario, StocktakeRecord, ZoneType } from './types';
-import { LayoutGrid, ArrowDownToLine, Settings, ClipboardList, Database, Beaker, Tag, Truck, ListChecks, Menu, XCircle, Sun, Moon, RefreshCw, ChevronRight, User, Upload, History as HistoryIcon, Monitor as MonitorIcon, Scale, Trash2, FileCheck, ChevronUp, ChevronDown, Package, TrendingUp, Building2, Bell, Printer, CheckCircle, Clock } from './components/Icons';
+import { LayoutGrid, ArrowDownToLine, Settings, ClipboardList, Database, Beaker, Tag, Truck, ListChecks, Menu, XCircle, Sun, Moon, RefreshCw, ChevronRight, User, Upload, History as HistoryIcon, Monitor as MonitorIcon, Scale, Trash2, FileCheck, ChevronUp, ChevronDown, Package, TrendingUp, Building2, Bell, Printer, CheckCircle, Clock, LogOut } from './components/Icons';
 import { supabase } from './supabaseClient';
 
 const LOGO_URL = 'https://iili.io/fsmAapV.png';
@@ -1667,6 +1668,7 @@ const App: React.FC = () => {
             ]
         },
         { view: ViewState.DISPATCH_PROVINCE, icon: <Truck className="w-5 h-5" />, label: "Despachos Provincia" },
+        { view: ViewState.SALIDAS_LPN, icon: <LogOut className="w-5 h-5 text-amber-600 dark:text-amber-400" />, label: "Salidas LPN" },
         { view: ViewState.REVERSE_LOGISTICS, icon: <RefreshCw className="w-5 h-5" />, label: "Logíst. Inversa" },
         { view: ViewState.CORTES, icon: <ClipboardList className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />, label: "Cortes" },
       ]
@@ -2175,6 +2177,7 @@ const App: React.FC = () => {
                     }} currentUser={currentUser} onRefresh={loadInitialData} onAssignLocation={handleAssignLocation} initialAccordion="VALIDATE" />}
                     {view === ViewState.LAYOUT && <Layout inventory={inventory} catalog={catalog} racks={racks} zones={zones} onAssignLocation={(lpn, loc) => handleAssignLocation(lpn, loc)} onDispatch={(lpn) => handleDispatch(lpn)} onReceive={handleReceive} itemsPendingLocation={inventory.filter(i => !i.location)} lastMixedSequence={mixedSequenceCounter} lastSequence={sequenceCounter} />}
                     {view === ViewState.DISPATCH_PROVINCE && <DispatchProvince catalog={catalog} user={currentUser} />}
+                    {view === ViewState.SALIDAS_LPN && <SalidasLpn inventory={inventory} catalog={catalog} currentUser={currentUser} onDispatch={handleDispatch} onRefresh={loadInitialData} />}
                     {view === ViewState.PICKING && <AfternoonCar catalog={catalog} user={currentUser} initialViewMode="CARGA" />}
                     {view === ViewState.VALIDADOR && <AfternoonCar catalog={catalog} user={currentUser} initialViewMode="VALIDADOR" />}
                     {view === ViewState.PICKING_CONTROL && <AfternoonMonitor onClose={() => setView(ViewState.PICKING)} />}
