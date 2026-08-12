@@ -223,6 +223,8 @@ const XmlReception: React.FC<XmlReceptionProps> = ({ catalog, currentUser, onSel
         codigo: item.product.codigo,
         nombre: item.product.nombre,
         cantidad: item.quantity,
+        cantidad_xml: item.quantity,
+        cantidad_validada: null,
         fecha_vencimiento: item.expirationDate,
         usuario_registro: currentUser?.username || 'SISTEMA_XML',
         fecha_registro: new Date().toISOString(),
@@ -231,8 +233,16 @@ const XmlReception: React.FC<XmlReceptionProps> = ({ catalog, currentUser, onSel
         estado: 'PENDIENTE_LAIVE'
       }));
 
-      const { error } = await supabase.from('recepcion_productos').insert(entries);
-      if (error) throw error;
+      let { error } = await supabase.from('recepcion_productos').insert(entries);
+      
+      // Fallback if cantidad_xml or cantidad_validada columns do not exist yet in DB schema
+      if (error && (error.message?.includes('column') || error.code === 'PGRST204')) {
+        const fallbackEntries = entries.map(({ cantidad_xml, cantidad_validada, ...rest }) => rest);
+        const res = await supabase.from('recepcion_productos').insert(fallbackEntries);
+        if (res.error) throw res.error;
+      } else if (error) {
+        throw error;
+      }
 
       alert(`${itemsToProcess.length} ítems procesados correctamente.`);
       // Remove processed items from list

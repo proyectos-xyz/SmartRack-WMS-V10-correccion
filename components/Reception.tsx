@@ -143,6 +143,7 @@ const Reception: React.FC<ReceptionProps> = ({
   const [isValidatingEntry, setIsValidatingEntry] = useState(false);
   const [showValidationModal, setShowValidationModal] = useState({ show: false, message: '' });
   const [showValidationReportModal, setShowValidationReportModal] = useState(false);
+  const [showFormatHelpModal, setShowFormatHelpModal] = useState(false);
   const [activeReportTab, setActiveReportTab] = useState<'differences' | 'appOnly' | 'sapOnly' | 'conforme'>('differences');
   const [validationReportData, setValidationReportData] = useState<{
     differences: any[];
@@ -150,6 +151,46 @@ const Reception: React.FC<ReceptionProps> = ({
     sapOnly: any[];
     conforme: any[];
   } | null>(null);
+
+  const handleDownloadSampleTemplate = () => {
+    try {
+      const templateData = [
+        {
+          'CODIGO': 'LAF010',
+          'CANTIDAD SAP': 250,
+          'FECHA': new Date().toISOString().split('T')[0],
+          'DESCRIPCION': 'LECHE ENTERA LAIVE BOLSA 900ML'
+        },
+        {
+          'CODIGO': 'GLI001',
+          'CANTIDAD SAP': 500,
+          'FECHA': new Date().toISOString().split('T')[0],
+          'DESCRIPCION': 'YOGURT FRESA GLORIA 1.6KG'
+        },
+        {
+          'CODIGO': 'AEA010',
+          'CANTIDAD SAP': 120,
+          'FECHA': '',
+          'DESCRIPCION': 'MANTEQUILLA CON SAL 200G'
+        }
+      ];
+
+      const ws = XLSX.utils.json_to_sheet(templateData);
+      ws['!cols'] = [
+        { wch: 15 },
+        { wch: 18 },
+        { wch: 15 },
+        { wch: 35 }
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Formato_Validacion_SAP");
+      XLSX.writeFile(wb, "Plantilla_Validacion_Ingresos_SAP.xlsx");
+    } catch (err) {
+      console.error("Error al generar plantilla:", err);
+      alert("Error al descargar la plantilla de ejemplo.");
+    }
+  };
 
   // Submission Lock State (Double-Click / Multi-Submit Protection)
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -393,13 +434,18 @@ const Reception: React.FC<ReceptionProps> = ({
 
     setIsValidatingEntry(true);
     try {
+      // Robust header column matching
       const getRowValue = (row: any, aliases: string[]) => {
+        const cleanKey = (str: string) => 
+          str.toLowerCase()
+            .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+            .replace(/[^a-z0-9]/g, '');
+        
+        const rowKeys = Object.keys(row);
         for (const alias of aliases) {
-          const key = Object.keys(row).find(
-            k => k.toLowerCase().replace(/_/g, ' ').replace(/\s+/g, ' ').trim() === 
-                 alias.toLowerCase().replace(/_/g, ' ').replace(/\s+/g, ' ').trim()
-          );
-          if (key !== undefined) return row[key];
+          const targetClean = cleanKey(alias);
+          const foundKey = rowKeys.find(k => cleanKey(k) === targetClean);
+          if (foundKey !== undefined) return row[foundKey];
         }
         return undefined;
       };
@@ -444,7 +490,7 @@ const Reception: React.FC<ReceptionProps> = ({
             return d.toISOString().split('T')[0];
           }
         } catch (e) {}
-        return str;
+        return '';
       };
 
       const reader = new FileReader();
@@ -465,19 +511,34 @@ const Reception: React.FC<ReceptionProps> = ({
           // Group SAP (Excel) by date and code
           const sapGrouped: Record<string, { fecha: string; codigo: string; nombre: string; cantidad: number }> = {};
           const uniqueDates = new Set<string>();
+          const todayStr = new Date().toISOString().split('T')[0];
 
           excelData.forEach(row => {
-            const rawFecha = getRowValue(row, ['fecha de ingreso', 'fecha ingreso', 'fecha_ingreso', 'fecha', 'fecha de recepcion', 'fecha de registro']);
-            const rawCodigo = getRowValue(row, ['codigo (ico)', 'codigo ico', 'codigo', 'código (ico)', 'código ico', 'código', 'id', 'sku']);
-            const rawCantidad = getRowValue(row, ['cantidad', 'cant', 'cantidad sap', 'cantidad_sap', 'unidades']);
-            const rawNombre = getRowValue(row, ['nombre', 'producto', 'desc', 'descripcion', 'descripción', 'nombre producto']);
+            const rawFecha = getRowValue(row, [
+              'fecha de ingreso', 'fecha ingreso', 'fecha_ingreso', 'fecha', 'fecha de recepcion', 'fecha de registro', 'fecha recepcion'
+            ]);
+            const rawCodigo = getRowValue(row, [
+              'codigo (ico)', 'codigo ico', 'codigo', 'código (ico)', 'código ico', 'código', 'id', 'sku', 'material', 'cod_prod', 'cod_producto', 'cod producto', 'codigo producto', 'código producto', 'cod'
+            ]);
+            const rawCantidad = getRowValue(row, [
+              'cantidad sap', 'cantidad_sap', 'cant sap', 'cant_sap', 'cantidad', 'cant', 'unidades', 'ctd', 'ctd sap', 'ctd_sap', 'cant. sap'
+            ]);
+            const rawNombre = getRowValue(row, [
+              'nombre', 'producto', 'desc', 'descripcion', 'descripción', 'nombre producto', 'desc. producto'
+            ]);
 
-            const fecha = parseExcelDate(rawFecha);
+            const parsedFecha = parseExcelDate(rawFecha);
+            // Default to TODAY if FECHA is absent in Excel
+            const fecha = parsedFecha || todayStr;
+
             const codigo = String(rawCodigo !== undefined && rawCodigo !== null ? rawCodigo : '').trim().toUpperCase();
             const cantidad = parseFloat(rawCantidad !== undefined && rawCantidad !== null ? rawCantidad : '0') || 0;
-            const nombre = String(rawNombre !== undefined && rawNombre !== null ? rawNombre : 'PRODUCTO EXCEL').trim();
+            
+            // Auto-enrich product name from catalog if missing or generic
+            const matchedCat = catalog?.find(p => p.codigo?.trim().toUpperCase() === codigo || p.sku?.trim().toUpperCase() === codigo);
+            const nombre = String(rawNombre !== undefined && rawNombre !== null && String(rawNombre).trim() !== '' ? rawNombre : (matchedCat?.nombre || 'PRODUCTO EXCEL')).trim();
 
-            if (fecha && codigo) {
+            if (codigo) {
               uniqueDates.add(fecha);
               const key = `${fecha}_${codigo}`;
               if (!sapGrouped[key]) {
@@ -487,24 +548,37 @@ const Reception: React.FC<ReceptionProps> = ({
             }
           });
 
+          if (Object.keys(sapGrouped).length === 0) {
+            alert("No se encontraron registros válidos con columna de CÓDIGO en el archivo Excel. Verifique el formato e intente nuevamente.");
+            setIsValidatingEntry(false);
+            return;
+          }
+
           // Determine date range to query Supabase
-          let minDate = new Date().toISOString().split('T')[0];
-          let maxDate = minDate;
+          let minDate = todayStr;
+          let maxDate = todayStr;
           if (uniqueDates.size > 0) {
             const sortedDates = Array.from(uniqueDates).sort();
             minDate = sortedDates[0];
             maxDate = sortedDates[sortedDates.length - 1];
           }
 
-          // Query recepcion_productos in the calculated date range
+          // Buffer 1 day before minDate and 1 day after maxDate to handle UTC boundary offsets
+          const minDObj = new Date(minDate + 'T00:00:00');
+          minDObj.setDate(minDObj.getDate() - 1);
+          const startBufStr = minDObj.toISOString().split('T')[0];
+
+          const maxDObj = new Date(maxDate + 'T23:59:59');
+          maxDObj.setDate(maxDObj.getDate() + 1);
+          const endBufStr = maxDObj.toISOString().split('T')[0];
+
+          // Query recepcion_productos in calculated date range
           let query = supabase
             .from('recepcion_productos')
-            .select('codigo, nombre, cantidad, fecha_registro, lpn')
-            .eq('estado', 'ACTIVO')
-            .gte('fecha_registro', `${minDate}T00:00:00`)
-            .lte('fecha_registro', `${maxDate}T23:59:59.999`);
+            .select('codigo, nombre, cantidad, fecha_registro, lpn, estado')
+            .gte('fecha_registro', `${startBufStr}T00:00:00`)
+            .lte('fecha_registro', `${endBufStr}T23:59:59.999`);
 
-          // Scope by branch if multi-tenant active
           if (currentUser?.sede_id) {
             query = query.eq('sede_id', currentUser.sede_id);
           }
@@ -512,17 +586,22 @@ const Reception: React.FC<ReceptionProps> = ({
           const { data: receptionData, error: dbError } = await query;
           if (dbError) throw dbError;
 
-          // Group App by date and code
+          // Group App by local date and code
           const appGrouped: Record<string, { fecha: string; codigo: string; nombre: string; cantidad: number; lpns: string[] }> = {};
           
           receptionData?.forEach(item => {
             if (!item.fecha_registro) return;
+            
+            // Format to local YYYY-MM-DD
             const dateObj = new Date(item.fecha_registro);
             const year = dateObj.getFullYear();
             const month = String(dateObj.getMonth() + 1).padStart(2, '0');
             const day = String(dateObj.getDate()).padStart(2, '0');
             const fecha = `${year}-${month}-${day}`;
             
+            // Match against uniqueDates
+            if (!uniqueDates.has(fecha)) return;
+
             const codigo = String(item.codigo || '').trim().toUpperCase();
             const cantidad = parseFloat(item.cantidad || '0') || 0;
             const nombre = String(item.nombre || '').trim();
@@ -2534,33 +2613,56 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                     </button>
                     
                     {isValidationAccordionOpen && (
-                        <div className="px-4 pb-4 animate-in slide-in-from-top-2 duration-200">
-                            <div className="bg-slate-50 rounded-xl p-4 border-2 border-dashed border-slate-200">
-                                <p className="text-[10px] font-bold text-slate-500 uppercase mb-3 text-center">Subir archivo Excel (CODIGO, CANTIDAD SAP)</p>
+                        <div className="px-4 pb-4 animate-in slide-in-from-top-2 duration-200 space-y-3">
+                            <div className="bg-slate-50 rounded-xl p-4 border-2 border-dashed border-slate-200 space-y-3">
+                                <div className="flex items-center justify-between gap-1">
+                                    <p className="text-[10px] font-bold text-slate-500 uppercase">Subir archivo Excel (CODIGO, CANTIDAD SAP)</p>
+                                    <button 
+                                        type="button"
+                                        onClick={() => setShowFormatHelpModal(true)}
+                                        className="text-[10px] font-black text-blue-600 hover:text-blue-800 underline flex items-center gap-1 cursor-pointer shrink-0"
+                                    >
+                                        <Info className="w-3.5 h-3.5 text-blue-600" />
+                                        <span>Ver Formato / Ejemplo</span>
+                                    </button>
+                                </div>
+
                                 <div className="flex flex-col gap-3">
                                     <input 
                                         type="file" 
                                         accept=".xlsx, .xls"
                                         onChange={(e) => setValidationFile(e.target.files?.[0] || null)}
-                                        className="text-xs text-slate-600 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-black file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                                        className="text-xs text-slate-600 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-black file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer"
                                     />
-                                    <button 
-                                        type="button"
-                                        onClick={handleValidateEntry}
-                                        disabled={!validationFile || isValidatingEntry}
-                                        className={`w-full py-3 rounded-xl font-black uppercase text-xs transition-all shadow-md active:scale-95 flex items-center justify-center gap-2 ${
-                                            !validationFile || isValidatingEntry 
-                                            ? 'bg-gray-200 text-gray-400 cursor-not-allowed' 
-                                            : 'bg-blue-600 text-white hover:bg-blue-700'
-                                        }`}
-                                    >
-                                        {isValidatingEntry ? (
-                                            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                        ) : (
-                                            <Search className="w-4 h-4" />
-                                        )}
-                                        REVISAR Y GENERAR REPORTE
-                                    </button>
+                                    
+                                    <div className="flex gap-2">
+                                        <button 
+                                            type="button"
+                                            onClick={handleValidateEntry}
+                                            disabled={!validationFile || isValidatingEntry}
+                                            className={`flex-1 py-3 rounded-xl font-black uppercase text-xs transition-all shadow-md active:scale-95 flex items-center justify-center gap-2 ${
+                                                !validationFile || isValidatingEntry 
+                                                ? 'bg-gray-200 text-gray-400 cursor-not-allowed' 
+                                                : 'bg-blue-600 text-white hover:bg-blue-700 cursor-pointer'
+                                            }`}
+                                        >
+                                            {isValidatingEntry ? (
+                                                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                                            ) : (
+                                                <Search className="w-4 h-4" />
+                                            )}
+                                            REVISAR Y GENERAR REPORTE
+                                        </button>
+
+                                        <button 
+                                            type="button"
+                                            onClick={() => setShowFormatHelpModal(true)}
+                                            className="px-3 py-3 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded-xl text-xs flex items-center justify-center cursor-pointer"
+                                            title="Ver formato y ejemplos de archivo Excel"
+                                        >
+                                            <Info className="w-4 h-4" />
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -3677,6 +3779,149 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                   </div>
               </div>
           </div>
+      )}
+       {/* MODAL: Formato Requerido y Ejemplos */}
+      {showFormatHelpModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+            {/* Modal Header */}
+            <div className="p-4 bg-blue-600 text-white flex justify-between items-center shrink-0">
+              <div className="flex items-center gap-2">
+                <FileCheck className="w-5 h-5 text-white" />
+                <h3 className="text-sm font-black uppercase tracking-wide">Formato de Excel Requerido (SAP)</h3>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setShowFormatHelpModal(false)}
+                className="text-white/80 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-5 space-y-4 overflow-y-auto text-xs text-slate-700 dark:text-slate-300">
+              <p className="leading-relaxed">
+                El archivo Excel debe ser un libro formateado (<strong>.xlsx</strong> o <strong>.xls</strong>) que contenga al menos las siguientes columnas en la primera fila:
+              </p>
+
+              {/* Requirements List */}
+              <div className="space-y-2 bg-slate-50 dark:bg-slate-800/60 p-3.5 rounded-xl border border-slate-200 dark:border-slate-700">
+                <div className="flex items-start gap-2">
+                  <span className="bg-blue-600 text-white font-black text-[10px] px-1.5 py-0.5 rounded uppercase shrink-0">Obligatorio</span>
+                  <div>
+                    <p className="font-extrabold text-slate-900 dark:text-white">CÓDIGO (o SKU / Material)</p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Código único del producto en catálogo (Ej: <code className="font-mono text-blue-600 font-bold">LAF010</code>, <code className="font-mono text-blue-600 font-bold">GLI001</code>).</p>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-2 pt-2 border-t border-slate-200 dark:border-slate-700">
+                  <span className="bg-blue-600 text-white font-black text-[10px] px-1.5 py-0.5 rounded uppercase shrink-0">Obligatorio</span>
+                  <div>
+                    <p className="font-extrabold text-slate-900 dark:text-white">CANTIDAD SAP (o Cantidad)</p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Cantidad total enviada desde SAP en unidades.</p>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-2 pt-2 border-t border-slate-200 dark:border-slate-700">
+                  <span className="bg-amber-500 text-white font-black text-[10px] px-1.5 py-0.5 rounded uppercase shrink-0">Opcional</span>
+                  <div>
+                    <p className="font-extrabold text-slate-900 dark:text-white">FECHA (o Fecha de Ingreso)</p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Si no se especifica esta columna, el sistema comparará automáticamente contra todo lo recepcionado en el <strong>día de hoy</strong>.</p>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-2 pt-2 border-t border-slate-200 dark:border-slate-700">
+                  <span className="bg-amber-500 text-white font-black text-[10px] px-1.5 py-0.5 rounded uppercase shrink-0">Opcional</span>
+                  <div>
+                    <p className="font-extrabold text-slate-900 dark:text-white">DESCRIPCIÓN (o Nombre de Producto)</p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Nombre del producto. Si se omite, se completará automáticamente usando el catálogo.</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Example Table 1 */}
+              <div>
+                <p className="font-extrabold text-slate-900 dark:text-white mb-2 uppercase text-[11px]">Ejemplo 1: Formato Básico de 2 Columnas</p>
+                <div className="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm">
+                  <table className="w-full text-left text-[11px]">
+                    <thead className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-extrabold uppercase">
+                      <tr>
+                        <th className="px-3 py-2 border-b border-r border-slate-200 dark:border-slate-700">CODIGO</th>
+                        <th className="px-3 py-2 border-b border-slate-200 dark:border-slate-700">CANTIDAD SAP</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800 font-mono">
+                      <tr>
+                        <td className="px-3 py-1.5 border-r border-slate-200 dark:border-slate-700 text-blue-600 font-bold">LAF010</td>
+                        <td className="px-3 py-1.5 font-bold">250</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-1.5 border-r border-slate-200 dark:border-slate-700 text-blue-600 font-bold">GLI001</td>
+                        <td className="px-3 py-1.5 font-bold">500</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-1.5 border-r border-slate-200 dark:border-slate-700 text-blue-600 font-bold">AEA010</td>
+                        <td className="px-3 py-1.5 font-bold">120</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Example Table 2 */}
+              <div>
+                <p className="font-extrabold text-slate-900 dark:text-white mb-2 uppercase text-[11px]">Ejemplo 2: Formato Completo de 4 Columnas</p>
+                <div className="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm">
+                  <table className="w-full text-left text-[11px]">
+                    <thead className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-extrabold uppercase">
+                      <tr>
+                        <th className="px-3 py-2 border-b border-r border-slate-200 dark:border-slate-700">CODIGO</th>
+                        <th className="px-3 py-2 border-b border-r border-slate-200 dark:border-slate-700">CANTIDAD SAP</th>
+                        <th className="px-3 py-2 border-b border-r border-slate-200 dark:border-slate-700">FECHA</th>
+                        <th className="px-3 py-2 border-b border-slate-200 dark:border-slate-700">DESCRIPCION</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800 font-mono text-[10px]">
+                      <tr>
+                        <td className="px-3 py-1.5 border-r border-slate-200 dark:border-slate-700 text-blue-600 font-bold">LAF010</td>
+                        <td className="px-3 py-1.5 border-r border-slate-200 dark:border-slate-700 font-bold">250</td>
+                        <td className="px-3 py-1.5 border-r border-slate-200 dark:border-slate-700">{new Date().toISOString().split('T')[0]}</td>
+                        <td className="px-3 py-1.5 font-sans">LECHE ENTERA LAIVE 900ML</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-1.5 border-r border-slate-200 dark:border-slate-700 text-blue-600 font-bold">GLI001</td>
+                        <td className="px-3 py-1.5 border-r border-slate-200 dark:border-slate-700 font-bold">500</td>
+                        <td className="px-3 py-1.5 border-r border-slate-200 dark:border-slate-700">{new Date().toISOString().split('T')[0]}</td>
+                        <td className="px-3 py-1.5 font-sans">YOGURT FRESA GLORIA 1.6KG</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row justify-between items-center gap-3 shrink-0">
+              <button
+                type="button"
+                onClick={handleDownloadSampleTemplate}
+                className="w-full sm:w-auto px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black rounded-xl text-xs uppercase tracking-wider shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Download className="w-4 h-4" />
+                <span>Descargar Plantilla Excel</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowFormatHelpModal(false)}
+                className="w-full sm:w-auto px-5 py-2.5 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-800 dark:text-slate-100 font-bold rounded-xl text-xs uppercase cursor-pointer"
+              >
+                Entendido
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

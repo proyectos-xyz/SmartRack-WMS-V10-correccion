@@ -1,8 +1,7 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../supabaseClient';
 import { Product, Usuario } from '../types';
-import { Search, CheckCircle, Package, RefreshCw, Check, X, ClipboardList, Scan, Keyboard } from './Icons';
+import { Search, CheckCircle, Package, RefreshCw, Check, X, ClipboardList, Scan, Keyboard, ArrowRight } from './Icons';
 import { formatCompactDate } from '../utils';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -12,13 +11,21 @@ interface ReceptionLaiveProps {
 }
 
 const ReceptionLaive: React.FC<ReceptionLaiveProps> = ({ currentUser, catalog }) => {
+    const [activeTab, setActiveTab] = useState<'SCAN' | 'PENDING'>('SCAN');
     const [pendingItems, setPendingItems] = useState<any[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
+    const [pendingSearchTerm, setPendingSearchTerm] = useState('');
     const [matchedItem, setMatchedItem] = useState<any | null>(null);
     const [scannedItems, setScannedItems] = useState<any[]>([]);
+    
+    // Matched item validation state
+    const [matchesXml, setMatchesXml] = useState(true);
+    const [validatedQty, setValidatedQty] = useState<number | ''>('');
+    const [notes, setNotes] = useState('');
+
     const [observations, setObservations] = useState<Record<string, string>>({});
-    const [conformity, setConformity] = useState<Record<string, boolean>>({});
+    const [validatedQuantities, setValidatedQuantities] = useState<Record<string, number>>({});
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showToast, setShowToast] = useState(false);
     const [showErrorToast, setShowErrorToast] = useState(false);
@@ -27,9 +34,9 @@ const ReceptionLaive: React.FC<ReceptionLaiveProps> = ({ currentUser, catalog })
     const searchRef = useRef<HTMLInputElement>(null);
     const scanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-    // Periodically ensure focus if in scan mode
+    // Periodically ensure focus if in scan mode and in SCAN tab
     useEffect(() => {
-        if (scanMode) {
+        if (scanMode && activeTab === 'SCAN') {
             const interval = setInterval(() => {
                 if (document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
                     searchRef.current?.focus();
@@ -37,11 +44,21 @@ const ReceptionLaive: React.FC<ReceptionLaiveProps> = ({ currentUser, catalog })
             }, 2000);
             return () => clearInterval(interval);
         }
-    }, [scanMode]);
+    }, [scanMode, activeTab]);
 
     useEffect(() => {
         fetchPendingItems();
     }, []);
+
+    // Sync input quantity when matched item changes or checkbox toggles
+    useEffect(() => {
+        if (matchedItem) {
+            const xmlQty = Number(matchedItem.cantidad_xml ?? matchedItem.cantidad ?? 0);
+            if (matchesXml) {
+                setValidatedQty(xmlQty);
+            }
+        }
+    }, [matchedItem, matchesXml]);
 
     const fetchPendingItems = async () => {
         setIsLoading(true);
@@ -50,7 +67,7 @@ const ReceptionLaive: React.FC<ReceptionLaiveProps> = ({ currentUser, catalog })
                 .from('recepcion_productos')
                 .select('*')
                 .eq('proveedor', 'CARGA_XML')
-                .eq('estado', 'PENDIENTE_LAIVE');
+                .in('estado', ['PENDIENTE_LAIVE', 'PENDIENTE_RECEPCION']);
             
             const sedeId = currentUser?.sede_id;
             if (sedeId) {
@@ -96,11 +113,16 @@ const ReceptionLaive: React.FC<ReceptionLaiveProps> = ({ currentUser, catalog })
         }
 
         if (match) {
+            const xmlQty = Number(match.cantidad_xml ?? match.cantidad ?? 0);
+            setMatchedItem(match);
+            setMatchesXml(true);
+            setValidatedQty(xmlQty);
+            setNotes('');
+
             if (!scannedItems.find(si => si.id === match.id)) {
                 setScannedItems(prev => [match, ...prev]);
-                setConformity(prev => ({ ...prev, [match.id]: true }));
+                setValidatedQuantities(prev => ({ ...prev, [match.id]: xmlQty }));
             }
-            setMatchedItem(match);
             setSearchTerm('');
             // Focus back immediately
             if (searchRef.current) {
@@ -110,7 +132,7 @@ const ReceptionLaive: React.FC<ReceptionLaiveProps> = ({ currentUser, catalog })
             return true;
         } else if (!isAuto && val.trim().length > 0) {
             setShowErrorToast(true);
-            setTimeout(() => setShowErrorToast(false), 1000);
+            setTimeout(() => setShowErrorToast(false), 1200);
             setSearchTerm('');
         }
         return false;
@@ -124,7 +146,6 @@ const ReceptionLaive: React.FC<ReceptionLaiveProps> = ({ currentUser, catalog })
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
-            // Some scanners send Enter. We want to process it immediately.
             if (scanTimeoutRef.current) clearTimeout(scanTimeoutRef.current);
             processSearch(searchTerm, false);
         }
@@ -135,10 +156,8 @@ const ReceptionLaive: React.FC<ReceptionLaiveProps> = ({ currentUser, catalog })
         const term = val.trim().toLowerCase();
         
         if (scanMode && term.length > 0) {
-            // Clear previous timeout
             if (scanTimeoutRef.current) clearTimeout(scanTimeoutRef.current);
 
-            // Check for exact match immediately (for high-speed scanners)
             const exactMatch = pendingItems.find(item => {
                 const product = catalog.find(p => p.id === item.producto_id);
                 return (
@@ -154,13 +173,12 @@ const ReceptionLaive: React.FC<ReceptionLaiveProps> = ({ currentUser, catalog })
                 return;
             }
 
-            // If no exact match yet, wait briefly for more characters (for slower scanners acting as keyboards)
             scanTimeoutRef.current = setTimeout(() => {
                 if (val.trim()) {
                     processSearch(val, false);
                 }
-            }, 100); // 100ms is usually enough for a scanner to finish sending chars
-        } else if (!scanMode && term.length >= 4) {
+            }, 100);
+        } else if (!scanMode && term.length >= 3) {
             const exactMatchExists = pendingItems.some(item => {
                 const product = catalog.find(p => p.id === item.producto_id);
                 return (
@@ -176,63 +194,161 @@ const ReceptionLaive: React.FC<ReceptionLaiveProps> = ({ currentUser, catalog })
         }
     };
 
-    const handleConformityChange = (id: string, value: boolean) => {
-        setConformity(prev => ({ ...prev, [id]: value }));
+    const handleValidateSingleItem = async () => {
+        if (!matchedItem) return;
+        const xmlQty = Number(matchedItem.cantidad_xml ?? matchedItem.cantidad ?? 0);
+        const finalQty = validatedQty === '' ? xmlQty : Number(validatedQty);
+
+        setIsSubmitting(true);
+        try {
+            const updatePayload: any = {
+                estado: 'ACTIVO',
+                cantidad: finalQty,
+                cantidad_validada: finalQty,
+                cantidad_xml: xmlQty,
+                observaciones: notes || null,
+                verificado_por: currentUser?.username || 'OPERARIO',
+                fecha_verificacion: new Date().toISOString()
+            };
+
+            let { error } = await supabase
+                .from('recepcion_productos')
+                .update(updatePayload)
+                .eq('id', matchedItem.id);
+
+            // Fallback if custom columns don't exist in PostgreSQL
+            if (error && (error.message?.includes('column') || error.code === 'PGRST204')) {
+                const fallbackPayload = {
+                    estado: 'ACTIVO',
+                    cantidad: finalQty,
+                    observaciones: notes || null,
+                    verificado_por: currentUser?.username || 'OPERARIO',
+                    fecha_verificacion: new Date().toISOString()
+                };
+                const res = await supabase
+                    .from('recepcion_productos')
+                    .update(fallbackPayload)
+                    .eq('id', matchedItem.id);
+                if (res.error) throw res.error;
+            } else if (error) {
+                throw error;
+            }
+
+            setShowToast(true);
+            setTimeout(() => setShowToast(false), 1200);
+
+            // Remove from local list & reset form
+            setScannedItems(prev => prev.filter(si => si.id !== matchedItem.id));
+            setMatchedItem(null);
+            setNotes('');
+            setValidatedQty('');
+            fetchPendingItems();
+        } catch (err) {
+            console.error("Error validating single Laive item:", err);
+            alert("Error al guardar la validación del producto.");
+        } finally {
+            setIsSubmitting(false);
+        }
     };
 
-    const handleFinalize = async () => {
+    const handleFinalizeBatch = async () => {
         if (scannedItems.length === 0) return;
-
-        const unconfirmedCount = scannedItems.filter(si => !conformity[si.id]).length;
-        if (unconfirmedCount > 0) {
-            if (!confirm(`Hay ${unconfirmedCount} productos sin marcar como conformes. ¿Desea continuar?`)) return;
-        }
 
         setIsSubmitting(true);
         try {
             for (const item of scannedItems) {
-                const { error } = await supabase
+                const xmlQty = Number(item.cantidad_xml ?? item.cantidad ?? 0);
+                const finalQty = validatedQuantities[item.id] ?? xmlQty;
+
+                const updatePayload: any = {
+                    estado: 'ACTIVO',
+                    cantidad: finalQty,
+                    cantidad_validada: finalQty,
+                    cantidad_xml: xmlQty,
+                    observaciones: observations[item.id] || null,
+                    verificado_por: currentUser?.username || 'OPERARIO',
+                    fecha_verificacion: new Date().toISOString()
+                };
+
+                let { error } = await supabase
                     .from('recepcion_productos')
-                    .update({
+                    .update(updatePayload)
+                    .eq('id', item.id);
+
+                if (error && (error.message?.includes('column') || error.code === 'PGRST204')) {
+                    const fallbackPayload = {
                         estado: 'ACTIVO',
+                        cantidad: finalQty,
                         observaciones: observations[item.id] || null,
                         verificado_por: currentUser?.username || 'OPERARIO',
                         fecha_verificacion: new Date().toISOString()
-                    })
-                    .eq('id', item.id);
-                
-                if (error) throw error;
+                    };
+                    const res = await supabase
+                        .from('recepcion_productos')
+                        .update(fallbackPayload)
+                        .eq('id', item.id);
+                    if (res.error) throw res.error;
+                } else if (error) {
+                    throw error;
+                }
             }
 
             setShowToast(true);
-            setTimeout(() => setShowToast(false), 1000);
+            setTimeout(() => setShowToast(false), 1200);
 
             setScannedItems([]);
             setMatchedItem(null);
             setObservations({});
-            setConformity({});
+            setValidatedQuantities({});
             fetchPendingItems();
         } catch (err) {
-            console.error("Error finalizing Laive reception:", err);
+            console.error("Error finalizing Laive reception batch:", err);
             alert("Error al finalizar la recepción.");
         } finally {
             setIsSubmitting(false);
         }
     };
 
+    const handleSelectPendingItemForScan = (item: any) => {
+        setMatchedItem(item);
+        const xmlQty = Number(item.cantidad_xml ?? item.cantidad ?? 0);
+        setMatchesXml(true);
+        setValidatedQty(xmlQty);
+        setNotes('');
+        setActiveTab('SCAN');
+        if (!scannedItems.find(si => si.id === item.id)) {
+            setScannedItems(prev => [item, ...prev]);
+            setValidatedQuantities(prev => ({ ...prev, [item.id]: xmlQty }));
+        }
+    };
+
+    const filteredPendingItems = pendingItems.filter(item => {
+        const term = pendingSearchTerm.toLowerCase().trim();
+        if (!term) return true;
+        const prod = catalog.find(p => p.id === item.producto_id);
+        return (
+            item.codigo.toLowerCase().includes(term) ||
+            item.nombre.toLowerCase().includes(term) ||
+            (prod?.sku && prod.sku.toLowerCase().includes(term)) ||
+            (prod?.extranjero && prod.extranjero.toLowerCase().includes(term))
+        );
+    });
+
+    const totalPendingBoxes = pendingItems.reduce((sum, item) => sum + Number(item.cantidad_xml ?? item.cantidad ?? 0), 0);
+
     return (
-        <div className="flex flex-col h-full bg-slate-50 overflow-hidden relative">
+        <div className="flex flex-col h-full bg-slate-100 overflow-hidden relative select-none">
             <AnimatePresence>
                 {showToast && (
                     <motion.div
                         initial={{ opacity: 0, scale: 0.8, y: 20 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.8, y: -20 }}
-                        className="fixed inset-0 flex items-center justify-center z-[100] pointer-events-none"
+                        className="fixed inset-0 flex items-center justify-center z-[100] pointer-events-none px-4"
                     >
-                        <div className="bg-emerald-600 text-white px-8 py-4 rounded-2xl shadow-2xl flex items-center gap-3 border border-emerald-400/30 backdrop-blur-md">
+                        <div className="bg-emerald-600 text-white px-6 py-3.5 rounded-2xl shadow-2xl flex items-center gap-3 border border-emerald-400/30 backdrop-blur-md">
                             <Check className="w-5 h-5 stroke-[4]" />
-                            <span className="text-xl font-black uppercase tracking-tight italic">Recibido</span>
+                            <span className="text-base font-black uppercase tracking-tight italic">Validado y Recibido</span>
                         </div>
                     </motion.div>
                 )}
@@ -242,21 +358,21 @@ const ReceptionLaive: React.FC<ReceptionLaiveProps> = ({ currentUser, catalog })
                         initial={{ opacity: 0, scale: 0.8, y: 20 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.8, y: -20 }}
-                        className="fixed inset-0 flex items-center justify-center z-[100] pointer-events-none"
+                        className="fixed inset-0 flex items-center justify-center z-[100] pointer-events-none px-4"
                     >
-                        <div className="bg-red-600 text-white px-8 py-4 rounded-2xl shadow-2xl flex items-center gap-3 border border-red-400/30 backdrop-blur-md">
+                        <div className="bg-red-600 text-white px-6 py-3.5 rounded-2xl shadow-2xl flex items-center gap-3 border border-red-400/30 backdrop-blur-md">
                             <X className="w-5 h-5 stroke-[4]" />
-                            <span className="text-xl font-black uppercase tracking-tight italic">No existe</span>
+                            <span className="text-base font-black uppercase tracking-tight italic">Producto No Encontrado</span>
                         </div>
                     </motion.div>
                 )}
             </AnimatePresence>
 
-            {/* Header - Modern with Custom Icon */}
-            <div className="bg-white border-b border-gray-200 px-4 py-3 shadow-sm z-20 shrink-0">
-                <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-3">
-                        <div className="w-12 h-12 rounded-xl overflow-hidden shadow-lg border border-indigo-100 bg-white p-1">
+            {/* Mobile-Optimized App Bar Header */}
+            <div className="bg-white border-b border-slate-200 px-3 py-2.5 shadow-sm z-20 shrink-0">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-9 h-9 rounded-xl overflow-hidden shadow-sm border border-indigo-100 bg-white p-0.5 shrink-0">
                             <img 
                                 src="https://i.ibb.co/dJQtnxPT/Anotaci-n-2u.png" 
                                 alt="Laive Logo" 
@@ -264,261 +380,410 @@ const ReceptionLaive: React.FC<ReceptionLaiveProps> = ({ currentUser, catalog })
                                 referrerPolicy="no-referrer"
                             />
                         </div>
-                        <div>
-                            <h2 className="text-base font-black text-slate-800 tracking-tight uppercase italic leading-none">Recepción Laive</h2>
-                            <p className="text-[9px] text-indigo-500 font-black uppercase tracking-widest mt-1">Validación Física de Carga</p>
+                        <div className="min-w-0">
+                            <h2 className="text-sm font-black text-slate-800 tracking-tight uppercase italic leading-none truncate">
+                                Recepción Laive
+                            </h2>
+                            <p className="text-[8px] text-indigo-600 font-extrabold uppercase tracking-wider mt-0.5 truncate">
+                                Validación Carga XML
+                            </p>
                         </div>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                        <div className="bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-100 flex flex-col items-center">
-                            <span className="text-[7px] font-black text-emerald-600 uppercase tracking-widest leading-none mb-0.5">Pendientes</span>
-                            <span className="text-base font-black text-emerald-700 leading-none">{pendingItems.length}</span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                        <div className="bg-indigo-50 px-2.5 py-1 rounded-lg border border-indigo-100 flex flex-col items-center">
+                            <span className="text-[7px] font-black text-indigo-400 uppercase leading-none">Pendientes</span>
+                            <span className="text-xs font-black text-indigo-700 leading-none mt-0.5">{pendingItems.length}</span>
                         </div>
                         <button 
                             onClick={fetchPendingItems}
-                            className="p-2.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all border border-slate-100 active:scale-90"
+                            className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all border border-slate-100 active:scale-90"
+                            title="Actualizar"
                         >
-                            <RefreshCw className={`w-5 h-5 ${isLoading ? 'animate-spin' : ''}`}/>
+                            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`}/>
                         </button>
                     </div>
                 </div>
 
-                {/* Modern Scanner Input */}
-                <form onSubmit={handleSearch} className="mt-4 relative group">
-                    <AnimatePresence>
-                        {scanMode && (
-                            <motion.div 
-                                initial={{ opacity: 0 }}
-                                animate={{ opacity: 1 }}
-                                exit={{ opacity: 0 }}
-                                className="absolute -inset-1 bg-gradient-to-r from-blue-600 via-indigo-600 to-indigo-400 rounded-2xl blur opacity-25 group-focus-within:opacity-75 transition-opacity duration-500 animate-pulse"
-                            ></motion.div>
-                        )}
-                    </AnimatePresence>
-                    
-                    <div className="absolute inset-0 bg-indigo-500/5 blur-xl rounded-2xl group-focus-within:bg-indigo-500/10 transition-all"></div>
-                    
-                    <div className="absolute left-4 top-1/2 -translate-y-1/2 flex items-center gap-2 z-10">
-                        {scanMode ? (
-                            <Scan className="w-5 h-5 text-indigo-600 animate-pulse" />
-                        ) : (
-                            <Keyboard className="w-5 h-5 text-indigo-400" />
-                        )}
-                    </div>
-
-                    <input 
-                        ref={searchRef}
-                        type="text" 
-                        inputMode={scanMode ? 'none' : 'text'}
-                        placeholder={scanMode ? "SISTEMA DE SCANER ACTIVADO..." : "BUSCAR MANUALMENTE..."}
-                        className={`relative w-full pl-12 pr-40 py-4 bg-white border-2 rounded-2xl text-base font-black outline-none transition-all shadow-xl placeholder:italic tracking-tight ${
-                            scanMode 
-                                ? 'border-indigo-600 ring-8 ring-indigo-500/10 focus:border-blue-500 cursor-none' 
-                                : 'border-indigo-100 focus:border-indigo-500 focus:ring-8 focus:ring-indigo-500/5'
+                {/* Native Segmented Control Tabs */}
+                <div className="grid grid-cols-2 gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
+                    <button
+                        type="button"
+                        onClick={() => setActiveTab('SCAN')}
+                        className={`py-2 px-2 rounded-lg font-black text-[11px] uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 active:scale-95 ${
+                            activeTab === 'SCAN' 
+                                ? 'bg-indigo-600 text-white shadow-md' 
+                                : 'text-slate-500 hover:text-slate-800'
                         }`}
-                        value={searchTerm}
-                        onChange={e => onSearchChange(e.target.value)}
-                        onKeyDown={handleKeyDown}
-                        autoFocus
-                    />
-                    
-                    <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2">
-                        <button 
-                            type="button"
-                            onClick={() => {
-                                setScanMode(!scanMode);
-                                searchRef.current?.focus();
-                            }}
-                            className={`p-2.5 rounded-xl transition-all flex items-center justify-center border-2 ${
-                                scanMode 
-                                    ? 'bg-white border-indigo-600 text-indigo-600' 
-                                    : 'bg-indigo-50 border-transparent text-indigo-400'
-                            }`}
-                            title={scanMode ? "Cambiar a Teclado" : "Cambiar a Scaner"}
-                        >
-                            {scanMode ? <Scan className="w-5 h-5" /> : <Keyboard className="w-5 h-5" />}
-                        </button>
-                        
-                        <button 
-                            type="submit"
-                            className="bg-indigo-600 text-white p-2.5 rounded-xl font-black hover:bg-indigo-700 active:scale-95 shadow-lg shadow-indigo-200 transition-all flex items-center justify-center border-2 border-indigo-700"
-                        >
-                            <Search className="w-5 h-5" />
-                        </button>
-                    </div>
+                    >
+                        <Scan className="w-3.5 h-3.5 shrink-0" />
+                        <span className="truncate">Escanear</span>
+                    </button>
 
-                    {/* Scan Line Detail */}
-                    {scanMode && (
-                        <div className="absolute bottom-0 left-12 right-40 h-[1px] bg-indigo-500/50 overflow-hidden">
-                            <motion.div 
-                                animate={{ x: ['-100%', '100%'] }}
-                                transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
-                                className="w-1/3 h-full bg-gradient-to-r from-transparent via-blue-400 to-transparent"
-                            ></motion.div>
-                        </div>
-                    )}
-                </form>
+                    <button
+                        type="button"
+                        onClick={() => setActiveTab('PENDING')}
+                        className={`py-2 px-2 rounded-lg font-black text-[11px] uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 active:scale-95 ${
+                            activeTab === 'PENDING' 
+                                ? 'bg-amber-500 text-white shadow-md' 
+                                : 'text-slate-500 hover:text-slate-800'
+                        }`}
+                    >
+                        <ClipboardList className="w-3.5 h-3.5 shrink-0" />
+                        <span className="truncate">Pendientes ({pendingItems.length})</span>
+                    </button>
+                </div>
             </div>
 
-            <div className="flex-1 overflow-hidden p-3 md:p-5 flex flex-col md:flex-row gap-5">
-                
-                {/* Modern Scanned Display */}
-                <div className="md:w-1/3 flex flex-col gap-4 shrink-0">
-                    <div className={`bg-white border-2 rounded-3xl p-4 shadow-xl transition-all relative overflow-hidden ${matchedItem ? 'border-indigo-500 ring-4 ring-indigo-500/5' : 'border-slate-100 opacity-80'}`}>
-                        {matchedItem && (
-                            <div className="absolute -right-6 -top-6 w-24 h-24 bg-indigo-500/5 rounded-full blur-2xl"></div>
-                        )}
-                        
-                        <div className="flex flex-col items-center">
-                            {matchedItem ? (
-                                <div className="w-full">
-                                    <div className="mb-3 pb-3 border-b border-slate-100 flex flex-col gap-1">
-                                        <h3 className="text-[12px] font-black text-slate-800 uppercase leading-tight">
-                                            {matchedItem.nombre}
-                                        </h3>
-                                        {(() => {
-                                            const prod = catalog.find(p => p.id === matchedItem.producto_id);
-                                            return (
-                                                <div className="flex items-center justify-between gap-1.5">
-                                                    <div className="flex flex-wrap items-center gap-1.5">
-                                                        <div className="flex items-center gap-1 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100">
-                                                            <span className="text-[8px] font-black text-indigo-400 uppercase tracking-tighter">RTU:</span>
-                                                            <span className="text-[10px] font-black text-indigo-700 leading-none">{prod?.unidades_por_caja || 'N/A'}</span>
-                                                        </div>
-                                                        <div className="flex items-center gap-1 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-100">
-                                                            <span className="text-[8px] font-black text-emerald-400 uppercase tracking-tighter">UM:</span>
-                                                            <span className="text-[10px] font-black text-emerald-700 leading-none">{prod?.unidad_venta || matchedItem.unidad_medida || 'UN'}</span>
-                                                        </div>
-                                                    </div>
+            {/* TAB CONTENT AREA */}
+            {activeTab === 'SCAN' ? (
+                <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3 custom-scrollbar">
+                    {/* Floating Scanner Barcode Input */}
+                    <form onSubmit={handleSearch} className="relative shrink-0">
+                        <div className="relative flex items-center">
+                            <div className="absolute left-3 flex items-center gap-1 z-10">
+                                {scanMode ? (
+                                    <Scan className="w-4 h-4 text-indigo-600 animate-pulse" />
+                                ) : (
+                                    <Keyboard className="w-4 h-4 text-slate-400" />
+                                )}
+                            </div>
 
-                                                    <button 
-                                                        onClick={handleFinalize}
-                                                        disabled={isSubmitting || scannedItems.length === 0}
-                                                        className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white px-3 py-2 rounded-xl text-[10px] font-black shadow-lg shadow-emerald-200 transition-all transform active:scale-95 border-b-2 border-emerald-800 shrink-0"
-                                                    >
-                                                        {isSubmitting ? <RefreshCw className="w-3 h-3 animate-spin"/> : <CheckCircle className="w-3 h-3"/>}
-                                                        RECIBIDO ({scannedItems.length})
-                                                    </button>
-                                                </div>
-                                            )
-                                        })()}
-                                    </div>
+                            <input 
+                                ref={searchRef}
+                                type="text" 
+                                inputMode={scanMode ? 'none' : 'text'}
+                                placeholder={scanMode ? "ESCANEAR BARRA O CÓDIGO ICO..." : "CÓDIGO ICO O DESCRIPCIÓN..."}
+                                className={`w-full pl-9 pr-24 py-3 bg-white border-2 rounded-xl text-xs font-black outline-none transition-all shadow-sm placeholder:text-slate-400 uppercase tracking-tight ${
+                                    scanMode 
+                                        ? 'border-indigo-600 ring-2 ring-indigo-500/10' 
+                                        : 'border-slate-300 focus:border-indigo-500'
+                                }`}
+                                value={searchTerm}
+                                onChange={e => onSearchChange(e.target.value)}
+                                onKeyDown={handleKeyDown}
+                                autoFocus
+                            />
 
-                                    <div className="flex flex-col gap-3">
-                                        <div className="bg-indigo-600 text-white p-4 rounded-2xl flex flex-col items-center justify-center shadow-lg transform active:scale-95 transition-transform">
-                                            <div className="flex items-baseline gap-2">
-                                                <span className="text-4xl font-black tabular-nums leading-none">{matchedItem.cantidad}</span>
-                                                <span className="text-xs font-bold uppercase tracking-tight leading-none opacity-80">CAJAS</span>
-                                            </div>
-                                        </div>
+                            <div className="absolute right-1.5 flex items-center gap-1">
+                                <button 
+                                    type="button"
+                                    onClick={() => {
+                                        setScanMode(!scanMode);
+                                        searchRef.current?.focus();
+                                    }}
+                                    className={`p-1.5 rounded-lg border text-[10px] font-black transition-all ${
+                                        scanMode 
+                                            ? 'bg-indigo-50 border-indigo-300 text-indigo-700' 
+                                            : 'bg-slate-100 border-slate-200 text-slate-600'
+                                    }`}
+                                >
+                                    {scanMode ? 'SCAN' : 'KEY'}
+                                </button>
+                                
+                                <button 
+                                    type="submit"
+                                    className="bg-indigo-600 text-white p-1.5 rounded-lg font-black hover:bg-indigo-700 active:scale-90 shadow transition-all"
+                                >
+                                    <Search className="w-4 h-4" />
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+
+                    {/* App-like Matched Product Card */}
+                    {matchedItem ? (
+                        <div className="bg-white border-2 border-indigo-600 rounded-2xl p-4 shadow-lg flex flex-col gap-3 relative">
+                            <div className="flex items-start justify-between border-b border-slate-100 pb-2.5">
+                                <div className="min-w-0 flex-1 pr-2">
+                                    <span className="text-[8px] font-black text-indigo-600 uppercase tracking-widest bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100 inline-block mb-1">
+                                        Producto Seleccionado
+                                    </span>
+                                    <h3 className="text-xs font-black text-slate-800 uppercase leading-snug">
+                                        {matchedItem.nombre}
+                                    </h3>
+                                </div>
+                                <button 
+                                    onClick={() => setMatchedItem(null)}
+                                    className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 shrink-0"
+                                >
+                                    <X className="w-5 h-5" />
+                                </button>
+                            </div>
+
+                            {/* Product Metadata Badge Row */}
+                            <div className="grid grid-cols-3 gap-2">
+                                <div className="bg-slate-50 border border-slate-200 p-2 rounded-xl text-center">
+                                    <span className="text-[7px] font-black text-slate-400 uppercase block leading-none mb-0.5">Código ICO</span>
+                                    <span className="text-xs font-black text-slate-800 font-mono tracking-tight">{matchedItem.codigo}</span>
+                                </div>
+
+                                <div className="bg-indigo-50 border border-indigo-100 p-2 rounded-xl text-center">
+                                    <span className="text-[7px] font-black text-indigo-500 uppercase block leading-none mb-0.5">Cant. XML</span>
+                                    <span className="text-xs font-black text-indigo-700 font-mono">
+                                        {matchedItem.cantidad_xml ?? matchedItem.cantidad} CAJAS
+                                    </span>
+                                </div>
+
+                                <div className="bg-amber-50 border border-amber-100 p-2 rounded-xl text-center">
+                                    <span className="text-[7px] font-black text-amber-600 uppercase block leading-none mb-0.5">Vencimiento</span>
+                                    <span className="text-[10px] font-black text-amber-800 font-mono">
+                                        {formatCompactDate(matchedItem.fecha_vencimiento)}
+                                    </span>
+                                </div>
+                            </div>
+
+                            {/* Mobile Physical Validation Section */}
+                            <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl space-y-3">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-[11px] font-black text-slate-700 uppercase flex items-center gap-1.5">
+                                        <CheckCircle className="w-3.5 h-3.5 text-indigo-600" />
+                                        <span>Validación Física</span>
+                                    </span>
+
+                                    <label className="flex items-center gap-1.5 cursor-pointer bg-white px-2.5 py-1 rounded-lg border border-slate-200 text-[10px] font-bold text-slate-700 shadow-sm">
+                                        <input 
+                                            type="checkbox"
+                                            checked={matchesXml}
+                                            onChange={(e) => {
+                                                const isChecked = e.target.checked;
+                                                setMatchesXml(isChecked);
+                                                if (isChecked) {
+                                                    setValidatedQty(Number(matchedItem.cantidad_xml ?? matchedItem.cantidad ?? 0));
+                                                }
+                                            }}
+                                            className="w-3.5 h-3.5 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                                        />
+                                        <span>Coincide XML</span>
+                                    </label>
+                                </div>
+
+                                <div className="space-y-2">
+                                    <div>
+                                        <span className="text-[8px] font-extrabold text-slate-500 uppercase block mb-1">
+                                            Cantidad Recibida (Cajas)
+                                        </span>
                                         
-                                        <div className="grid grid-cols-2 gap-2">
-                                            <div className="bg-slate-50 border border-slate-100 p-2.5 rounded-xl text-center">
-                                                <span className="text-[8px] font-black text-slate-400 uppercase block mb-1 tracking-widest">Cód. ICO</span>
-                                                <span className="text-xs font-black text-slate-800 font-mono tracking-tighter">{matchedItem.codigo}</span>
-                                            </div>
-                                            <div className="bg-amber-50 border border-amber-100 p-2.5 rounded-xl text-center">
-                                                <span className="text-[8px] font-black text-amber-500 uppercase block mb-1 tracking-widest">Vencimiento</span>
-                                                <span className="text-xs font-black text-amber-700">{formatCompactDate(matchedItem.fecha_vencimiento)}</span>
-                                            </div>
+                                        <div className="flex items-center gap-2">
+                                            <button 
+                                                type="button"
+                                                disabled={matchesXml}
+                                                onClick={() => {
+                                                    const cur = Number(validatedQty || 0);
+                                                    if (cur > 0) setValidatedQty(cur - 1);
+                                                }}
+                                                className="w-10 h-10 bg-white border border-slate-300 rounded-xl font-black text-slate-700 disabled:opacity-40 flex items-center justify-center text-base shadow-sm active:scale-90"
+                                            >
+                                                -
+                                            </button>
+
+                                            <input 
+                                                type="number"
+                                                min="0"
+                                                disabled={matchesXml}
+                                                value={validatedQty}
+                                                onChange={(e) => setValidatedQty(e.target.value === '' ? '' : Number(e.target.value))}
+                                                placeholder="0"
+                                                className={`flex-1 text-center py-2 rounded-xl text-base font-black font-mono border-2 outline-none transition-all ${
+                                                    matchesXml 
+                                                        ? 'bg-slate-100 border-slate-200 text-slate-500' 
+                                                        : 'bg-white border-indigo-500 text-indigo-900 focus:ring-2 focus:ring-indigo-500/20'
+                                                }`}
+                                            />
+
+                                            <button 
+                                                type="button"
+                                                disabled={matchesXml}
+                                                onClick={() => {
+                                                    const cur = Number(validatedQty || 0);
+                                                    setValidatedQty(cur + 1);
+                                                }}
+                                                className="w-10 h-10 bg-white border border-slate-300 rounded-xl font-black text-slate-700 disabled:opacity-40 flex items-center justify-center text-base shadow-sm active:scale-90"
+                                            >
+                                                +
+                                            </button>
                                         </div>
                                     </div>
-                                </div>
-                            ) : (
-                                <div className="py-12 flex flex-col items-center text-slate-300">
-                                    <div className="relative mb-6">
-                                        <div className="absolute inset-0 bg-slate-200 rounded-full blur-2xl opacity-20 animate-pulse"></div>
-                                        <Package className="w-16 h-16" />
+
+                                    <div>
+                                        <span className="text-[8px] font-extrabold text-slate-500 uppercase block mb-1">
+                                            Observaciones / Notas
+                                        </span>
+                                        <input 
+                                            type="text"
+                                            value={notes}
+                                            onChange={(e) => setNotes(e.target.value)}
+                                            placeholder="Ej: Cajas abolladas..."
+                                            className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-medium outline-none focus:border-indigo-500 transition-all italic"
+                                        />
                                     </div>
-                                    <span className="text-xs font-black uppercase tracking-[0.2em] italic text-slate-400 mb-6">Scan Requerido</span>
-                                    
-                                    {scannedItems.length > 0 && (
-                                        <button 
-                                            onClick={handleFinalize}
-                                            disabled={isSubmitting}
-                                            className="flex items-center gap-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white px-8 py-3 rounded-2xl text-xs font-black shadow-lg shadow-emerald-200 transition-all transform active:scale-95 border-b-4 border-emerald-800"
-                                        >
-                                            {isSubmitting ? <RefreshCw className="w-4 h-4 animate-spin"/> : <CheckCircle className="w-4 h-4"/>}
-                                            FINALIZAR ({scannedItems.length})
-                                        </button>
-                                    )}
                                 </div>
+
+                                <button 
+                                    type="button"
+                                    onClick={handleValidateSingleItem}
+                                    disabled={isSubmitting}
+                                    className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-black text-xs uppercase tracking-wider rounded-xl shadow-md transition-all transform active:scale-95 flex items-center justify-center gap-2 cursor-pointer mt-2"
+                                >
+                                    {isSubmitting ? (
+                                        <RefreshCw className="w-4 h-4 animate-spin" />
+                                    ) : (
+                                        <Check className="w-4 h-4 stroke-[3]" />
+                                    )}
+                                    <span>CONFIRMAR Y VALIDAR PRODUCTO</span>
+                                </button>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="bg-white border border-slate-200 rounded-2xl p-6 text-center flex flex-col items-center justify-center min-h-[160px] shadow-sm">
+                            <div className="w-12 h-12 bg-indigo-50 text-indigo-500 rounded-xl flex items-center justify-center mb-2 border border-indigo-100">
+                                <Scan className="w-6 h-6" />
+                            </div>
+                            <h4 className="text-xs font-black text-slate-700 uppercase tracking-widest mb-1">Esperando Escaneo</h4>
+                            <p className="text-[10px] text-slate-400 max-w-xs">
+                                Escanee el código con su lector o seleccione un producto de la pestaña Pendientes.
+                            </p>
+                        </div>
+                    )}
+
+                    {/* Session Scanned Queue List */}
+                    <div className="bg-white border border-slate-200 rounded-2xl p-3 shadow-sm flex flex-col gap-2">
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                            <div className="flex items-center gap-1.5">
+                                <ClipboardList className="w-3.5 h-3.5 text-indigo-600" />
+                                <h3 className="text-xs font-black text-slate-700 uppercase tracking-wider">
+                                    Cola de Sesión ({scannedItems.length})
+                                </h3>
+                            </div>
+
+                            {scannedItems.length > 0 && (
+                                <button 
+                                    type="button"
+                                    onClick={handleFinalizeBatch}
+                                    disabled={isSubmitting}
+                                    className="bg-emerald-600 text-white px-2.5 py-1 rounded-lg text-[9px] font-black uppercase shadow transition-all flex items-center gap-1 active:scale-95"
+                                >
+                                    {isSubmitting ? <RefreshCw className="w-3 h-3 animate-spin"/> : <Check className="w-3 h-3 stroke-[3]"/>}
+                                    <span>Procesar Todo</span>
+                                </button>
+                            )}
+                        </div>
+
+                        <div className="space-y-2 max-h-48 overflow-y-auto custom-scrollbar">
+                            {scannedItems.length === 0 ? (
+                                <p className="text-[10px] text-slate-400 font-bold uppercase italic text-center py-4">
+                                    Sin productos en la cola actual
+                                </p>
+                            ) : (
+                                scannedItems.map((item) => (
+                                    <div key={item.id} className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 flex items-center justify-between gap-2">
+                                        <div className="min-w-0 flex-1">
+                                            <h4 className="text-[11px] font-black text-slate-800 uppercase truncate">{item.nombre}</h4>
+                                            <div className="flex items-center gap-2 mt-0.5">
+                                                <span className="text-[9px] font-black text-indigo-600 font-mono">{item.codigo}</span>
+                                                <span className="text-[9px] font-bold text-slate-500 bg-white px-1.5 py-0.5 rounded border border-slate-200">
+                                                    {item.cantidad_xml ?? item.cantidad} CAJAS
+                                                </span>
+                                            </div>
+                                        </div>
+
+                                        <button 
+                                            type="button"
+                                            onClick={() => setScannedItems(prev => prev.filter(si => si.id !== item.id))}
+                                            className="text-slate-400 hover:text-red-500 p-1 rounded-lg hover:bg-red-50"
+                                        >
+                                            <X className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                ))
                             )}
                         </div>
                     </div>
                 </div>
-
-                {/* Verified History List */}
-                <div className="flex-1 flex flex-col bg-white border border-slate-200 rounded-3xl shadow-xl overflow-hidden min-h-0">
-                    <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50 sticky top-0 z-10 backdrop-blur-sm">
-                        <div className="flex items-center gap-2">
-                            <ClipboardList className="w-5 h-5 text-indigo-500" />
-                            <h3 className="text-xs font-black text-slate-600 uppercase tracking-widest">Cola de Verificación</h3>
+            ) : (
+                /* TAB 2: PENDIENTE POR VALIDAR (100% APP-LIKE MOBILE CARDS LIST) */
+                <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3 custom-scrollbar">
+                    {/* Top Search & Mobile Summary Banner */}
+                    <div className="bg-white border border-slate-200 rounded-2xl p-3 shadow-sm flex flex-col gap-2 shrink-0">
+                        <div className="relative">
+                            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                            <input 
+                                type="text"
+                                value={pendingSearchTerm}
+                                onChange={(e) => setPendingSearchTerm(e.target.value)}
+                                placeholder="Filtrar por código ICO o nombre..."
+                                className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none focus:border-amber-500 focus:bg-white transition-all uppercase"
+                            />
                         </div>
-                        <span className="px-3 py-1 bg-white border border-slate-200 rounded-full text-[10px] font-black text-slate-400 italic">
-                            ORDEN DESCENDENTE
-                        </span>
+
+                        <div className="flex items-center justify-between bg-amber-50 border border-amber-200/80 px-3 py-1.5 rounded-xl">
+                            <span className="text-[9px] font-black text-amber-700 uppercase tracking-wider">Total Cajas Pendientes:</span>
+                            <span className="text-xs font-black text-amber-900 font-mono">{totalPendingBoxes} CAJAS</span>
+                        </div>
                     </div>
 
-                    <div className="flex-1 overflow-auto custom-scrollbar">
-                        {scannedItems.length === 0 ? (
-                            <div className="h-full flex flex-col items-center justify-center p-10 text-center opacity-40">
-                                <span className="text-xs font-black text-slate-300 uppercase tracking-widest italic">Esperando validaciones...</span>
+                    {/* App-Like Cards List (Replaces wide desktop table on mobile) */}
+                    <div className="flex-1 space-y-2.5">
+                        {filteredPendingItems.length === 0 ? (
+                            <div className="bg-white rounded-2xl p-8 border border-slate-200 text-center">
+                                <Package className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                                <p className="text-xs font-black text-slate-400 uppercase italic">
+                                    No hay ítems pendientes de validación
+                                </p>
                             </div>
                         ) : (
-                            <div className="p-3 space-y-3">
-                                {scannedItems.map((item) => (
-                                    <div key={item.id} className="bg-white border-2 border-slate-100 rounded-2xl overflow-hidden shadow-sm hover:border-indigo-100 transition-colors">
-                                        <div className="p-4">
-                                            <div className="flex items-center gap-4 mb-3">
-                                                <div className="w-10 h-10 bg-slate-50 rounded-xl flex items-center justify-center shrink-0 shadow-inner">
-                                                    <Package className="w-5 h-5 text-slate-400" />
-                                                </div>
-                                                <div className="flex-1 min-w-0">
-                                                    <div className="flex items-center justify-between">
-                                                        <h4 className="text-xs font-black text-slate-800 uppercase line-clamp-1">{item.nombre}</h4>
-                                                        <div className="flex items-center gap-2 ml-4">
-                                                            <button 
-                                                                onClick={() => handleConformityChange(item.id, !conformity[item.id])}
-                                                                className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all shadow-sm ${conformity[item.id] ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-300'}`}
-                                                            >
-                                                                <Check className="w-4 h-4" />
-                                                            </button>
-                                                            <button 
-                                                                onClick={() => setScannedItems(prev => prev.filter(si => si.id !== item.id))}
-                                                                className="w-8 h-8 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl flex items-center justify-center transition-all"
-                                                            >
-                                                                <X className="w-5 h-5" />
-                                                            </button>
-                                                        </div>
-                                                    </div>
-                                                    <div className="flex items-center gap-3 mt-1.5">
-                                                        <span className="text-[10px] font-black text-indigo-600 font-mono tracking-tighter">{item.codigo}</span>
-                                                        <span className="w-1.5 h-1.5 rounded-full bg-slate-300"></span>
-                                                        <span className="text-[10px] font-black text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md leading-none uppercase tracking-tight italic">
-                                                            {item.cantidad} CAJAS
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div className="relative group">
-                                                <input 
-                                                    type="text" 
-                                                    placeholder="Añadir nota u observación física..."
-                                                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none focus:border-indigo-400 focus:bg-white transition-all group-hover:border-slate-300 shadow-inner italic"
-                                                    value={observations[item.id] || ''}
-                                                    onChange={(e) => setObservations(prev => ({ ...prev, [item.id]: e.target.value }))}
-                                                />
-                                            </div>
+                            filteredPendingItems.map((item) => (
+                                <div 
+                                    key={item.id} 
+                                    className="bg-white border border-slate-200 rounded-2xl p-3.5 shadow-sm hover:border-amber-300 transition-all flex flex-col gap-2.5"
+                                >
+                                    {/* Card Header: ICO Code & Status */}
+                                    <div className="flex items-center justify-between">
+                                        <span className="bg-indigo-50 border border-indigo-100 text-indigo-700 text-[10px] font-black font-mono px-2.5 py-0.5 rounded-lg">
+                                            {item.codigo}
+                                        </span>
+                                        <span className="bg-amber-100 text-amber-800 text-[8px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider">
+                                            PENDIENTE
+                                        </span>
+                                    </div>
+
+                                    {/* Product Name */}
+                                    <h4 className="text-xs font-black text-slate-800 uppercase leading-snug">
+                                        {item.nombre}
+                                    </h4>
+
+                                    {/* Info Grid: Quantity & Expiration */}
+                                    <div className="grid grid-cols-2 gap-2 bg-slate-50 p-2 rounded-xl border border-slate-100">
+                                        <div>
+                                            <span className="text-[7px] font-black text-slate-400 uppercase block leading-none mb-0.5">Cant. XML</span>
+                                            <span className="text-xs font-black text-slate-700 font-mono">
+                                                {item.cantidad_xml ?? item.cantidad} CAJAS
+                                            </span>
+                                        </div>
+
+                                        <div>
+                                            <span className="text-[7px] font-black text-slate-400 uppercase block leading-none mb-0.5">Vencimiento</span>
+                                            <span className="text-[10px] font-black text-amber-800 font-mono">
+                                                {formatCompactDate(item.fecha_vencimiento)}
+                                            </span>
                                         </div>
                                     </div>
-                                ))}
-                            </div>
+
+                                    {/* Full-width Touch Action Button */}
+                                    <button 
+                                        type="button"
+                                        onClick={() => handleSelectPendingItemForScan(item)}
+                                        className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-extrabold text-[10px] uppercase rounded-xl transition-all shadow-sm flex items-center justify-center gap-1.5 cursor-pointer mt-0.5"
+                                    >
+                                        <span>ESCANEAR / VALIDAR</span>
+                                        <ArrowRight className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
+                            ))
                         )}
                     </div>
                 </div>
-            </div>
+            )}
         </div>
     );
 };
