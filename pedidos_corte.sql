@@ -8,8 +8,14 @@ CREATE TABLE IF NOT EXISTS public.pedidos_corte (
     unidad_medida text NOT NULL,
     usuario_registro text NOT NULL,
     fecha_registro timestamp with time zone DEFAULT now(),
-    sede_id uuid
+    sede_id uuid,
+    estado text DEFAULT 'PENDIENTE'
 );
+
+-- Ensure columns exist if table was already created
+ALTER TABLE public.pedidos_corte ADD COLUMN IF NOT EXISTS estado text DEFAULT 'PENDIENTE';
+ALTER TABLE public.pedidos_corte ADD COLUMN IF NOT EXISTS fecha_atencion timestamp with time zone;
+ALTER TABLE public.pedidos_corte ADD COLUMN IF NOT EXISTS usuario_atencion text;
 
 -- Disable Row Level Security to ensure seamless integration and avoid policy violation 42501
 ALTER TABLE public.pedidos_corte DISABLE ROW LEVEL SECURITY;

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { supabase } from '../supabaseClient';
 import { Product, Usuario, Cliente } from '../types';
-import { Search, ClipboardList, CheckCircle2, History, ChevronLeft, ChevronRight, RefreshCw, Layers, User, Plus, X, CreditCard, Phone, MapPin, Calendar, Printer, ChevronDown, ChevronUp, PackageCheck } from 'lucide-react';
+import { Search, ClipboardList, CheckCircle2, History, ChevronLeft, ChevronRight, RefreshCw, Layers, User, Plus, X, CreditCard, Phone, MapPin, Calendar, Printer, ChevronDown, ChevronUp, PackageCheck, AlertTriangle, Truck, Check, Clock } from 'lucide-react';
 
 interface CortesProps {
   catalog: Product[];
@@ -20,12 +20,17 @@ interface PedidoCorte {
   sede_id: string | null;
   cliente_id?: string | null;
   cliente_nombre?: string | null;
+  estado?: 'PENDIENTE' | 'CARGADO' | 'RECHAZADO' | string | null;
+  fecha_atencion?: string | null;
+  usuario_atencion?: string | null;
 }
 
 export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
   const [activeTab, setActiveTab] = useState<'FORM' | 'HISTORY' | 'CONSOLIDATED'>('FORM');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = useRef(false);
+  const [updatingEstadoId, setUpdatingEstadoId] = useState<string | null>(null);
+  const [showPendingModal, setShowPendingModal] = useState<boolean>(false);
 
   // Date helper
   const getTodayDateString = () => {
@@ -273,7 +278,8 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
       usuario_registro: currentUser?.nombre || 'Call Center',
       sede_id: currentUser?.sede_id || null,
       cliente_id: selectedCliente.id,
-      cliente_nombre: selectedCliente.nombre
+      cliente_nombre: selectedCliente.nombre,
+      estado: 'PENDIENTE'
     };
 
     // Asynchronous Feedback: Show success confirmation immediately to avoid perceived delay!
@@ -372,6 +378,193 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
     if (page >= 1 && page <= totalPages) {
       setCurrentPage(page);
     }
+  };
+
+  // Check role ASISTENTE or ADMIN
+  const userRole = (currentUser?.rol || '').trim().toUpperCase();
+  const canChangeEstado = userRole === 'ASISTENTE' || userRole === 'ADMIN' || userRole.includes('ASIST') || userRole.includes('ADMIN');
+
+  // Status update handler
+  const handleUpdateEstado = async (pedidoId: string, newEstado: 'PENDIENTE' | 'CARGADO' | 'RECHAZADO') => {
+    const isSettingPending = newEstado === 'PENDIENTE';
+    const nowIso = isSettingPending ? null : new Date().toISOString();
+    const usuarioAtencion = isSettingPending ? null : (currentUser?.nombre || 'Asistente');
+
+    setHistory(prev => prev.map(p => p.id === pedidoId ? { 
+      ...p, 
+      estado: newEstado,
+      fecha_atencion: nowIso,
+      usuario_atencion: usuarioAtencion
+    } : p));
+    setUpdatingEstadoId(pedidoId);
+    try {
+      const { error } = await supabase
+        .from('pedidos_corte')
+        .update({ 
+          estado: newEstado,
+          fecha_atencion: nowIso,
+          usuario_atencion: usuarioAtencion
+        })
+        .eq('id', pedidoId);
+      if (error) {
+        console.error("Error actualizando estado del pedido:", error);
+        alert("Error al actualizar estado en la base de datos: " + error.message);
+        fetchHistory();
+      }
+    } catch (err: any) {
+      console.error("Error al actualizar estado:", err);
+      fetchHistory();
+    } finally {
+      setUpdatingEstadoId(null);
+    }
+  };
+
+  // Metrics for Today's pending orders
+  const todayStr = getTodayDateString();
+
+  const pendingTodayOrders = useMemo(() => {
+    return history.filter(item => {
+      if (!item.fecha_registro) return false;
+      try {
+        const d = new Date(item.fecha_registro);
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        const isToday = `${yyyy}-${mm}-${dd}` === todayStr;
+        const isPending = !item.estado || item.estado.toUpperCase() === 'PENDIENTE';
+        return isToday && isPending;
+      } catch {
+        return false;
+      }
+    });
+  }, [history, todayStr]);
+
+  const pendingTodayCount = pendingTodayOrders.length;
+  
+  const pendingTodayTotalQty = useMemo(() => {
+    return pendingTodayOrders.reduce((acc, curr) => acc + (Number(curr.cantidad) || 0), 0);
+  }, [pendingTodayOrders]);
+
+  // Consolidated breakdown of pending items for today
+  const pendingConsolidatedData = useMemo(() => {
+    const map = new Map<string, {
+      key: string;
+      codigo: string;
+      nombre: string;
+      unidad_medida: string;
+      totalCantidad: number;
+      pedidosCount: number;
+      detalles: {
+        id: string;
+        cliente: string;
+        usuario: string;
+        cantidad: number;
+        hora: string;
+      }[];
+    }>();
+
+    pendingTodayOrders.forEach(item => {
+      const key = item.codigo ? item.codigo.trim() : item.nombre.trim();
+      const existing = map.get(key);
+      const dt = formatDateTime(item.fecha_registro);
+      const detail = {
+        id: item.id,
+        cliente: item.cliente_nombre || 'Sin cliente',
+        usuario: item.usuario_registro,
+        cantidad: Number(item.cantidad) || 0,
+        hora: dt.time
+      };
+
+      if (existing) {
+        existing.totalCantidad += Number(item.cantidad) || 0;
+        existing.pedidosCount += 1;
+        existing.detalles.push(detail);
+      } else {
+        map.set(key, {
+          key,
+          codigo: item.codigo,
+          nombre: item.nombre,
+          unidad_medida: item.unidad_medida || 'UN',
+          totalCantidad: Number(item.cantidad) || 0,
+          pedidosCount: 1,
+          detalles: [detail]
+        });
+      }
+    });
+
+    return Array.from(map.values()).sort((a, b) => b.totalCantidad - a.totalCantidad);
+  }, [pendingTodayOrders]);
+
+  const handlePrintPendingConsolidated = () => {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return;
+
+    const formattedToday = todayStr.split('-').reverse().join('/');
+
+    const itemsHtml = pendingConsolidatedData.map((item, idx) => `
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 8px; text-align: center; font-weight: bold;">${idx + 1}</td>
+        <td style="padding: 8px; font-family: monospace;">${item.codigo}</td>
+        <td style="padding: 8px; font-weight: bold; text-transform: uppercase;">${item.nombre}</td>
+        <td style="padding: 8px; text-align: right; font-size: 14px; font-weight: 900; color: #d97706;">${item.totalCantidad.toFixed(2)}</td>
+        <td style="padding: 8px; text-transform: uppercase; font-weight: bold;">${item.unidad_medida}</td>
+        <td style="padding: 8px; text-align: center;">${item.pedidosCount}</td>
+        <td style="padding: 8px; font-size: 11px;">
+          ${item.detalles.map(d => `• <strong>${d.cliente}</strong>: ${d.cantidad} ${item.unidad_medida} (${d.hora})`).join('<br/>')}
+        </td>
+      </tr>
+    `).join('');
+
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>CONSOLIDADO PENDIENTE POR CARGAR (${formattedToday})</title>
+          <style>
+            body { font-family: system-ui, -apple-system, sans-serif; padding: 20px; color: #1e293b; }
+            h1 { font-size: 18px; font-weight: 900; text-transform: uppercase; margin-bottom: 4px; color: #b45309; }
+            p { font-size: 12px; margin: 2px 0; color: #64748b; }
+            table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 12px; }
+            th { background-color: #fef3c7; padding: 8px; text-align: left; text-transform: uppercase; font-size: 10px; font-weight: 900; color: #92400e; }
+            .summary { display: flex; gap: 20px; background: #fffbeb; padding: 12px; border-radius: 8px; margin-top: 10px; border: 1px solid #fde68a; }
+            .summary-item { font-size: 12px; font-weight: bold; color: #78350f; }
+            .summary-item span { font-weight: 900; color: #d97706; }
+          </style>
+        </head>
+        <body>
+          <h1>Consolidado de Pendientes por Cargar (Solicitudes de Hoy)</h1>
+          <p><strong>Fecha:</strong> ${formattedToday}</p>
+          <p><strong>Emitido Por:</strong> ${currentUser?.nombre || 'Usuario'} | <strong>Fecha Emisión:</strong> ${new Date().toLocaleString('es-PE')}</p>
+          
+          <div class="summary">
+            <div class="summary-item">Productos Pendientes: <span>${pendingConsolidatedData.length}</span></div>
+            <div class="summary-item">Total Pendiente a Cargar: <span>${pendingTodayTotalQty.toFixed(2)}</span></div>
+            <div class="summary-item">Total Pedidos Pendientes: <span>${pendingTodayCount}</span></div>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th style="text-align: center;">#</th>
+                <th>Código</th>
+                <th>Producto</th>
+                <th style="text-align: right;">Total Pendiente</th>
+                <th>U.M</th>
+                <th style="text-align: center;">Pedidos</th>
+                <th>Clientes / Solicitudes</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${itemsHtml.length > 0 ? itemsHtml : '<tr><td colspan="7" style="text-align:center; padding: 20px;">No hay pedidos de corte pendientes para hoy.</td></tr>'}
+            </tbody>
+          </table>
+          <script>
+            window.onload = function() { window.print(); };
+          </script>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
   };
 
   const [dailyInventoryMap, setDailyInventoryMap] = useState<Map<string, number>>(new Map());
@@ -628,14 +821,24 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
               setActiveTab('HISTORY');
               fetchHistory();
             }}
-            className={`flex-1 md:flex-none flex items-center justify-center gap-1.5 sm:gap-2 px-3 sm:px-5 py-2.5 sm:py-3 rounded-lg sm:rounded-xl text-[10px] sm:text-xs font-black tracking-wider uppercase transition-all duration-200 ${
+            className={`flex-1 md:flex-none flex items-center justify-center gap-1.5 sm:gap-2 px-3 sm:px-5 py-2.5 sm:py-3 rounded-lg sm:rounded-xl text-[10px] sm:text-xs font-black tracking-wider uppercase transition-all duration-200 relative ${
               activeTab === 'HISTORY'
                 ? 'bg-[#009ED6] text-white shadow-md'
                 : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
             }`}
           >
             <History className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-            HISTORIAL
+            <span>PEDIDOS</span>
+            {pendingTodayCount > 0 && (
+              <span className={`ml-1 px-1.5 py-0.5 text-[9px] font-black rounded-full shadow-sm flex items-center gap-1 ${
+                activeTab === 'HISTORY'
+                  ? 'bg-rose-500 text-white animate-pulse'
+                  : 'bg-amber-500 text-white animate-pulse'
+              }`}>
+                <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping"></span>
+                {pendingTodayCount}
+              </span>
+            )}
           </button>
           <button
             onClick={() => {
@@ -848,28 +1051,80 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
         </div>
       )}
 
-      {/* HISTORY TAB */}
+      {/* HISTORY TAB (AHORA PEDIDOS) */}
       {activeTab === 'HISTORY' && (
         <div className="bg-white dark:bg-slate-900 p-3.5 sm:p-6 rounded-2xl sm:rounded-3xl border border-zinc-100 dark:border-slate-800 shadow-sm animate-fade-in space-y-4 sm:space-y-6">
-          <div className="flex flex-col md:flex-row gap-4 justify-between items-stretch md:items-center">
-            <h2 className="text-sm sm:text-lg font-black text-slate-800 dark:text-white uppercase tracking-tight flex items-center gap-2">
-              <History className="w-4 h-4 sm:w-5 sm:h-5 text-[#009ED6]" />
-              Lista Histórica de Pedidos
-            </h2>
+          
+          {/* ALERTA DE PENDIENTES DEL DÍA */}
+          {pendingTodayCount > 0 && (
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-3.5 sm:p-4 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 rounded-2xl animate-fade-in shadow-xs">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-amber-100 dark:bg-amber-900/50 text-amber-800 dark:text-amber-300 rounded-xl shrink-0">
+                  <AlertTriangle className="w-5 h-5 animate-bounce" />
+                </div>
+                <div>
+                  <p className="text-xs sm:text-sm font-black text-amber-900 dark:text-amber-200 uppercase tracking-tight flex items-center gap-2">
+                    <span>¡Atención: {pendingTodayCount} pedido{pendingTodayCount > 1 ? 's' : ''} pendiente{pendingTodayCount > 1 ? 's' : ''} por cargar hoy!</span>
+                    <span className="px-2 py-0.5 text-[9px] bg-rose-500 text-white rounded-full font-black animate-pulse">PENDIENTES</span>
+                  </p>
+                  <p className="text-[10px] sm:text-[11px] text-amber-700 dark:text-amber-400 font-semibold mt-0.5">
+                    Hay {pendingTodayTotalQty.toFixed(2)} unidades/kg en solicitudes del día pendientes de despacho.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowPendingModal(true)}
+                className="w-full sm:w-auto px-3.5 py-2 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white text-[10px] sm:text-xs font-black uppercase rounded-xl tracking-wider transition-all shadow-sm flex items-center justify-center gap-2 shrink-0 cursor-pointer"
+              >
+                <Truck className="w-4 h-4" />
+                <span>Ver Consolidado Pendiente</span>
+              </button>
+            </div>
+          )}
+
+          <div className="flex flex-col lg:flex-row gap-4 justify-between items-stretch lg:items-center">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-[#009ED6]/10 text-[#009ED6] rounded-xl">
+                <ClipboardList className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="text-sm sm:text-lg font-black text-slate-800 dark:text-white uppercase tracking-tight">
+                  Lista de Pedidos de Corte
+                </h2>
+                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+                  Control y marcado de estado: CARGADO / RECHAZADO / PENDIENTE
+                </p>
+              </div>
+            </div>
             
-            {/* SEARCH */}
-            <div className="relative w-full md:w-64">
-              <input
-                type="text"
-                placeholder="Buscar en el historial..."
-                value={historySearch}
-                onChange={(e) => {
-                  setHistorySearch(e.target.value);
-                  setCurrentPage(1);
-                }}
-                className="w-full py-2.5 pl-10 pr-4 bg-slate-50 dark:bg-slate-800 dark:text-white border-none rounded-xl text-xs font-bold shadow-inner focus:ring-2 focus:ring-[#009ED6]/50"
-              />
-              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
+            {/* SEARCH AND PENDING SUMMARY BUTTON */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+              {/* BOTÓN RESUMEN CONSOLIDADO DE LO QUE FALTA CARGAR */}
+              <button
+                onClick={() => setShowPendingModal(true)}
+                className="flex items-center justify-center gap-2 px-3.5 py-2.5 bg-slate-100 hover:bg-amber-500 hover:text-white dark:bg-slate-800 dark:hover:bg-amber-600 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-black uppercase transition-all shadow-xs group cursor-pointer border border-transparent hover:border-amber-400"
+                title="Ver consolidado resumido de lo que falta cargar hoy"
+              >
+                <Truck className="w-4 h-4 text-[#009ED6] group-hover:text-white transition-colors" />
+                <span>Falta Cargar Hoy</span>
+                <span className="px-1.5 py-0.5 bg-amber-500 text-white group-hover:bg-white group-hover:text-amber-600 text-[10px] font-black rounded-lg transition-colors">
+                  {pendingTodayTotalQty.toFixed(2)}
+                </span>
+              </button>
+
+              <div className="relative w-full sm:w-64">
+                <input
+                  type="text"
+                  placeholder="Buscar en pedidos..."
+                  value={historySearch}
+                  onChange={(e) => {
+                    setHistorySearch(e.target.value);
+                    setCurrentPage(1);
+                  }}
+                  className="w-full py-2.5 pl-10 pr-4 bg-slate-50 dark:bg-slate-800 dark:text-white border-none rounded-xl text-xs font-bold shadow-inner focus:ring-2 focus:ring-[#009ED6]/50"
+                />
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
+              </div>
             </div>
           </div>
 
@@ -877,7 +1132,7 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
           {isLoadingHistory ? (
             <div className="flex flex-col items-center justify-center py-12 space-y-3">
               <RefreshCw className="w-8 h-8 text-[#009ED6] animate-spin" />
-              <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Cargando Historial...</p>
+              <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Cargando Pedidos...</p>
             </div>
           ) : filteredHistory.length === 0 ? (
             <div className="text-center py-12 text-slate-400 dark:text-slate-500 font-bold uppercase text-xs tracking-wider border border-dashed border-zinc-100 dark:border-slate-800 rounded-2xl">
@@ -890,10 +1145,15 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="bg-slate-50 dark:bg-slate-800 text-slate-400 text-[10px] uppercase font-black tracking-wider">
+                      {canChangeEstado && (
+                        <th className="p-4 border-b border-zinc-100 dark:border-slate-800 text-center w-24">Acción</th>
+                      )}
+                      <th className="p-4 border-b border-zinc-100 dark:border-slate-800 text-center w-32">Estado</th>
                       <th className="p-4 border-b border-zinc-100 dark:border-slate-800">Persona que Pidió</th>
                       <th className="p-4 border-b border-zinc-100 dark:border-slate-800">Cliente / Destinatario</th>
-                      <th className="p-4 border-b border-zinc-100 dark:border-slate-800">Fecha y Hora</th>
-                      <th className="p-4 border-b border-zinc-100 dark:border-slate-800">Código de Producto</th>
+                      <th className="p-4 border-b border-zinc-100 dark:border-slate-800">Fecha Solicitud</th>
+                      <th className="p-4 border-b border-zinc-100 dark:border-slate-800">Fecha Acept./Rech.</th>
+                      <th className="p-4 border-b border-zinc-100 dark:border-slate-800">Código</th>
                       <th className="p-4 border-b border-zinc-100 dark:border-slate-800">Producto Pedido</th>
                       <th className="p-4 border-b border-zinc-100 dark:border-slate-800 text-right">Cantidad</th>
                       <th className="p-4 border-b border-zinc-100 dark:border-slate-800">UM</th>
@@ -902,14 +1162,95 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
                   <tbody className="divide-y divide-zinc-100 dark:divide-slate-800 font-bold text-slate-700 dark:text-slate-200 text-xs">
                     {paginatedHistory.map((item) => {
                       const formatted = formatDateTime(item.fecha_registro);
+                      const formattedAtencion = item.fecha_atencion ? formatDateTime(item.fecha_atencion) : null;
+                      const estado = (item.estado || 'PENDIENTE').toUpperCase();
+                      
+                      // Row coloring based on state
+                      let rowStyle = 'hover:bg-slate-50/50 dark:hover:bg-slate-800/30 border-l-4 border-l-amber-400';
+                      if (estado === 'CARGADO') {
+                        rowStyle = 'bg-emerald-50/80 dark:bg-emerald-950/30 text-emerald-950 dark:text-emerald-100 border-l-4 border-l-emerald-500 hover:bg-emerald-100/70 transition-colors';
+                      } else if (estado === 'RECHAZADO') {
+                        rowStyle = 'bg-rose-50/80 dark:bg-rose-950/30 text-rose-950 dark:text-rose-100 border-l-4 border-l-rose-500 hover:bg-rose-100/70 transition-colors';
+                      }
+
                       return (
-                        <tr key={item.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
+                        <tr key={item.id} className={rowStyle}>
+                          {/* BOTONES DE ACCIÓN (SOLO VISIBLE PARA ROL ASISTENTE O ADMIN) */}
+                          {canChangeEstado && (
+                            <td className="p-3 text-center">
+                              <div className="inline-flex items-center gap-1.5 bg-white/90 dark:bg-slate-800/90 p-1 rounded-xl shadow-xs border border-zinc-200 dark:border-slate-700">
+                                <button
+                                  type="button"
+                                  disabled={updatingEstadoId === item.id}
+                                  onClick={() => handleUpdateEstado(item.id, estado === 'CARGADO' ? 'PENDIENTE' : 'CARGADO')}
+                                  className={`p-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${
+                                    estado === 'CARGADO'
+                                      ? 'bg-emerald-600 text-white shadow-sm ring-2 ring-emerald-400'
+                                      : 'text-emerald-600 hover:bg-emerald-100 dark:hover:bg-emerald-950/60'
+                                  }`}
+                                  title={estado === 'CARGADO' ? 'Clic para volver a Pendiente' : 'Aceptar / Marcar como CARGADO (✓)'}
+                                >
+                                  <Check className="w-4 h-4 stroke-[3]" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={updatingEstadoId === item.id}
+                                  onClick={() => handleUpdateEstado(item.id, estado === 'RECHAZADO' ? 'PENDIENTE' : 'RECHAZADO')}
+                                  className={`p-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${
+                                    estado === 'RECHAZADO'
+                                      ? 'bg-rose-600 text-white shadow-sm ring-2 ring-rose-400'
+                                      : 'text-rose-600 hover:bg-rose-100 dark:hover:bg-rose-950/60'
+                                  }`}
+                                  title={estado === 'RECHAZADO' ? 'Clic para volver a Pendiente' : 'Rechazar / Marcar como RECHAZADO (✗)'}
+                                >
+                                  <X className="w-4 h-4 stroke-[3]" />
+                                </button>
+                              </div>
+                            </td>
+                          )}
+
+                          {/* COLUMNA ESTADO CON PALABRA COMPLETA */}
+                          <td className="p-3 text-center whitespace-nowrap">
+                            {estado === 'CARGADO' ? (
+                              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-black uppercase tracking-wider bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700/60 shadow-xs">
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                                CARGADO
+                              </span>
+                            ) : estado === 'RECHAZADO' ? (
+                              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-black uppercase tracking-wider bg-rose-100 text-rose-800 dark:bg-rose-950/80 dark:text-rose-300 border border-rose-300 dark:border-rose-700/60 shadow-xs">
+                                <X className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400 stroke-[3]" />
+                                RECHAZADO
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-black uppercase tracking-wider bg-amber-100 text-amber-900 dark:bg-amber-950/80 dark:text-amber-300 border border-amber-300 dark:border-amber-700/60 shadow-xs">
+                                <Clock className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                                PENDIENTE
+                              </span>
+                            )}
+                          </td>
+
                           <td className="p-4 uppercase font-bold text-[#009ED6]">{item.usuario_registro}</td>
                           <td className="p-4 uppercase text-slate-700 dark:text-slate-300 font-extrabold max-w-[150px] truncate">
                             {item.cliente_nombre || <span className="text-slate-400 font-normal">S/A</span>}
                           </td>
-                          <td className="p-4 text-slate-400 text-[11px] font-semibold whitespace-nowrap">
-                            {formatted.date} <span className="text-[10px] ml-1 font-normal text-slate-500">{formatted.time}</span>
+                          <td className="p-4 text-slate-500 text-[11px] font-semibold whitespace-nowrap">
+                            {formatted.date} <span className="text-[10px] ml-1 font-normal text-slate-400">{formatted.time}</span>
+                          </td>
+                          {/* FECHA Y HORA DE LO QUE SE ACEPTÓ O RECHAZÓ */}
+                          <td className="p-4 text-slate-500 text-[11px] font-semibold whitespace-nowrap">
+                            {formattedAtencion ? (
+                              <div>
+                                <p className="font-bold text-slate-700 dark:text-slate-200">{formattedAtencion.date}</p>
+                                <p className="text-[10px] text-slate-400 font-normal flex items-center gap-1">
+                                  <span>{formattedAtencion.time}</span>
+                                  {item.usuario_atencion && (
+                                    <span className="text-[9px] font-bold text-slate-500 truncate max-w-[90px]">({item.usuario_atencion})</span>
+                                  )}
+                                </p>
+                              </div>
+                            ) : (
+                              <span className="text-slate-400 font-normal italic text-[11px]">-</span>
+                            )}
                           </td>
                           <td className="p-4 font-mono">{item.codigo}</td>
                           <td className="p-4 max-w-xs truncate uppercase">{item.nombre}</td>
@@ -926,8 +1267,18 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
               <div className="grid grid-cols-1 gap-3 md:hidden">
                 {paginatedHistory.map((item) => {
                   const formatted = formatDateTime(item.fecha_registro);
+                  const formattedAtencion = item.fecha_atencion ? formatDateTime(item.fecha_atencion) : null;
+                  const estado = (item.estado || 'PENDIENTE').toUpperCase();
+
+                  let cardStyle = 'bg-slate-50/60 dark:bg-slate-800/40 rounded-xl border border-zinc-100 dark:border-slate-800 space-y-2.5 p-4 border-l-4 border-l-amber-400';
+                  if (estado === 'CARGADO') {
+                    cardStyle = 'bg-emerald-50/80 dark:bg-emerald-950/30 rounded-xl border border-emerald-200 dark:border-emerald-800/60 space-y-2.5 p-4 border-l-4 border-l-emerald-500';
+                  } else if (estado === 'RECHAZADO') {
+                    cardStyle = 'bg-rose-50/80 dark:bg-rose-950/30 rounded-xl border border-rose-200 dark:border-rose-800/60 space-y-2.5 p-4 border-l-4 border-l-rose-500';
+                  }
+
                   return (
-                    <div key={item.id} className="p-4 bg-slate-50/50 dark:bg-slate-800/40 rounded-xl border border-zinc-100 dark:border-slate-800 space-y-2.5">
+                    <div key={item.id} className={cardStyle}>
                       <div className="flex justify-between items-start gap-2">
                         <div className="min-w-0">
                           <p className="text-[9px] font-black uppercase text-zinc-400 dark:text-slate-500 leading-none mb-0.5 animate-pulse-slow">Pedido por</p>
@@ -935,9 +1286,72 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
                         </div>
                         <div className="text-right shrink-0">
                           <p className="text-[10px] font-bold text-slate-700 dark:text-slate-300">{formatted.date}</p>
-                          <p className="text-[9px] font-medium text-slate-455 dark:text-slate-400">{formatted.time}</p>
+                          <p className="text-[9px] font-medium text-slate-400 dark:text-slate-500">{formatted.time}</p>
                         </div>
                       </div>
+
+                      {/* ESTADO CON PALABRA COMPLETA & BOTONES DE ACCION PARA ASISTENTE */}
+                      <div className="flex items-center justify-between bg-white dark:bg-slate-800/60 p-2 rounded-lg border border-zinc-100 dark:border-slate-700/50 gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[9px] font-black uppercase text-slate-400">Estado:</span>
+                          {estado === 'CARGADO' ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-black uppercase bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                              CARGADO
+                            </span>
+                          ) : estado === 'RECHAZADO' ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-black uppercase bg-rose-100 text-rose-800 dark:bg-rose-950/80 dark:text-rose-300 border border-rose-300">
+                              <X className="w-3 h-3 text-rose-600 stroke-[3]" />
+                              RECHAZADO
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-black uppercase bg-amber-100 text-amber-900 dark:bg-amber-950/80 dark:text-amber-300 border border-amber-300">
+                              <Clock className="w-3 h-3 text-amber-600" />
+                              PENDIENTE
+                            </span>
+                          )}
+                        </div>
+
+                        {/* BOTONES CHECK / X (SOLO VISIBLE PARA ASISTENTE O ADMIN) */}
+                        {canChangeEstado && (
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              disabled={updatingEstadoId === item.id}
+                              onClick={() => handleUpdateEstado(item.id, estado === 'CARGADO' ? 'PENDIENTE' : 'CARGADO')}
+                              className={`p-1.5 rounded-lg text-xs font-black transition-all ${
+                                estado === 'CARGADO'
+                                  ? 'bg-emerald-600 text-white ring-2 ring-emerald-400'
+                                  : 'text-emerald-600 bg-emerald-50 dark:bg-emerald-950/50'
+                              }`}
+                              title={estado === 'CARGADO' ? 'Clic para volver a Pendiente' : 'Aceptar / Marcar como CARGADO (✓)'}
+                            >
+                              <Check className="w-3.5 h-3.5 stroke-[3]" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={updatingEstadoId === item.id}
+                              onClick={() => handleUpdateEstado(item.id, estado === 'RECHAZADO' ? 'PENDIENTE' : 'RECHAZADO')}
+                              className={`p-1.5 rounded-lg text-xs font-black transition-all ${
+                                estado === 'RECHAZADO'
+                                  ? 'bg-rose-600 text-white ring-2 ring-rose-400'
+                                  : 'text-rose-600 bg-rose-50 dark:bg-rose-950/50'
+                              }`}
+                              title={estado === 'RECHAZADO' ? 'Clic para volver a Pendiente' : 'Rechazar / Marcar como RECHAZADO (✗)'}
+                            >
+                              <X className="w-3.5 h-3.5 stroke-[3]" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* FECHA Y HORA DE ATENCIÓN EN MÓVIL SI YA FUE ATENDIDO */}
+                      {formattedAtencion && (
+                        <div className="bg-slate-100/70 dark:bg-slate-800/40 p-2 rounded-lg text-[10px] text-slate-600 dark:text-slate-300 font-semibold flex justify-between items-center">
+                          <span className="text-slate-400 font-bold uppercase text-[9px]">Atendido:</span>
+                          <span>{formattedAtencion.date} {formattedAtencion.time} {item.usuario_atencion ? `(${item.usuario_atencion})` : ''}</span>
+                        </div>
+                      )}
 
                       {item.cliente_nombre && (
                         <div className="border-t border-zinc-100 dark:border-slate-800/60 pt-2">
@@ -1399,6 +1813,153 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
                 Registrar Cliente
               </button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* CONSOLIDADO DE LO QUE FALTA CARGAR MODAL */}
+      {showPendingModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white dark:bg-slate-900 border border-zinc-200 dark:border-slate-800 shadow-2xl rounded-2xl sm:rounded-3xl p-4 sm:p-6 max-w-3xl w-full max-h-[90vh] flex flex-col space-y-4 animate-in zoom-in duration-200">
+            
+            {/* MODAL HEADER */}
+            <div className="flex justify-between items-start pb-3 border-b border-zinc-100 dark:border-slate-800">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-amber-500/10 text-amber-600 dark:text-amber-400 rounded-xl">
+                  <Truck className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-base sm:text-lg font-black text-slate-800 dark:text-white uppercase tracking-tight flex items-center gap-2">
+                    <span>Consolidado Pendiente por Cargar</span>
+                    <span className="px-2 py-0.5 text-[9px] bg-amber-500 text-white rounded-full font-black">SOLICITUDES DE HOY</span>
+                  </h3>
+                  <p className="text-[10px] sm:text-xs text-slate-400 font-bold uppercase tracking-wider">
+                    Filtrado exclusivamente con solicitudes de corte del día pendientes
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowPendingModal(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-white rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* KPI STATS */}
+            <div className="grid grid-cols-3 gap-2 sm:gap-3">
+              <div className="bg-amber-50/60 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-900/40 p-3 rounded-xl text-center">
+                <p className="text-[9px] font-black text-amber-800 dark:text-amber-300 uppercase">Productos Pendientes</p>
+                <p className="text-base sm:text-xl font-black text-amber-900 dark:text-amber-200 mt-0.5">{pendingConsolidatedData.length}</p>
+              </div>
+              <div className="bg-amber-500/10 border border-amber-500/30 p-3 rounded-xl text-center">
+                <p className="text-[9px] font-black text-amber-800 dark:text-amber-300 uppercase">Total Cant. a Cargar</p>
+                <p className="text-base sm:text-xl font-black text-amber-600 dark:text-amber-400 mt-0.5">{pendingTodayTotalQty.toFixed(2)}</p>
+              </div>
+              <div className="bg-slate-50 dark:bg-slate-800 border border-zinc-100 dark:border-slate-700 p-3 rounded-xl text-center">
+                <p className="text-[9px] font-black text-slate-500 dark:text-slate-400 uppercase">N° Pedidos Pendientes</p>
+                <p className="text-base sm:text-xl font-black text-slate-800 dark:text-white mt-0.5">{pendingTodayCount}</p>
+              </div>
+            </div>
+
+            {/* LIST OR EMPTY */}
+            <div className="flex-1 overflow-y-auto pr-1">
+              {pendingConsolidatedData.length === 0 ? (
+                <div className="text-center py-12 text-slate-400 font-bold uppercase text-xs tracking-wider border border-dashed border-zinc-200 dark:border-slate-800 rounded-2xl">
+                  ¡Excelente! No hay pedidos de corte pendientes por cargar el día de hoy.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <table className="w-full text-left border-collapse hidden sm:table">
+                    <thead>
+                      <tr className="bg-slate-50 dark:bg-slate-800 text-slate-400 text-[10px] uppercase font-black tracking-wider">
+                        <th className="p-3 border-b border-zinc-100 dark:border-slate-800 text-center w-10">#</th>
+                        <th className="p-3 border-b border-zinc-100 dark:border-slate-800">Código</th>
+                        <th className="p-3 border-b border-zinc-100 dark:border-slate-800">Producto</th>
+                        <th className="p-3 border-b border-zinc-100 dark:border-slate-800 text-right">Cant. Pendiente</th>
+                        <th className="p-3 border-b border-zinc-100 dark:border-slate-800">UM</th>
+                        <th className="p-3 border-b border-zinc-100 dark:border-slate-800 text-center">Pedidos</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-100 dark:divide-slate-800 font-bold text-slate-700 dark:text-slate-200 text-xs">
+                      {pendingConsolidatedData.map((item, idx) => (
+                        <tr key={item.key} className="hover:bg-amber-50/40 dark:hover:bg-slate-800/40 transition-colors">
+                          <td className="p-3 text-center text-slate-400 font-mono text-[10px]">{idx + 1}</td>
+                          <td className="p-3 font-mono text-[#009ED6] text-[11px]">{item.codigo}</td>
+                          <td className="p-3 uppercase">
+                            <p className="font-extrabold">{item.nombre}</p>
+                            <div className="mt-1 space-y-0.5">
+                              {item.detalles.map(d => (
+                                <p key={d.id} className="text-[10px] text-slate-500 font-normal">
+                                  • <span className="font-semibold uppercase">{d.cliente}</span>: {d.cantidad} {item.unidad_medida} ({d.hora})
+                                </p>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="p-3 text-right text-base font-black text-amber-600 dark:text-amber-400">
+                            {item.totalCantidad.toFixed(2)}
+                          </td>
+                          <td className="p-3 uppercase text-slate-400 text-[10px]">{item.unidad_medida}</td>
+                          <td className="p-3 text-center">
+                            <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded-full text-[10px] font-black text-slate-600 dark:text-slate-300">
+                              {item.pedidosCount}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+
+                  {/* MOBILE VIEW FOR MODAL */}
+                  <div className="space-y-2.5 sm:hidden">
+                    {pendingConsolidatedData.map((item) => (
+                      <div key={item.key} className="p-3 bg-amber-50/40 dark:bg-slate-800/40 rounded-xl border border-amber-100 dark:border-slate-800 space-y-2">
+                        <div className="flex justify-between items-start">
+                          <div className="min-w-0">
+                            <span className="text-[9px] font-mono font-bold text-[#009ED6] bg-blue-50 dark:bg-blue-950/40 px-1.5 py-0.5 rounded">{item.codigo}</span>
+                            <p className="text-xs font-black text-slate-800 dark:text-white uppercase mt-1">{item.nombre}</p>
+                          </div>
+                          <div className="text-right shrink-0 ml-2">
+                            <p className="text-base font-black text-amber-600 dark:text-amber-400">{item.totalCantidad.toFixed(2)}</p>
+                            <span className="text-[9px] font-extrabold uppercase text-slate-400">{item.unidad_medida}</span>
+                          </div>
+                        </div>
+                        <div className="border-t border-amber-200/50 dark:border-slate-700/50 pt-1.5 space-y-1">
+                          <p className="text-[9px] font-black uppercase text-slate-400">Clientes ({item.pedidosCount} pedidos):</p>
+                          {item.detalles.map(d => (
+                            <p key={d.id} className="text-[10px] text-slate-600 dark:text-slate-300 font-medium">
+                              • <span className="font-bold uppercase">{d.cliente}</span>: {d.cantidad} {item.unidad_medida}
+                            </p>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* MODAL FOOTER */}
+            <div className="flex flex-col sm:flex-row justify-between items-center gap-2 pt-3 border-t border-zinc-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={handlePrintPendingConsolidated}
+                disabled={pendingConsolidatedData.length === 0}
+                className="w-full sm:w-auto px-4 py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-black uppercase rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+              >
+                <Printer className="w-4 h-4" />
+                <span>Imprimir Consolidado Faltante</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowPendingModal(false)}
+                className="w-full sm:w-auto px-6 py-2.5 bg-slate-800 hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600 text-white text-xs font-black uppercase rounded-xl transition-all cursor-pointer"
+              >
+                Cerrar
+              </button>
+            </div>
+
           </div>
         </div>
       )}

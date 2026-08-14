@@ -592,6 +592,14 @@ const Reception: React.FC<ReceptionProps> = ({
           receptionData?.forEach(item => {
             if (!item.fecha_registro) return;
             
+            // Exclude rejected, deleted, cancelled or unapproved items from APP comparison
+            if (item.estado) {
+              const estUpper = String(item.estado).trim().toUpperCase();
+              if (['RECHAZADO', 'RECHAZADA', 'ELIMINADO', 'ELIMINADA', 'CANCELADO', 'CANCELADA', 'PENDIENTE_AUTORIZACION', 'OBSERVADO_BLOQUEADO'].includes(estUpper)) {
+                return;
+              }
+            }
+
             // Format to local YYYY-MM-DD
             const dateObj = new Date(item.fecha_registro);
             const year = dateObj.getFullYear();
@@ -1323,7 +1331,7 @@ const Reception: React.FC<ReceptionProps> = ({
         let query = supabase
             .from('recepcion_productos')
             .select('*', { count: 'exact' })
-            .eq('estado', 'ACTIVO');
+            .neq('estado', 'ELIMINADO');
 
         if (currentUser?.sede_id) {
             query = query.eq('sede_id', currentUser.sede_id);
@@ -1390,62 +1398,233 @@ const Reception: React.FC<ReceptionProps> = ({
 
     setIsLoadingHistory(true);
     try {
-      const { data: historyData, error: historyError } = await supabase
+      // Convert local date range to full UTC bounds for Supabase query
+      const startLocalDate = new Date(`${exportStartDate}T00:00:00`);
+      const startIso = startLocalDate.toISOString();
+      const endLocalDate = new Date(`${exportEndDate}T23:59:59.999`);
+      const endIso = endLocalDate.toISOString();
+
+      let query = supabase
         .from('recepcion_productos')
         .select('*')
-        .eq('estado', 'ACTIVO')
-        .gte('fecha_registro', exportStartDate + 'T00:00:00')
-        .lte('fecha_registro', exportEndDate + 'T23:59:59')
+        .gte('fecha_registro', startIso)
+        .lte('fecha_registro', endIso)
         .order('fecha_registro', { ascending: false });
 
+      if (currentUser?.sede_id) {
+        query = query.eq('sede_id', currentUser.sede_id);
+      }
+
+      // Do not exclude rejected or pending alert items (exclude only deleted items)
+      query = query.neq('estado', 'ELIMINADO');
+
+      const { data: rawHistoryData, error: historyError } = await query;
+
       if (historyError) throw historyError;
+
+      // Ensure strict local calendar date filtering
+      const historyData = (rawHistoryData || []).filter(record => {
+        if (!record.fecha_registro) return false;
+        const d = new Date(record.fecha_registro);
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        const localDateStr = `${year}-${month}-${day}`;
+        return localDateStr >= exportStartDate && localDateStr <= exportEndDate;
+      });
 
       if (!historyData || historyData.length === 0) {
         alert("No hay registros en el rango seleccionado.");
         return;
       }
 
-      // Fetch locations for all LPNs in the range
+      // 1. Fetch location and pallet info for all LPNs in the range
       const lpns = historyData.map(r => r.lpn).filter(Boolean);
-      let locationMap: Record<string, string> = {};
+      let palletMap: Record<string, any> = {};
       
       if (lpns.length > 0) {
           const { data: palletData, error: palletError } = await supabase
               .from('paletas_lpn')
-              .select('lpn, ubicacion_id')
+              .select('lpn, ubicacion_id, tipo, estado, estado_lpn')
               .in('lpn', lpns);
           
           if (!palletError && palletData) {
-              locationMap = palletData.reduce((acc, p) => {
-                  acc[p.lpn] = p.ubicacion_id;
+              palletMap = palletData.reduce((acc, p) => {
+                  acc[p.lpn] = p;
                   return acc;
-              }, {} as Record<string, string>);
+              }, {} as Record<string, any>);
           }
       }
 
-      const reportData = historyData.map(record => ({
-        'LPN': record.lpn,
-        'Fecha Registro': new Date(record.fecha_registro).toLocaleDateString(),
-        'Hora Registro': new Date(record.fecha_registro).toLocaleTimeString(),
-        'Producto': record.nombre,
-        'Código': record.codigo,
-        'Cantidad': record.cantidad,
-        'U. Medida': record.unidad_medida,
-        'Ubicación': locationMap[record.lpn] || 'N/A',
-        'Usuario': record.usuario_registro,
-        'Proveedor': record.proveedor || '',
-        'Guía/Factura': record.guia_factura || '',
-        'Lote': record.lote || '',
-        'F. Vencimiento': record.fecha_vencimiento ? new Date(record.fecha_vencimiento).toLocaleDateString() : 'N/A'
-      }));
+      // 2. Fetch all related alerts from alertas_recepcion
+      const alertIds = Array.from(new Set(historyData.map(r => r.alerta_id).filter(Boolean)));
+      const recepIds = Array.from(new Set(historyData.map(r => r.id).filter(Boolean)));
+      
+      let alertMapById: Record<string, any> = {};
+      let alertMapByRecepcionId: Record<string, any> = {};
+
+      const alertQueries = [];
+
+      // Alerts by range
+      let dateAlertQuery = supabase
+        .from('alertas_recepcion')
+        .select('*')
+        .gte('fecha_alerta', startIso)
+        .lte('fecha_alerta', endIso);
+
+      if (currentUser?.sede_id) {
+        dateAlertQuery = dateAlertQuery.or(`sede_id.eq.${currentUser.sede_id},sede_id.is.null`);
+      }
+      alertQueries.push(dateAlertQuery);
+
+      if (alertIds.length > 0) {
+        alertQueries.push(supabase.from('alertas_recepcion').select('*').in('id', alertIds));
+      }
+      if (recepIds.length > 0) {
+        alertQueries.push(supabase.from('alertas_recepcion').select('*').in('recepcion_id', recepIds));
+      }
+
+      const alertResults = await Promise.all(alertQueries);
+      alertResults.forEach(res => {
+        if (res.data) {
+          res.data.forEach((a: any) => {
+            if (a.id) alertMapById[a.id] = a;
+            if (a.recepcion_id) alertMapByRecepcionId[a.recepcion_id] = a;
+          });
+        }
+      });
+
+      // 3. Build comprehensive structured report data
+      const reportData = historyData.map(record => {
+        const matchedProduct = catalog.find(p => p.id === record.producto_id || p.codigo === record.codigo);
+        const totalLife = matchedProduct ? (matchedProduct.tvm_dias || matchedProduct.vida_util_dias || 0) : 0;
+        
+        let tvuCalculated: number | null = null;
+        let tvuActualCalculated: number | null = null;
+        if (totalLife > 0 && record.fecha_vencimiento) {
+            try {
+                const expDate = new Date(record.fecha_vencimiento + 'T00:00:00');
+                if (record.fecha_registro) {
+                    const regDate = new Date(record.fecha_registro);
+                    regDate.setHours(0, 0, 0, 0);
+                    const diffTime = expDate.getTime() - regDate.getTime();
+                    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                    tvuCalculated = Math.round((diffDays / totalLife) * 100);
+                }
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                const diffTimeActual = expDate.getTime() - today.getTime();
+                const diffDaysActual = Math.ceil(diffTimeActual / (1000 * 60 * 60 * 24));
+                tvuActualCalculated = Math.round((diffDaysActual / totalLife) * 100);
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        // Identify Chamber
+        let chamberLabel = 'Seco';
+        if (matchedProduct) {
+            if (matchedProduct.es_congelado || matchedProduct.zona_predeterminada === 'CONGELADO') {
+                chamberLabel = 'Congelado';
+            } else if (matchedProduct.es_refrigerado || matchedProduct.zona_predeterminada === 'REFRIGERADO') {
+                chamberLabel = 'Refrigerado';
+            }
+        } else if (record.ubicacion) {
+            const locUpper = record.ubicacion.toUpperCase();
+            if (locUpper.includes('CONGELADO') || locUpper.includes('CAMARA 3') || locUpper.includes('CÁMARA 3')) {
+                chamberLabel = 'Congelado';
+            } else if (locUpper.includes('REFRIGERADO') || locUpper.includes('CAMARA 1') || locUpper.includes('CAMARA 2') || locUpper.includes('CÁMARA 1') || locUpper.includes('CÁMARA 2')) {
+                chamberLabel = 'Refrigerado';
+            }
+        }
+
+        const alert = (record.alerta_id && alertMapById[record.alerta_id]) || alertMapByRecepcionId[record.id] || null;
+        const pallet = palletMap[record.lpn] || null;
+
+        // Acceptance and rejection state determination
+        const recEstUpper = String(record.estado || '').toUpperCase();
+        const recConcUpper = String(record.conclusiones || '').toUpperCase();
+        const alertEstUpper = String(alert?.estado || '').toUpperCase();
+
+        let estadoAceptacion = 'ACEPTADO';
+        if (recConcUpper === 'RECHAZADO' || recEstUpper === 'RECHAZADO' || alertEstUpper === 'RECHAZADO') {
+            estadoAceptacion = 'RECHAZADO';
+        } else if (recEstUpper === 'PENDIENTE_AUTORIZACION' || alertEstUpper === 'PENDIENTE') {
+            estadoAceptacion = 'PENDIENTE DE AUTORIZACIÓN';
+        } else if (recConcUpper === 'ACEPTADO CON OBSERVACION') {
+            estadoAceptacion = 'ACEPTADO CON OBSERVACIÓN';
+        } else if (recConcUpper === 'ACEPTADO') {
+            estadoAceptacion = 'ACEPTADO';
+        }
+
+        const hasAlert = !!(record.alerta_id || alert || record.estado === 'PENDIENTE_AUTORIZACION');
+
+        return {
+          'LPN': record.lpn || 'N/A',
+          'Fecha Registro': record.fecha_registro ? new Date(record.fecha_registro).toLocaleDateString() : '',
+          'Hora Registro': record.fecha_registro ? new Date(record.fecha_registro).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '',
+          'Código Producto': record.codigo || '',
+          'Producto / Descripción': record.nombre || '',
+          'Proveedor': record.proveedor || alert?.proveedor || matchedProduct?.marca || (matchedProduct as any)?.proveedor || 'N/A',
+          'Guía / Factura': record.guia_factura || alert?.guia_factura || '',
+          'Cantidad Total': record.cantidad ?? 0,
+          'U. Medida': record.unidad_medida || 'UN',
+          'Pallets': record.pallets ?? 0,
+          'Cajas': record.cajas ?? 0,
+          'Unidades': record.unidades ?? 0,
+          'Lote': record.lote || '',
+          'Fecha Vencimiento': record.fecha_vencimiento ? formatDate(record.fecha_vencimiento) : 'N/A',
+          'Vida Útil (Días)': totalLife > 0 ? totalLife : 'N/A',
+          'TVU Llegada (%)': tvuCalculated !== null ? `${tvuCalculated}%` : 'N/A',
+          'TVU Actual (%)': tvuActualCalculated !== null ? `${tvuActualCalculated}%` : 'N/A',
+          'Cámara / Zona': chamberLabel,
+          'Temp. Producto (°C)': record.temperatura !== null && record.temperatura !== undefined ? record.temperatura : '',
+          'Temp. Transporte (°C)': record.temperatura_transporte !== null && record.temperatura_transporte !== undefined ? record.temperatura_transporte : '',
+          'pH': record.ph !== null && record.ph !== undefined ? record.ph : '',
+          'Estado Envase': record.estado_envase || '',
+          'Aspecto Físico': record.aspecto_fisico || '',
+          'Color': record.color || '',
+          'Olor': record.olor || '',
+          'Hermeticidad': record.hermeticidad || '',
+          'Libre Impurezas': record.libre_impurezas || '',
+          'Condición Higiénica': record.condicion_higienica || '',
+          'Indumentaria Limpia': record.indumentaria_limpia || '',
+          'Higiene Personal': record.higiene_personal || '',
+          'Inspección Calidad': record.inspeccion_calidad ? 'SÍ' : 'NO',
+          'Conclusión Calidad': record.conclusiones || (estadoAceptacion === 'RECHAZADO' ? 'RECHAZADO' : 'ACEPTADO'),
+          'Estado Aceptación / Decisión': estadoAceptacion,
+          '¿Tiene Alerta?': hasAlert ? 'SÍ' : 'NO',
+          'Tipo de Alerta': alert?.tipo_alerta || (record.estado === 'PENDIENTE_AUTORIZACION' ? 'ALERTA RECEPCIÓN' : 'NINGUNA'),
+          'Detalle / Valor Alerta': alert?.valor_alerta || '',
+          'Estado de la Alerta': alert?.estado || (estadoAceptacion === 'RECHAZADO' ? 'RECHAZADO' : (hasAlert ? 'PENDIENTE' : 'SIN ALERTA')),
+          'Motivo Decisión / Rechazo': alert?.motivo_decision || record.observaciones || '',
+          'Autorizado / Decidido Por': alert?.decision_por || alert?.autorizado_por || record.autorizado_por || record.verificado_por || '',
+          'Fecha Decisión Alerta': alert?.fecha_decision ? new Date(alert.fecha_decision).toLocaleString() : '',
+          'Área Autorización': alert?.area_autorizacion || '',
+          'Ubicación Almacén': pallet?.ubicacion_id || record.ubicacion || 'N/A',
+          'Tipo LPN': pallet?.tipo || '',
+          'Estado LPN': pallet?.estado_lpn || pallet?.estado || '',
+          'Usuario Registro': record.usuario_registro || '',
+          'Observaciones': record.observaciones || ''
+        };
+      });
 
       const worksheet = XLSX.utils.json_to_sheet(reportData);
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, "Historial Recepción");
       
-      // Auto-size columns
-      const max_width = reportData.reduce((w, r) => Math.max(w, r.Producto.length), 10);
-      worksheet["!cols"] = [ { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: max_width }, { wch: 15 }, { wch: 10 }, { wch: 10 }, { wch: 15 }, { wch: 15 }, { wch: 20 }, { wch: 15 }, { wch: 15 }, { wch: 15 } ];
+      // Dynamic auto-size columns
+      if (reportData.length > 0) {
+        const colKeys = Object.keys(reportData[0]);
+        worksheet["!cols"] = colKeys.map(key => {
+          const maxLen = reportData.reduce((acc, row: any) => {
+            const val = row[key];
+            const str = val !== null && val !== undefined ? String(val) : '';
+            return Math.max(acc, str.length);
+          }, key.length);
+          return { wch: Math.min(Math.max(maxLen + 2, 12), 40) };
+        });
+      }
 
       XLSX.writeFile(workbook, `Historial_Recepcion_${exportStartDate}_${exportEndDate}.xlsx`);
       setShowExportModal(false);
@@ -2730,7 +2909,14 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                             </h3>
                             <div className="flex items-center gap-2">
                                 <button 
-                                    onClick={() => setShowExportModal(true)}
+                                    onClick={() => {
+                                        if (!exportStartDate) {
+                                            const today = new Date().toISOString().split('T')[0];
+                                            setExportStartDate(today);
+                                            setExportEndDate(today);
+                                        }
+                                        setShowExportModal(true);
+                                    }}
                                     className="p-1.5 text-green-600 hover:bg-green-100 rounded-lg transition-colors flex items-center gap-1"
                                     title="Exportar a Excel"
                                 >
@@ -2955,9 +3141,12 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                                             <span className={`text-[9px] font-bold border px-1.5 py-0.5 rounded uppercase ${chamberColor}`}>
                                                                 Cámara: {chamberLabel}
                                                             </span>
-                                                            {(rawChamber === 'REFRIGERADO' || rawChamber === 'SECO') && (
-                                                                <span className="text-[9px] font-bold bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded uppercase flex items-center gap-0.5">
-                                                                    <Thermometer className="w-2.5 h-2.5 text-amber-600" /> T. Llegada: {record.temperatura !== null && record.temperatura !== undefined ? `${record.temperatura}°C` : 'N/R'}
+                                                            <span className="text-[9px] font-bold bg-sky-50 text-sky-800 border border-sky-200 px-1.5 py-0.5 rounded uppercase flex items-center gap-0.5" title="Temperatura del producto recepcionado">
+                                                                <Thermometer className="w-2.5 h-2.5 text-sky-600" /> T. Prod: {record.temperatura !== null && record.temperatura !== undefined ? `${record.temperatura}°C` : 'N/R'}
+                                                            </span>
+                                                            {record.temperatura_transporte !== null && record.temperatura_transporte !== undefined && (
+                                                                <span className="text-[9px] font-bold bg-indigo-50 text-indigo-800 border border-indigo-200 px-1.5 py-0.5 rounded uppercase flex items-center gap-0.5" title="Temperatura del transporte">
+                                                                    <Thermometer className="w-2.5 h-2.5 text-indigo-600" /> T. Transp: {record.temperatura_transporte}°C
                                                                 </span>
                                                             )}
                                                         </div>
