@@ -3195,30 +3195,50 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                         </div>
 
                         {/* Pagination Controls */}
-                        {!isLoadingHistory && historyTotalCount > itemsPerPage && (
+                        {!isLoadingHistory && historyTotalCount > 0 && (
                             <div className="p-2 bg-slate-50 border-t border-gray-200 flex items-center justify-between">
                                 <span className="text-[10px] text-gray-500 font-bold uppercase">
                                     Total: {historyTotalCount}
                                 </span>
-                                <div className="flex items-center gap-1">
-                                    <button 
-                                        onClick={() => setHistoryPage(p => Math.max(1, p - 1))}
-                                        disabled={historyPage === 1}
-                                        className="p-1 rounded hover:bg-gray-200 disabled:opacity-30 transition-colors"
-                                    >
-                                        <ChevronLeft className="w-4 h-4" />
-                                    </button>
-                                    <span className="text-xs font-black text-blue-600 px-2">
-                                        {historyPage} / {Math.ceil(historyTotalCount / itemsPerPage)}
-                                    </span>
-                                    <button 
-                                        onClick={() => setHistoryPage(p => Math.min(Math.ceil(historyTotalCount / itemsPerPage), p + 1))}
-                                        disabled={historyPage >= Math.ceil(historyTotalCount / itemsPerPage)}
-                                        className="p-1 rounded hover:bg-gray-200 disabled:opacity-30 transition-colors"
-                                    >
-                                        <ChevronRight className="w-4 h-4" />
-                                    </button>
-                                </div>
+                                {historyTotalCount > itemsPerPage && (
+                                    <div className="flex items-center gap-1">
+                                        <button 
+                                            onClick={() => setHistoryPage(1)}
+                                            disabled={historyPage === 1}
+                                            className="px-2 py-1 text-[10px] font-bold rounded hover:bg-gray-200 disabled:opacity-30 transition-colors"
+                                            title="Primera página"
+                                        >
+                                            «
+                                        </button>
+                                        <button 
+                                            onClick={() => setHistoryPage(p => Math.max(1, p - 1))}
+                                            disabled={historyPage === 1}
+                                            className="p-1 rounded hover:bg-gray-200 disabled:opacity-30 transition-colors"
+                                            title="Página anterior"
+                                        >
+                                            <ChevronLeft className="w-4 h-4" />
+                                        </button>
+                                        <span className="text-xs font-black text-blue-600 px-2">
+                                            {historyPage} / {Math.ceil(historyTotalCount / itemsPerPage)}
+                                        </span>
+                                        <button 
+                                            onClick={() => setHistoryPage(p => Math.min(Math.ceil(historyTotalCount / itemsPerPage), p + 1))}
+                                            disabled={historyPage >= Math.ceil(historyTotalCount / itemsPerPage)}
+                                            className="p-1 rounded hover:bg-gray-200 disabled:opacity-30 transition-colors"
+                                            title="Página siguiente"
+                                        >
+                                            <ChevronRight className="w-4 h-4" />
+                                        </button>
+                                        <button 
+                                            onClick={() => setHistoryPage(Math.ceil(historyTotalCount / itemsPerPage))}
+                                            disabled={historyPage >= Math.ceil(historyTotalCount / itemsPerPage)}
+                                            className="px-2 py-1 text-[10px] font-bold rounded hover:bg-gray-200 disabled:opacity-30 transition-colors"
+                                            title="Última página"
+                                        >
+                                            »
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>

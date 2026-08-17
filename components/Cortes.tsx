@@ -333,16 +333,11 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
   const fetchHistory = async () => {
     setIsLoadingHistory(true);
     try {
-      let query = supabase
+      const { data, error } = await supabase
         .from('pedidos_corte')
-        .select('*');
-      
-      const sedeId = currentUser?.sede_id;
-      if (sedeId) {
-        query = query.eq('sede_id', sedeId);
-      }
+        .select('*')
+        .order('fecha_registro', { ascending: false });
 
-      const { data, error } = await query.order('fecha_registro', { ascending: false });
       if (error) throw error;
 
       setHistory(data || []);
@@ -355,16 +350,33 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
 
   useEffect(() => {
     fetchHistory();
-  }, [currentUser]);
+
+    // Realtime subscription para sincronización inmediata de pedidos entre todos los usuarios
+    const channel = supabase
+      .channel('pedidos_corte_realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'pedidos_corte' },
+        () => {
+          fetchHistory();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
 
   // Filter history list
   const filteredHistory = useMemo(() => {
     if (!historySearch.trim()) return history;
     const term = historySearch.toLowerCase();
     return history.filter(p => 
-      p.nombre.toLowerCase().includes(term) || 
-      p.codigo.toLowerCase().includes(term) ||
-      p.usuario_registro.toLowerCase().includes(term)
+      (p.nombre || '').toLowerCase().includes(term) || 
+      (p.codigo || '').toLowerCase().includes(term) ||
+      (p.usuario_registro || '').toLowerCase().includes(term) ||
+      (p.cliente_nombre || '').toLowerCase().includes(term)
     );
   }, [history, historySearch]);
 
@@ -572,18 +584,12 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
   const fetchDailyInventory = async () => {
     if (!consolidatedDate) return;
     try {
-      let query = supabase
+      const { data, error } = await supabase
         .from('conteo_inventario')
         .select('codigo, producto_id, cantidad, fecha_registro, sede_id')
         .gte('fecha_registro', `${consolidatedDate}T00:00:00`)
         .lte('fecha_registro', `${consolidatedDate}T23:59:59.999`);
 
-      const sedeId = currentUser?.sede_id;
-      if (sedeId) {
-        query = query.eq('sede_id', sedeId);
-      }
-
-      const { data, error } = await query;
       if (error) {
         console.error("Error loading inventory counts:", error);
         return;

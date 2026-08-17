@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ReverseLogisticsItem, Product, Usuario } from '../types';
 import { supabase } from '../supabaseClient';
 import { compressImage, generateStorageFileName } from '../utils';
@@ -9,7 +9,7 @@ import * as XLSX from 'xlsx';
 const PLATES = [
   'ALQUILADO', 'ANL777', 'ASN830',  'ASN831', 'AWZ803', 'AXB704', 'AXB705', 'AXB706', 'AXB802', 'AXB905',
   'BDS737', 'BTF847', 'BTF857', 'BTF937', 'BTG748', 'BTG847', 'BTI850', 'CAB769', 'CAB882', 'CAC765',
-  'CAE767', 'CFZ900', 'CHJ779', 'CHA901', 'CHB890', 'CHA890','CHD705','CHE969'
+  'CAE767', 'CFZ900', 'CHJ779','CHX808', 'CHA901','CHB901', 'CHB890', 'CHA890','CHD705','CHE969'
 ].sort();
 
 interface Props {
@@ -34,6 +34,8 @@ const ReverseLogistics: React.FC<Props> = ({ currentUser, catalog = [], onRefres
 
   // Form State
   const [plate, setPlate] = useState('');
+  const [showPlateDropdown, setShowPlateDropdown] = useState(false);
+  const plateContainerRef = useRef<HTMLDivElement>(null);
   const [invoice, setInvoice] = useState('');
   const [returnType, setReturnType] = useState<ReverseLogisticsItem['returnType']>('SOBRANTE');
   const [defect, setDefect] = useState<ReverseLogisticsItem['defect']>('ROTO / DAÑADO');
@@ -42,6 +44,24 @@ const ReverseLogistics: React.FC<Props> = ({ currentUser, catalog = [], onRefres
   const [photoPreviews, setPhotoPreviews] = useState<string[]>([]);
   const [successMsg, setSuccessMsg] = useState(false);
   const [hasExpiration, setHasExpiration] = useState(false);
+
+  // Filtered plates matching query (>= 3 chars)
+  const filteredPlates = useMemo(() => {
+    const term = plate.trim().toUpperCase();
+    if (term.length < 3) return [];
+    return PLATES.filter(p => p.toUpperCase().includes(term));
+  }, [plate]);
+
+  // Click outside to close plate dropdown
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (plateContainerRef.current && !plateContainerRef.current.contains(event.target as Node)) {
+        setShowPlateDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   // History Filters State
   const [filterStartDate, setFilterStartDate] = useState('');
@@ -255,6 +275,39 @@ const ReverseLogistics: React.FC<Props> = ({ currentUser, catalog = [], onRefres
       }]);
 
       if (error) throw error;
+
+      // Auto-registro en MERMAS si el defecto es 'ROTO / DAÑADO' o 'VENCIDO'
+      if (dataToSave.defect === 'ROTO / DAÑADO' || dataToSave.defect === 'VENCIDO') {
+        try {
+          const matchedProd = selectedProduct || (catalog && catalog.find(p => p.codigo === dataToSave.productCode || p.nombre === dataToSave.productName));
+          const mermaDefecto = dataToSave.defect === 'VENCIDO' ? 'VENCIDO' : 'ROTO';
+          const defaultExpDate = dataToSave.expirationDate || (hasExpiration ? `${selYear}-${selMonth}-${selDay}` : new Date().toISOString().split('T')[0]);
+
+          const mermaPayload: any = {
+            producto_id: matchedProd?.id || null,
+            codigo: dataToSave.productCode,
+            nombre: dataToSave.productName,
+            cantidad: dataToSave.quantity || 0,
+            fecha_vencimiento: defaultExpDate,
+            procedencia: 'DEVOLUCION',
+            defecto: mermaDefecto,
+            destino: 'DESTRUCCION',
+            fotos: photoUrls,
+            usuario_registro: currentUser?.nombre || 'SISTEMA',
+            fecha_registro: new Date().toISOString(),
+            revisado_calidad: false,
+            unidad_medida: matchedProd?.unidad_venta || 'UND',
+            sede_id: currentUser?.sede_id || null
+          };
+
+          const { error: mermaError } = await supabase.from('mermas').insert([mermaPayload]);
+          if (mermaError) {
+            console.error("Error al registrar automáticamente en mermas:", mermaError);
+          }
+        } catch (mermaCatchErr) {
+          console.error("Excepción al auto-registrar en mermas:", mermaCatchErr);
+        }
+      }
       
       // Success
       resetForm();
@@ -272,6 +325,7 @@ const ReverseLogistics: React.FC<Props> = ({ currentUser, catalog = [], onRefres
 
   const resetForm = () => {
     setPlate('');
+    setShowPlateDropdown(false);
     setInvoice('');
     setReturnType('SOBRANTE');
     setDefect('ROTO / DAÑADO');
@@ -387,12 +441,76 @@ const ReverseLogistics: React.FC<Props> = ({ currentUser, catalog = [], onRefres
                                 <option value="OTROS">Otros</option>
                             </select>
                         </div>
-                        <div className="space-y-1">
-                            <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest ml-1">Carro Placa</label>
-                            <select className="w-full p-3 border dark:border-slate-700 rounded-xl bg-gray-50 dark:bg-slate-800 dark:text-white font-black text-base outline-none focus:ring-4 focus:ring-[#009ED6]/10" value={plate} onChange={e => setPlate(e.target.value)}>
-                                <option value="">Seleccionar Placa...</option>
-                                {PLATES.map(p => <option key={p} value={p}>{p}</option>)}
-                            </select>
+                        <div className="space-y-1 relative" ref={plateContainerRef}>
+                            <div className="flex items-center justify-between">
+                                <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest ml-1">Carro Placa</label>
+                                {plate.trim().length > 0 && plate.trim().length < 3 && (
+                                    <span className="text-[8px] font-bold text-amber-500 uppercase">Digita mín. 3 caracteres</span>
+                                )}
+                            </div>
+                            <div className="relative">
+                                <input 
+                                    type="text" 
+                                    placeholder="Buscar placa..." 
+                                    className="w-full p-3 pr-10 border dark:border-slate-700 rounded-xl bg-gray-50 dark:bg-slate-800 dark:text-white font-black text-base outline-none focus:ring-4 focus:ring-[#009ED6]/10 uppercase tracking-wider placeholder:normal-case placeholder:font-normal placeholder:text-sm" 
+                                    value={plate} 
+                                    onChange={e => {
+                                        setPlate(e.target.value.toUpperCase());
+                                        setShowPlateDropdown(true);
+                                    }}
+                                    onFocus={() => {
+                                        if (plate.trim().length >= 3) setShowPlateDropdown(true);
+                                    }}
+                                />
+                                {plate ? (
+                                    <button 
+                                        type="button" 
+                                        onClick={() => {
+                                            setPlate('');
+                                            setShowPlateDropdown(false);
+                                        }} 
+                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-red-500 transition-colors"
+                                        title="Limpiar placa"
+                                    >
+                                        <XCircle className="w-5 h-5" />
+                                    </button>
+                                ) : (
+                                    <div className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400">
+                                        <Search className="w-4 h-4" />
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Coincidencias al digitar 3 dígitos */}
+                            {showPlateDropdown && plate.trim().length >= 3 && (
+                                <div className="absolute z-50 w-full mt-1 bg-white dark:bg-slate-800 border border-blue-200 dark:border-slate-700 rounded-xl shadow-2xl overflow-hidden max-h-56 overflow-y-auto">
+                                    {filteredPlates.length > 0 ? (
+                                        filteredPlates.map(p => (
+                                            <button 
+                                                key={p} 
+                                                type="button"
+                                                onClick={() => {
+                                                    setPlate(p);
+                                                    setShowPlateDropdown(false);
+                                                }}
+                                                className={`w-full px-4 py-2.5 text-left hover:bg-blue-50 dark:hover:bg-slate-700 border-b dark:border-slate-700 last:border-0 transition-colors flex items-center justify-between cursor-pointer ${plate === p ? 'bg-blue-50/90 font-black text-[#009ED6]' : 'font-bold text-slate-700 dark:text-slate-200 text-sm'}`}
+                                            >
+                                                <div className="flex items-center gap-2">
+                                                    <Truck className="w-4 h-4 text-[#009ED6]" />
+                                                    <span className="font-mono font-black">{p}</span>
+                                                </div>
+                                                {plate === p && (
+                                                    <span className="text-[10px] bg-[#009ED6] text-white font-black px-2 py-0.5 rounded-md">Seleccionado</span>
+                                                )}
+                                            </button>
+                                        ))
+                                    ) : (
+                                        <div className="p-3 text-center text-xs text-slate-400 font-semibold">
+                                            No se encontraron placas con "{plate}"
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     </div>
 
