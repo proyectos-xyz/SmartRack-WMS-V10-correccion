@@ -1573,101 +1573,139 @@ const Reception: React.FC<ReceptionProps> = ({
 
     setIsLoadingHistory(true);
     try {
-      // Convert local date range to full UTC bounds for Supabase query
-      const startLocalDate = new Date(`${exportStartDate}T00:00:00`);
-      const startIso = startLocalDate.toISOString();
-      const endLocalDate = new Date(`${exportEndDate}T23:59:59.999`);
-      const endIso = endLocalDate.toISOString();
+      // Calculate UTC timestamp boundaries with a 1-day safety margin on each side
+      // to ensure no timezone differences cut off records in Supabase PostgREST
+      const startLocal = new Date(`${exportStartDate}T00:00:00`);
+      startLocal.setDate(startLocal.getDate() - 1);
+      const startQueryIso = startLocal.toISOString();
 
-      let query = supabase
-        .from('recepcion_productos')
-        .select('*')
-        .gte('fecha_registro', startIso)
-        .lte('fecha_registro', endIso)
-        .order('fecha_registro', { ascending: false });
+      const endLocal = new Date(`${exportEndDate}T23:59:59.999`);
+      endLocal.setDate(endLocal.getDate() + 1);
+      const endQueryIso = endLocal.toISOString();
 
-      if (currentUser?.sede_id) {
-        query = query.eq('sede_id', currentUser.sede_id);
+      // Retrieve ALL pages in a loop to bypass PostgREST's 1000-row limit
+      let allRawRecords: any[] = [];
+      let page = 0;
+      const pageSize = 1000;
+      let hasMore = true;
+
+      while (hasMore) {
+        let pageQuery = supabase
+          .from('recepcion_productos')
+          .select('*')
+          .gte('fecha_registro', startQueryIso)
+          .lte('fecha_registro', endQueryIso)
+          .neq('estado', 'ELIMINADO')
+          .order('fecha_registro', { ascending: false })
+          .range(page * pageSize, (page + 1) * pageSize - 1);
+
+        if (currentUser?.sede_id) {
+          pageQuery = pageQuery.eq('sede_id', currentUser.sede_id);
+        }
+
+        const { data: batch, error: batchError } = await pageQuery;
+        if (batchError) throw batchError;
+
+        if (batch && batch.length > 0) {
+          allRawRecords = allRawRecords.concat(batch);
+          if (batch.length < pageSize) {
+            hasMore = false;
+          } else {
+            page++;
+          }
+        } else {
+          hasMore = false;
+        }
       }
 
-      // Do not exclude rejected or pending alert items (exclude only deleted items)
-      query = query.neq('estado', 'ELIMINADO');
+      // Helper for robust local and ISO calendar date string extraction
+      const getLocalDateStr = (dateStr: string) => {
+        if (!dateStr) return '';
+        try {
+          const d = new Date(dateStr);
+          if (isNaN(d.getTime())) return dateStr.slice(0, 10);
+          const year = d.getFullYear();
+          const month = String(d.getMonth() + 1).padStart(2, '0');
+          const day = String(d.getDate()).padStart(2, '0');
+          return `${year}-${month}-${day}`;
+        } catch {
+          return dateStr.slice(0, 10);
+        }
+      };
 
-      const { data: rawHistoryData, error: historyError } = await query;
-
-      if (historyError) throw historyError;
-
-      // Ensure strict local calendar date filtering
-      const historyData = (rawHistoryData || []).filter(record => {
+      // Filter in memory strictly by the user's selected date range [exportStartDate, exportEndDate]
+      const historyData = allRawRecords.filter(record => {
         if (!record.fecha_registro) return false;
-        const d = new Date(record.fecha_registro);
-        const year = d.getFullYear();
-        const month = String(d.getMonth() + 1).padStart(2, '0');
-        const day = String(d.getDate()).padStart(2, '0');
-        const localDateStr = `${year}-${month}-${day}`;
-        return localDateStr >= exportStartDate && localDateStr <= exportEndDate;
+        const localDate = getLocalDateStr(record.fecha_registro);
+        const isoDate = record.fecha_registro.slice(0, 10);
+        return (localDate >= exportStartDate && localDate <= exportEndDate) ||
+               (isoDate >= exportStartDate && isoDate <= exportEndDate);
       });
 
       if (!historyData || historyData.length === 0) {
-        alert("No hay registros en el rango seleccionado.");
+        alert("No hay registros en el rango de fechas seleccionado.");
         return;
       }
 
-      // 1. Fetch location and pallet info for all LPNs in the range
-      const lpns = historyData.map(r => r.lpn).filter(Boolean);
+      // 1. Fetch location and pallet info for all LPNs in chunks of 200 to prevent URL overflow
+      const lpns = Array.from(new Set(historyData.map(r => r.lpn).filter(Boolean)));
       let palletMap: Record<string, any> = {};
       
       if (lpns.length > 0) {
+        const chunkSize = 200;
+        for (let i = 0; i < lpns.length; i += chunkSize) {
+          const lpnChunk = lpns.slice(i, i + chunkSize);
           const { data: palletData, error: palletError } = await supabase
-              .from('paletas_lpn')
-              .select('lpn, ubicacion_id, tipo, estado, estado_lpn')
-              .in('lpn', lpns);
+            .from('paletas_lpn')
+            .select('lpn, ubicacion_id, tipo, estado, estado_lpn')
+            .in('lpn', lpnChunk);
           
           if (!palletError && palletData) {
-              palletMap = palletData.reduce((acc, p) => {
-                  acc[p.lpn] = p;
-                  return acc;
-              }, {} as Record<string, any>);
+            palletData.forEach(p => {
+              palletMap[p.lpn] = p;
+            });
           }
+        }
       }
 
-      // 2. Fetch all related alerts from alertas_recepcion
+      // 2. Fetch all related alerts from alertas_recepcion in chunks
       const alertIds = Array.from(new Set(historyData.map(r => r.alerta_id).filter(Boolean)));
       const recepIds = Array.from(new Set(historyData.map(r => r.id).filter(Boolean)));
       
       let alertMapById: Record<string, any> = {};
       let alertMapByRecepcionId: Record<string, any> = {};
 
-      const alertQueries = [];
-
-      // Alerts by range
-      let dateAlertQuery = supabase
-        .from('alertas_recepcion')
-        .select('*')
-        .gte('fecha_alerta', startIso)
-        .lte('fecha_alerta', endIso);
-
-      if (currentUser?.sede_id) {
-        dateAlertQuery = dateAlertQuery.or(`sede_id.eq.${currentUser.sede_id},sede_id.is.null`);
-      }
-      alertQueries.push(dateAlertQuery);
-
       if (alertIds.length > 0) {
-        alertQueries.push(supabase.from('alertas_recepcion').select('*').in('id', alertIds));
-      }
-      if (recepIds.length > 0) {
-        alertQueries.push(supabase.from('alertas_recepcion').select('*').in('recepcion_id', recepIds));
+        const chunkSize = 200;
+        for (let i = 0; i < alertIds.length; i += chunkSize) {
+          const chunk = alertIds.slice(i, i + chunkSize);
+          const { data: alertData } = await supabase
+            .from('alertas_recepcion')
+            .select('*')
+            .in('id', chunk);
+          if (alertData) {
+            alertData.forEach((a: any) => {
+              if (a.id) alertMapById[a.id] = a;
+            });
+          }
+        }
       }
 
-      const alertResults = await Promise.all(alertQueries);
-      alertResults.forEach(res => {
-        if (res.data) {
-          res.data.forEach((a: any) => {
-            if (a.id) alertMapById[a.id] = a;
-            if (a.recepcion_id) alertMapByRecepcionId[a.recepcion_id] = a;
-          });
+      if (recepIds.length > 0) {
+        const chunkSize = 200;
+        for (let i = 0; i < recepIds.length; i += chunkSize) {
+          const chunk = recepIds.slice(i, i + chunkSize);
+          const { data: alertData } = await supabase
+            .from('alertas_recepcion')
+            .select('*')
+            .in('recepcion_id', chunk);
+          if (alertData) {
+            alertData.forEach((a: any) => {
+              if (a.recepcion_id) alertMapByRecepcionId[a.recepcion_id] = a;
+            });
+          }
         }
-      });
+      }
 
       // 3. Build comprehensive structured report data
       const reportData = historyData.map(record => {
