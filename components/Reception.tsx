@@ -291,6 +291,9 @@ const Reception: React.FC<ReceptionProps> = ({
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportStartDate, setExportStartDate] = useState('');
   const [exportEndDate, setExportEndDate] = useState('');
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportStatusText, setExportStatusText] = useState('');
 
   // Selection State for Bulk Delete
   const [selectedLpns, setSelectedLpns] = useState<Set<string>>(new Set());
@@ -1571,7 +1574,9 @@ const Reception: React.FC<ReceptionProps> = ({
       return;
     }
 
-    setIsLoadingHistory(true);
+    setIsExporting(true);
+    setExportProgress(5);
+    setExportStatusText('Iniciando consulta de datos...');
     try {
       // Calculate UTC timestamp boundaries with a 1-day safety margin on each side
       // to ensure no timezone differences cut off records in Supabase PostgREST
@@ -1590,6 +1595,9 @@ const Reception: React.FC<ReceptionProps> = ({
       let hasMore = true;
 
       while (hasMore) {
+        setExportStatusText(`Descargando registros (Página ${page + 1})...`);
+        setExportProgress(Math.min(10 + page * 8, 45));
+
         let pageQuery = supabase
           .from('recepcion_productos')
           .select('*')
@@ -1618,6 +1626,9 @@ const Reception: React.FC<ReceptionProps> = ({
         }
       }
 
+      setExportProgress(50);
+      setExportStatusText(`Filtrando registros (${allRawRecords.length} obtenidos)...`);
+
       // Helper for robust local and ISO calendar date string extraction
       const getLocalDateStr = (dateStr: string) => {
         if (!dateStr) return '';
@@ -1644,8 +1655,14 @@ const Reception: React.FC<ReceptionProps> = ({
 
       if (!historyData || historyData.length === 0) {
         alert("No hay registros en el rango de fechas seleccionado.");
+        setIsExporting(false);
+        setExportProgress(0);
+        setExportStatusText('');
         return;
       }
+
+      setExportProgress(55);
+      setExportStatusText(`Consultando información de ${historyData.length} LPNs...`);
 
       // 1. Fetch location and pallet info for all LPNs in chunks of 200 to prevent URL overflow
       const lpns = Array.from(new Set(historyData.map(r => r.lpn).filter(Boolean)));
@@ -1653,7 +1670,12 @@ const Reception: React.FC<ReceptionProps> = ({
       
       if (lpns.length > 0) {
         const chunkSize = 200;
+        const totalChunks = Math.ceil(lpns.length / chunkSize);
         for (let i = 0; i < lpns.length; i += chunkSize) {
+          const chunkIdx = Math.floor(i / chunkSize) + 1;
+          setExportProgress(55 + Math.round((chunkIdx / totalChunks) * 20));
+          setExportStatusText(`Cargando LPNs (${chunkIdx}/${totalChunks})...`);
+
           const lpnChunk = lpns.slice(i, i + chunkSize);
           const { data: palletData, error: palletError } = await supabase
             .from('paletas_lpn')
@@ -1674,6 +1696,9 @@ const Reception: React.FC<ReceptionProps> = ({
       
       let alertMapById: Record<string, any> = {};
       let alertMapByRecepcionId: Record<string, any> = {};
+
+      setExportProgress(78);
+      setExportStatusText('Cargando registros de calidad y alertas...');
 
       if (alertIds.length > 0) {
         const chunkSize = 200;
@@ -1708,6 +1733,9 @@ const Reception: React.FC<ReceptionProps> = ({
       }
 
       // 3. Build comprehensive structured report data
+      setExportProgress(88);
+      setExportStatusText(`Formateando ${historyData.length} filas para Excel...`);
+
       const reportData = historyData.map(record => {
         const matchedProduct = catalog.find(p => p.id === record.producto_id || p.codigo === record.codigo);
         const totalLife = matchedProduct ? (matchedProduct.tvm_dias || matchedProduct.vida_util_dias || 0) : 0;
@@ -1822,6 +1850,9 @@ const Reception: React.FC<ReceptionProps> = ({
         };
       });
 
+      setExportProgress(95);
+      setExportStatusText('Generando y comprimiendo archivo .xlsx...');
+
       const worksheet = XLSX.utils.json_to_sheet(reportData);
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, "Historial Recepción");
@@ -1839,13 +1870,23 @@ const Reception: React.FC<ReceptionProps> = ({
         });
       }
 
+      setExportProgress(100);
+      setExportStatusText('¡Descarga lista!');
       XLSX.writeFile(workbook, `Historial_Recepcion_${exportStartDate}_${exportEndDate}.xlsx`);
-      setShowExportModal(false);
+
+      setTimeout(() => {
+        setIsExporting(false);
+        setExportProgress(0);
+        setExportStatusText('');
+        setShowExportModal(false);
+      }, 700);
+
     } catch (err) {
       console.error("Error exporting Excel:", err);
       alert("Error al exportar a Excel.");
-    } finally {
-      setIsLoadingHistory(false);
+      setIsExporting(false);
+      setExportProgress(0);
+      setExportStatusText('');
     }
   };
 
@@ -3247,41 +3288,77 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                         {/* Export Modal */}
                         {showExportModal && (
                             <div className="absolute inset-0 z-30 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-                                <div className="bg-white rounded-xl shadow-2xl w-full max-w-xs overflow-hidden animate-in zoom-in-95 duration-200">
-                                    <div className="bg-green-600 p-3 text-white flex justify-between items-center">
+                                <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200 border border-gray-100">
+                                    <div className="bg-gradient-to-r from-emerald-600 to-green-700 p-3.5 text-white flex justify-between items-center">
                                         <h4 className="text-xs font-black uppercase tracking-wider flex items-center gap-2">
-                                            <Download className="w-3 h-3" /> Exportar Historial
+                                            <Download className="w-4 h-4" /> Exportar Historial a Excel
                                         </h4>
-                                        <button onClick={() => setShowExportModal(false)}>
-                                            <X className="w-4 h-4" />
-                                        </button>
+                                        {!isExporting && (
+                                            <button 
+                                                onClick={() => setShowExportModal(false)}
+                                                className="hover:bg-white/20 p-1 rounded-md transition-colors"
+                                            >
+                                                <X className="w-4 h-4" />
+                                            </button>
+                                        )}
                                     </div>
                                     <div className="p-4 space-y-4">
-                                        <div>
-                                            <label className="text-[10px] font-bold text-gray-500 uppercase mb-1 block">Fecha Inicio</label>
-                                            <input 
-                                                type="date" 
-                                                className="w-full border border-gray-200 rounded px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-green-500"
-                                                value={exportStartDate}
-                                                onChange={(e) => setExportStartDate(e.target.value)}
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="text-[10px] font-bold text-gray-500 uppercase mb-1 block">Fecha Fin</label>
-                                            <input 
-                                                type="date" 
-                                                className="w-full border border-gray-200 rounded px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-green-500"
-                                                value={exportEndDate}
-                                                onChange={(e) => setExportEndDate(e.target.value)}
-                                            />
-                                        </div>
-                                        <button 
-                                            onClick={handleExportExcel}
-                                            disabled={isLoadingHistory}
-                                            className="w-full bg-green-600 text-white py-2 rounded font-black text-xs uppercase tracking-widest hover:bg-green-700 transition-colors disabled:opacity-50"
-                                        >
-                                            {isLoadingHistory ? 'Procesando...' : 'Descargar Excel'}
-                                        </button>
+                                        {isExporting ? (
+                                            <div className="py-3 space-y-3">
+                                                <div className="flex justify-between items-center text-xs">
+                                                    <span className="font-bold text-gray-700 flex items-center gap-1.5 truncate max-w-[210px]">
+                                                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping inline-block flex-shrink-0" />
+                                                        {exportStatusText || 'Exportando datos...'}
+                                                    </span>
+                                                    <span className="font-mono font-black text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 text-xs">
+                                                        {exportProgress}%
+                                                    </span>
+                                                </div>
+
+                                                {/* Animated Progress Bar */}
+                                                <div className="w-full bg-gray-100 rounded-full h-3.5 overflow-hidden border border-gray-200 shadow-inner p-0.5">
+                                                    <div 
+                                                        className="bg-gradient-to-r from-emerald-500 via-green-500 to-teal-500 h-full rounded-full transition-all duration-300 ease-out shadow-sm relative overflow-hidden"
+                                                        style={{ width: `${exportProgress}%` }}
+                                                    >
+                                                        <div className="absolute inset-0 bg-white/25 animate-[pulse_1.5s_infinite]"></div>
+                                                    </div>
+                                                </div>
+
+                                                <p className="text-[10px] text-gray-400 text-center font-medium italic">
+                                                    Por favor, no cierre esta ventana mientras se descarga el reporte.
+                                                </p>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                <div>
+                                                    <label className="text-[10px] font-bold text-gray-500 uppercase mb-1 block">Fecha Inicio</label>
+                                                    <input 
+                                                        type="date" 
+                                                        className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-xs outline-none focus:ring-2 focus:ring-green-500 text-gray-800"
+                                                        value={exportStartDate}
+                                                        onChange={(e) => setExportStartDate(e.target.value)}
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <label className="text-[10px] font-bold text-gray-500 uppercase mb-1 block">Fecha Fin</label>
+                                                    <input 
+                                                        type="date" 
+                                                        className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-xs outline-none focus:ring-2 focus:ring-green-500 text-gray-800"
+                                                        value={exportEndDate}
+                                                        onChange={(e) => setExportEndDate(e.target.value)}
+                                                    />
+                                                </div>
+                                                <button 
+                                                    onClick={handleExportExcel}
+                                                    disabled={isExporting}
+                                                    className="w-full bg-emerald-600 text-white py-2.5 rounded-lg font-black text-xs uppercase tracking-widest hover:bg-emerald-700 transition-all shadow-md hover:shadow-lg disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer"
+                                                >
+                                                    <Download className="w-4 h-4" />
+                                                    Descargar Excel
+                                                </button>
+                                            </>
+                                        )}
                                     </div>
                                 </div>
                             </div>
