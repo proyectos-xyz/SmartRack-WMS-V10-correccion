@@ -4,7 +4,7 @@ import { jsPDF } from 'jspdf';
 import { generateLPN, generateMixedLPN, formatDate, formatCompactDate } from '../utils';
 import { Pallet, InventoryItem, Product, MixedItem, Usuario, RackLocation } from '../types';
 import * as XLSX from 'xlsx';
-import { Package, Printer, Clock, User, ArrowDownToLine, CheckCircle, Search, Info, PlusCircle, Trash, Trash2, ArrowRightFromLine, Thermometer, AlertTriangle, ClipboardList, LayoutGrid, History as HistoryIcon, RefreshCw, Download, ChevronLeft, ChevronRight, X, ChevronDown, ChevronUp, FileCheck } from './Icons';
+import { Package, Printer, Clock, User, ArrowDownToLine, CheckCircle, Search, Info, PlusCircle, Trash, Trash2, ArrowRightFromLine, Thermometer, AlertTriangle, ClipboardList, LayoutGrid, History as HistoryIcon, RefreshCw, Download, ChevronLeft, ChevronRight, X, ChevronDown, ChevronUp, FileCheck, Calendar } from './Icons';
 import { supabase } from '../supabaseClient';
 import { sendNotification } from '../src/services/notificationService';
 
@@ -137,41 +137,60 @@ const Reception: React.FC<ReceptionProps> = ({
   const [inspeccionCalidad, setInspeccionCalidad] = useState(false);
   const [mixedItems, setMixedItems] = useState<MixedItem[]>([]);
 
-  // Validation State
+  // Validation State (SAP vs Logistic with Multi-Date Support)
   const [isValidationAccordionOpen, setIsValidationAccordionOpen] = useState(false);
   const [validationFile, setValidationFile] = useState<File | null>(null);
+  const [validationDetectedDates, setValidationDetectedDates] = useState<string[]>([]);
+  const [validationTotalRows, setValidationTotalRows] = useState<number>(0);
+  const [selectedValidationDateOption, setSelectedValidationDateOption] = useState<string>('ALL');
+  const [customComparisonDate, setCustomComparisonDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [isValidatingEntry, setIsValidatingEntry] = useState(false);
   const [showValidationModal, setShowValidationModal] = useState({ show: false, message: '' });
   const [showValidationReportModal, setShowValidationReportModal] = useState(false);
   const [showFormatHelpModal, setShowFormatHelpModal] = useState(false);
   const [activeReportTab, setActiveReportTab] = useState<'differences' | 'appOnly' | 'sapOnly' | 'conforme'>('differences');
+  const [reportDateFilter, setReportDateFilter] = useState<string>('ALL');
+  const [reportSearchTerm, setReportSearchTerm] = useState<string>('');
   const [validationReportData, setValidationReportData] = useState<{
     differences: any[];
     appOnly: any[];
     sapOnly: any[];
     conforme: any[];
+    datesFound: string[];
+    summaryByDate: Record<string, { total: number; differences: number; appOnly: number; sapOnly: number; conforme: number }>;
   } | null>(null);
 
   const handleDownloadSampleTemplate = () => {
     try {
+      const todayStr = new Date().toISOString().split('T')[0];
+      const prevDateObj = new Date();
+      prevDateObj.setDate(prevDateObj.getDate() - 1);
+      const prevDateStr = prevDateObj.toISOString().split('T')[0];
+
       const templateData = [
         {
           'CODIGO': 'LAF010',
           'CANTIDAD SAP': 250,
-          'FECHA': new Date().toISOString().split('T')[0],
+          'FECHA': todayStr,
           'DESCRIPCION': 'LECHE ENTERA LAIVE BOLSA 900ML'
         },
         {
           'CODIGO': 'GLI001',
           'CANTIDAD SAP': 500,
-          'FECHA': new Date().toISOString().split('T')[0],
+          'FECHA': todayStr,
           'DESCRIPCION': 'YOGURT FRESA GLORIA 1.6KG'
         },
         {
           'CODIGO': 'AEA010',
           'CANTIDAD SAP': 120,
-          'FECHA': '',
+          'FECHA': prevDateStr,
           'DESCRIPCION': 'MANTEQUILLA CON SAL 200G'
+        },
+        {
+          'CODIGO': 'BEV005',
+          'CANTIDAD SAP': 350,
+          'FECHA': prevDateStr,
+          'DESCRIPCION': 'BEBIDA REFRESCANTE 500ML'
         }
       ];
 
@@ -185,7 +204,7 @@ const Reception: React.FC<ReceptionProps> = ({
 
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Formato_Validacion_SAP");
-      XLSX.writeFile(wb, "Plantilla_Validacion_Ingresos_SAP.xlsx");
+      XLSX.writeFile(wb, "Plantilla_Validacion_Ingresos_SAP_MultiFecha.xlsx");
     } catch (err) {
       console.error("Error al generar plantilla:", err);
       alert("Error al descargar la plantilla de ejemplo.");
@@ -426,6 +445,179 @@ const Reception: React.FC<ReceptionProps> = ({
     setExpYear('');
   };
 
+  // Helper for Excel column header matching
+  const getRowValue = (row: any, aliases: string[]) => {
+    const cleanKey = (str: string) => 
+      str.toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9]/g, '');
+    
+    const rowKeys = Object.keys(row);
+    for (const alias of aliases) {
+      const targetClean = cleanKey(alias);
+      const foundKey = rowKeys.find(k => cleanKey(k) === targetClean);
+      if (foundKey !== undefined) return row[foundKey];
+    }
+    return undefined;
+  };
+
+  // Helper for high-precision date parsing from Excel formats (numbers, dates, text, text months)
+  const parseExcelDate = (val: any): string => {
+    if (val === undefined || val === null || val === '') return '';
+    if (val instanceof Date) {
+      const y = val.getFullYear();
+      const m = String(val.getMonth() + 1).padStart(2, '0');
+      const d = String(val.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+    if (typeof val === 'number') {
+      try {
+        if ((XLSX as any).SSF?.parse_date_code) {
+          const parsed = (XLSX as any).SSF.parse_date_code(val);
+          if (parsed && parsed.y && parsed.m && parsed.d) {
+            return `${parsed.y}-${String(parsed.m).padStart(2, '0')}-${String(parsed.d).padStart(2, '0')}`;
+          }
+        }
+      } catch (e) {}
+      const date = new Date(Math.round((val - 25569) * 86400 * 1000));
+      const y = date.getUTCFullYear();
+      const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(date.getUTCDate()).padStart(2, '0');
+      if (!isNaN(date.getTime()) && y > 1990 && y < 2100) {
+        return `${y}-${m}-${d}`;
+      }
+    }
+    const str = String(val).trim();
+    if (!str) return '';
+
+    const firstPart = str.split(/[ T]/)[0].trim();
+    const monthMap: Record<string, string> = {
+      'ene': '01', 'jan': '01', 'enero': '01',
+      'feb': '02', 'febrero': '02',
+      'mar': '03', 'marzo': '03',
+      'abr': '04', 'apr': '04', 'abril': '04',
+      'may': '05', 'mayo': '05',
+      'jun': '06', 'junio': '06',
+      'jul': '07', 'julio': '07',
+      'ago': '08', 'aug': '08', 'agosto': '08',
+      'sep': '09', 'set': '09', 'septiembre': '09', 'setiembre': '09',
+      'oct': '10', 'octubre': '10',
+      'nov': '11', 'noviembre': '11',
+      'dic': '12', 'dec': '12', 'diciembre': '12'
+    };
+
+    const matchText = firstPart.match(/^(\d{1,2})[-/. ]([a-zA-Z]{3,10})[-/. ](\d{2,4})$/);
+    if (matchText) {
+      const day = matchText[1].padStart(2, '0');
+      const rawM = matchText[2].toLowerCase().substring(0, 3);
+      const month = monthMap[rawM] || '01';
+      let year = matchText[3];
+      if (year.length === 2) year = '20' + year;
+      return `${year}-${month}-${day}`;
+    }
+
+    if (firstPart.includes('/')) {
+      const parts = firstPart.split('/');
+      if (parts.length === 3) {
+        if (parts[0].length === 4) {
+          return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+        } else {
+          let day = parts[0].padStart(2, '0');
+          let month = parts[1].padStart(2, '0');
+          let year = parts[2];
+          if (year.length === 2) year = '20' + year;
+          return `${year}-${month}-${day}`;
+        }
+      }
+    }
+    if (firstPart.includes('-')) {
+      const parts = firstPart.split('-');
+      if (parts.length === 3) {
+        if (parts[0].length === 4) {
+          return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+        } else {
+          let day = parts[0].padStart(2, '0');
+          let month = parts[1].padStart(2, '0');
+          let year = parts[2];
+          if (year.length === 2) year = '20' + year;
+          return `${year}-${month}-${day}`;
+        }
+      }
+    }
+    if (firstPart.includes('.')) {
+      const parts = firstPart.split('.');
+      if (parts.length === 3) {
+        if (parts[0].length === 4) {
+          return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+        } else {
+          let day = parts[0].padStart(2, '0');
+          let month = parts[1].padStart(2, '0');
+          let year = parts[2];
+          if (year.length === 2) year = '20' + year;
+          return `${year}-${month}-${day}`;
+        }
+      }
+    }
+    try {
+      const d = new Date(str);
+      if (!isNaN(d.getTime())) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+      }
+    } catch (e) {}
+    return '';
+  };
+
+  // Pre-analyze Excel file on upload to identify all dates present
+  const handleValidationFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] || null;
+    setValidationFile(file);
+    setValidationDetectedDates([]);
+    setValidationTotalRows(0);
+    setSelectedValidationDateOption('ALL');
+
+    if (!file) return;
+
+    try {
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        try {
+          const data = evt.target?.result;
+          const workbook = XLSX.read(data, { type: 'binary' });
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+          const excelData = XLSX.utils.sheet_to_json(worksheet) as any[];
+
+          const detected = new Set<string>();
+          excelData.forEach(row => {
+            const rawFecha = getRowValue(row, [
+              'fecha', 'fecha de ingreso', 'fecha ingreso', 'fecha_ingreso', 'fecha recepcion', 'fecha de recepcion',
+              'fecha_recepcion', 'fecha registro', 'fecha de registro', 'fecha_registro', 'fecha movimiento',
+              'fecha de movimiento', 'fecha_movimiento', 'fecha doc', 'fecha documento', 'fecha_doc', 'fecha contable',
+              'fecha_contable', 'f. ingreso', 'f.ingreso', 'f. recepcion', 'f.recepcion', 'f.ing', 'f.rec', 'fec_ing',
+              'fec_rec', 'date', 'dates', 'fechas', 'dia', 'f_emision', 'fecha emision', 'fecha guia', 'fecha pedido', 'fecha compra'
+            ]);
+            const parsed = parseExcelDate(rawFecha);
+            if (parsed) {
+              detected.add(parsed);
+            }
+          });
+
+          const sortedDates = Array.from(detected).sort();
+          setValidationDetectedDates(sortedDates);
+          setValidationTotalRows(excelData.length);
+        } catch (err) {
+          console.error("Error al pre-analizar archivo Excel:", err);
+        }
+      };
+      reader.readAsBinaryString(file);
+    } catch (err) {
+      console.error("Error al leer archivo para previsualización:", err);
+    }
+  };
+
   const handleValidateEntry = async () => {
     if (!validationFile) {
       alert("Por favor, suba un archivo Excel primero.");
@@ -434,65 +626,6 @@ const Reception: React.FC<ReceptionProps> = ({
 
     setIsValidatingEntry(true);
     try {
-      // Robust header column matching
-      const getRowValue = (row: any, aliases: string[]) => {
-        const cleanKey = (str: string) => 
-          str.toLowerCase()
-            .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-            .replace(/[^a-z0-9]/g, '');
-        
-        const rowKeys = Object.keys(row);
-        for (const alias of aliases) {
-          const targetClean = cleanKey(alias);
-          const foundKey = rowKeys.find(k => cleanKey(k) === targetClean);
-          if (foundKey !== undefined) return row[foundKey];
-        }
-        return undefined;
-      };
-
-      const parseExcelDate = (val: any): string => {
-        if (!val) return '';
-        if (val instanceof Date) {
-          return val.toISOString().split('T')[0];
-        }
-        if (typeof val === 'number') {
-          const date = new Date(Math.round((val - 25569) * 86400 * 1000));
-          return date.toISOString().split('T')[0];
-        }
-        const str = String(val).trim();
-        if (str.includes('/')) {
-          const parts = str.split('/');
-          if (parts.length === 3) {
-            let day = parts[0];
-            let month = parts[1];
-            let year = parts[2];
-            if (year.length === 2) year = '20' + year;
-            return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-          }
-        }
-        if (str.includes('-')) {
-          const parts = str.split('-');
-          if (parts.length === 3) {
-            if (parts[0].length === 4) {
-              return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
-            } else {
-              let day = parts[0];
-              let month = parts[1];
-              let year = parts[2];
-              if (year.length === 2) year = '20' + year;
-              return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-            }
-          }
-        }
-        try {
-          const d = new Date(str);
-          if (!isNaN(d.getTime())) {
-            return d.toISOString().split('T')[0];
-          }
-        } catch (e) {}
-        return '';
-      };
-
       const reader = new FileReader();
       reader.onload = async (e) => {
         try {
@@ -511,11 +644,15 @@ const Reception: React.FC<ReceptionProps> = ({
           // Group SAP (Excel) by date and code
           const sapGrouped: Record<string, { fecha: string; codigo: string; nombre: string; cantidad: number }> = {};
           const uniqueDates = new Set<string>();
-          const todayStr = new Date().toISOString().split('T')[0];
+          const fallbackDate = customComparisonDate || new Date().toISOString().split('T')[0];
 
           excelData.forEach(row => {
             const rawFecha = getRowValue(row, [
-              'fecha de ingreso', 'fecha ingreso', 'fecha_ingreso', 'fecha', 'fecha de recepcion', 'fecha de registro', 'fecha recepcion'
+              'fecha', 'fecha de ingreso', 'fecha ingreso', 'fecha_ingreso', 'fecha recepcion', 'fecha de recepcion',
+              'fecha_recepcion', 'fecha registro', 'fecha de registro', 'fecha_registro', 'fecha movimiento',
+              'fecha de movimiento', 'fecha_movimiento', 'fecha doc', 'fecha documento', 'fecha_doc', 'fecha contable',
+              'fecha_contable', 'f. ingreso', 'f.ingreso', 'f. recepcion', 'f.recepcion', 'f.ing', 'f.rec', 'fec_ing',
+              'fec_rec', 'date', 'dates', 'fechas', 'dia', 'f_emision', 'fecha emision', 'fecha guia', 'fecha pedido', 'fecha compra'
             ]);
             const rawCodigo = getRowValue(row, [
               'codigo (ico)', 'codigo ico', 'codigo', 'código (ico)', 'código ico', 'código', 'id', 'sku', 'material', 'cod_prod', 'cod_producto', 'cod producto', 'codigo producto', 'código producto', 'cod'
@@ -528,8 +665,12 @@ const Reception: React.FC<ReceptionProps> = ({
             ]);
 
             const parsedFecha = parseExcelDate(rawFecha);
-            // Default to TODAY if FECHA is absent in Excel
-            const fecha = parsedFecha || todayStr;
+            const fecha = parsedFecha || fallbackDate;
+
+            // If user selected a specific date in the UI and it's not ALL, filter
+            if (selectedValidationDateOption !== 'ALL' && fecha !== selectedValidationDateOption) {
+              return;
+            }
 
             const codigo = String(rawCodigo !== undefined && rawCodigo !== null ? rawCodigo : '').trim().toUpperCase();
             const cantidad = parseFloat(rawCantidad !== undefined && rawCantidad !== null ? rawCantidad : '0') || 0;
@@ -549,27 +690,23 @@ const Reception: React.FC<ReceptionProps> = ({
           });
 
           if (Object.keys(sapGrouped).length === 0) {
-            alert("No se encontraron registros válidos con columna de CÓDIGO en el archivo Excel. Verifique el formato e intente nuevamente.");
+            alert("No se encontraron registros válidos para procesar (verifique columnas CÓDIGO y filtros de fecha seleccionados).");
             setIsValidatingEntry(false);
             return;
           }
 
           // Determine date range to query Supabase
-          let minDate = todayStr;
-          let maxDate = todayStr;
-          if (uniqueDates.size > 0) {
-            const sortedDates = Array.from(uniqueDates).sort();
-            minDate = sortedDates[0];
-            maxDate = sortedDates[sortedDates.length - 1];
-          }
+          const sortedDates = Array.from(uniqueDates).sort();
+          const minDate = sortedDates[0];
+          const maxDate = sortedDates[sortedDates.length - 1];
 
-          // Buffer 1 day before minDate and 1 day after maxDate to handle UTC boundary offsets
+          // Buffer 2 days before minDate and 2 days after maxDate to handle timezone boundary shifts
           const minDObj = new Date(minDate + 'T00:00:00');
-          minDObj.setDate(minDObj.getDate() - 1);
+          minDObj.setDate(minDObj.getDate() - 2);
           const startBufStr = minDObj.toISOString().split('T')[0];
 
           const maxDObj = new Date(maxDate + 'T23:59:59');
-          maxDObj.setDate(maxDObj.getDate() + 1);
+          maxDObj.setDate(maxDObj.getDate() + 2);
           const endBufStr = maxDObj.toISOString().split('T')[0];
 
           // Query recepcion_productos in calculated date range
@@ -607,7 +744,7 @@ const Reception: React.FC<ReceptionProps> = ({
             const day = String(dateObj.getDate()).padStart(2, '0');
             const fecha = `${year}-${month}-${day}`;
             
-            // Match against uniqueDates
+            // Only compare dates in the active uniqueDates set
             if (!uniqueDates.has(fecha)) return;
 
             const codigo = String(item.codigo || '').trim().toUpperCase();
@@ -692,13 +829,33 @@ const Reception: React.FC<ReceptionProps> = ({
             }
           });
 
+          const datesFound = Array.from(uniqueDates).sort();
+          const summaryByDate: Record<string, { total: number; differences: number; appOnly: number; sapOnly: number; conforme: number }> = {};
+          datesFound.forEach(d => {
+            const diffCount = differences.filter(x => x.fecha === d).length;
+            const appCount = appOnly.filter(x => x.fecha === d).length;
+            const sapCount = sapOnly.filter(x => x.fecha === d).length;
+            const confCount = conforme.filter(x => x.fecha === d).length;
+            summaryByDate[d] = {
+              total: diffCount + appCount + sapCount + confCount,
+              differences: diffCount,
+              appOnly: appCount,
+              sapOnly: sapCount,
+              conforme: confCount
+            };
+          });
+
           setValidationReportData({
             differences: differences.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.codigo.localeCompare(b.codigo)),
             appOnly: appOnly.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.codigo.localeCompare(b.codigo)),
             sapOnly: sapOnly.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.codigo.localeCompare(b.codigo)),
-            conforme: conforme.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.codigo.localeCompare(b.codigo))
+            conforme: conforme.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.codigo.localeCompare(b.codigo)),
+            datesFound,
+            summaryByDate
           });
 
+          setReportDateFilter('ALL');
+          setReportSearchTerm('');
           setIsValidatingEntry(false);
           setShowValidationReportModal(true);
         } catch (innerErr) {
@@ -721,7 +878,12 @@ const Reception: React.FC<ReceptionProps> = ({
       const workbook = XLSX.utils.book_new();
 
       const formatDataForSheet = (list: any[]) => {
-        return list.map(item => ({
+        // Respect active date filter if selected
+        const filteredList = reportDateFilter === 'ALL' 
+          ? list 
+          : list.filter(item => item.fecha === reportDateFilter);
+
+        return filteredList.map(item => ({
           'FECHA DE INGRESO': item.fecha,
           'CODIGO (ICO)': item.codigo,
           'NOMBRE PRODUCTO': item.nombre,
@@ -733,28 +895,41 @@ const Reception: React.FC<ReceptionProps> = ({
       };
 
       if (validationReportData.differences.length > 0) {
-        const ws = XLSX.utils.json_to_sheet(formatDataForSheet(validationReportData.differences));
-        XLSX.utils.book_append_sheet(workbook, ws, "Diferencias");
+        const data = formatDataForSheet(validationReportData.differences);
+        if (data.length > 0) {
+          const ws = XLSX.utils.json_to_sheet(data);
+          XLSX.utils.book_append_sheet(workbook, ws, "Diferencias");
+        }
       }
       if (validationReportData.appOnly.length > 0) {
-        const ws = XLSX.utils.json_to_sheet(formatDataForSheet(validationReportData.appOnly));
-        XLSX.utils.book_append_sheet(workbook, ws, "Solo en App (No SAP)");
+        const data = formatDataForSheet(validationReportData.appOnly);
+        if (data.length > 0) {
+          const ws = XLSX.utils.json_to_sheet(data);
+          XLSX.utils.book_append_sheet(workbook, ws, "Solo en App (No SAP)");
+        }
       }
       if (validationReportData.sapOnly.length > 0) {
-        const ws = XLSX.utils.json_to_sheet(formatDataForSheet(validationReportData.sapOnly));
-        XLSX.utils.book_append_sheet(workbook, ws, "Solo en SAP (No App)");
+        const data = formatDataForSheet(validationReportData.sapOnly);
+        if (data.length > 0) {
+          const ws = XLSX.utils.json_to_sheet(data);
+          XLSX.utils.book_append_sheet(workbook, ws, "Solo en SAP (No App)");
+        }
       }
       if (validationReportData.conforme.length > 0) {
-        const ws = XLSX.utils.json_to_sheet(formatDataForSheet(validationReportData.conforme));
-        XLSX.utils.book_append_sheet(workbook, ws, "Conformes");
+        const data = formatDataForSheet(validationReportData.conforme);
+        if (data.length > 0) {
+          const ws = XLSX.utils.json_to_sheet(data);
+          XLSX.utils.book_append_sheet(workbook, ws, "Conformes");
+        }
       }
 
       if (workbook.SheetNames.length === 0) {
-        const ws = XLSX.utils.json_to_sheet([{ 'MENSAJE': 'No hay datos' }]);
+        const ws = XLSX.utils.json_to_sheet([{ 'MENSAJE': 'No hay datos coincidentes con el filtro' }]);
         XLSX.utils.book_append_sheet(workbook, ws, "Sin_Datos");
       }
 
-      XLSX.writeFile(workbook, `Reporte_Validacion_Ingresos_${new Date().toISOString().split('T')[0]}.xlsx`);
+      const dateSuffix = reportDateFilter === 'ALL' ? 'TodasFechas' : reportDateFilter;
+      XLSX.writeFile(workbook, `Reporte_Validacion_SAP_vs_Logistic_${dateSuffix}_${new Date().toISOString().split('T')[0]}.xlsx`);
     } catch (e) {
       console.error("Error al exportar reporte:", e);
       alert("Error al exportar reporte a Excel.");
@@ -2795,7 +2970,7 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                         <div className="px-4 pb-4 animate-in slide-in-from-top-2 duration-200 space-y-3">
                             <div className="bg-slate-50 rounded-xl p-4 border-2 border-dashed border-slate-200 space-y-3">
                                 <div className="flex items-center justify-between gap-1">
-                                    <p className="text-[10px] font-bold text-slate-500 uppercase">Subir archivo Excel (CODIGO, CANTIDAD SAP)</p>
+                                    <p className="text-[10px] font-bold text-slate-500 uppercase">Subir archivo Excel (CODIGO, CANTIDAD SAP, FECHA)</p>
                                     <button 
                                         type="button"
                                         onClick={() => setShowFormatHelpModal(true)}
@@ -2810,9 +2985,106 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                     <input 
                                         type="file" 
                                         accept=".xlsx, .xls"
-                                        onChange={(e) => setValidationFile(e.target.files?.[0] || null)}
+                                        onChange={handleValidationFileSelected}
                                         className="text-xs text-slate-600 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-black file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer"
                                     />
+
+                                    {/* Date detection & selection badge container */}
+                                    {validationFile && (
+                                        <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-sm space-y-2">
+                                            {validationDetectedDates.length > 0 ? (
+                                                <>
+                                                    <div className="flex items-center justify-between">
+                                                        <div className="flex items-center gap-1.5 text-emerald-700 font-bold text-xs">
+                                                            <Calendar className="w-4 h-4 text-emerald-600 shrink-0" />
+                                                            <span>Fechas detectadas en el archivo ({validationDetectedDates.length}):</span>
+                                                        </div>
+                                                        <span className="text-[10px] text-slate-500 font-semibold">{validationTotalRows} filas</span>
+                                                    </div>
+
+                                                    <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto p-1 bg-slate-50 rounded border border-slate-100">
+                                                        {validationDetectedDates.map((d) => (
+                                                            <span key={d} className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[11px] font-bold rounded-md flex items-center gap-1">
+                                                                📅 {formatDate(d)}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+
+                                                    <div className="pt-1.5 border-t border-slate-100 space-y-1.5">
+                                                        <label className="text-[11px] font-bold text-slate-700 block">
+                                                            Modo de comparación por fechas:
+                                                        </label>
+                                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setSelectedValidationDateOption('ALL')}
+                                                                className={`p-2 rounded-lg text-left text-xs font-bold border transition-all ${
+                                                                    selectedValidationDateOption === 'ALL'
+                                                                        ? 'bg-blue-50 border-blue-500 text-blue-800 shadow-xs'
+                                                                        : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                                                                }`}
+                                                            >
+                                                                <div className="flex items-center justify-between">
+                                                                    <span>Todas las fechas</span>
+                                                                    <span className="text-[10px] px-1.5 py-0.2 bg-blue-200 text-blue-800 rounded font-black">
+                                                                        {validationDetectedDates.length}
+                                                                    </span>
+                                                                </div>
+                                                                <p className="text-[10px] font-normal text-slate-500 mt-0.5">
+                                                                    Compara cada registro con su fecha en App
+                                                                </p>
+                                                            </button>
+
+                                                            <div className="relative">
+                                                                <select
+                                                                    value={selectedValidationDateOption !== 'ALL' ? selectedValidationDateOption : ''}
+                                                                    onChange={(e) => {
+                                                                        if (e.target.value) {
+                                                                            setSelectedValidationDateOption(e.target.value);
+                                                                        }
+                                                                    }}
+                                                                    className={`w-full p-2 rounded-lg text-xs font-bold border transition-all appearance-none cursor-pointer ${
+                                                                        selectedValidationDateOption !== 'ALL'
+                                                                            ? 'bg-blue-50 border-blue-500 text-blue-800'
+                                                                            : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                                                                    }`}
+                                                                >
+                                                                    <option value="" disabled>Seleccionar una fecha específica...</option>
+                                                                    {validationDetectedDates.map((d) => (
+                                                                        <option key={d} value={d}>
+                                                                            Solo fecha: {formatDate(d)} ({d})
+                                                                        </option>
+                                                                    ))}
+                                                                </select>
+                                                                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-500">
+                                                                    <ChevronDown className="w-3.5 h-3.5" />
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </>
+                                            ) : (
+                                                <div className="space-y-2">
+                                                    <div className="flex items-center gap-1.5 text-amber-700 font-bold text-xs">
+                                                        <Info className="w-4 h-4 text-amber-600 shrink-0" />
+                                                        <span>No se detectó columna FECHA en el archivo</span>
+                                                    </div>
+                                                    <p className="text-[11px] text-slate-500">
+                                                        Se comparará contra la fecha de recepción indicada abajo:
+                                                    </p>
+                                                    <div className="flex items-center gap-2">
+                                                        <label className="text-xs font-bold text-slate-700 shrink-0">Fecha App:</label>
+                                                        <input 
+                                                            type="date"
+                                                            value={customComparisonDate}
+                                                            onChange={(e) => setCustomComparisonDate(e.target.value)}
+                                                            className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold text-slate-800 outline-none focus:border-blue-500"
+                                                        />
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
                                     
                                     <div className="flex gap-2">
                                         <button 
@@ -2830,7 +3102,9 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                             ) : (
                                                 <Search className="w-4 h-4" />
                                             )}
-                                            REVISAR Y GENERAR REPORTE
+                                            {selectedValidationDateOption === 'ALL' 
+                                                ? 'REVISAR Y GENERAR REPORTE (TODAS LAS FECHAS)' 
+                                                : `REVISAR FECHA: ${formatDate(selectedValidationDateOption)}`}
                                         </button>
 
                                         <button 
@@ -3551,242 +3825,344 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
           </div>
       )}
 
-      {/* Validation Report Modal (SAP vs Logistic) */}
-      {showValidationReportModal && validationReportData && (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center p-2 sm:p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl h-[90vh] flex flex-col overflow-hidden transform animate-in zoom-in-95 duration-200">
-            {/* Header */}
-            <div className="px-6 py-4 bg-slate-50 border-b border-gray-200 flex justify-between items-center shrink-0">
-              <div className="flex items-center gap-2">
-                <FileCheck className="w-5 h-5 text-blue-600" />
-                <div>
-                  <h3 className="text-sm sm:text-base font-black text-gray-800 uppercase tracking-tight">Reporte de Validación (SAP vs Logistic)</h3>
-                  <p className="text-[10px] sm:text-xs text-gray-500 font-medium">Comparación automatizada por Fecha e Identificador (Código ICO)</p>
+      {/* Validation Report Modal (SAP vs Logistic with Multi-Date Navigation) */}
+      {showValidationReportModal && validationReportData && (() => {
+        const filterList = (list: any[]) => {
+          return list.filter(item => {
+            if (reportDateFilter !== 'ALL' && item.fecha !== reportDateFilter) {
+              return false;
+            }
+            if (reportSearchTerm.trim()) {
+              const q = reportSearchTerm.toLowerCase();
+              const mCode = item.codigo?.toLowerCase().includes(q);
+              const mName = item.nombre?.toLowerCase().includes(q);
+              const mDate = item.fecha?.toLowerCase().includes(q);
+              const mComm = item.comentario?.toLowerCase().includes(q);
+              if (!mCode && !mName && !mDate && !mComm) return false;
+            }
+            return true;
+          });
+        };
+
+        const filteredDifferences = filterList(validationReportData.differences);
+        const filteredAppOnly = filterList(validationReportData.appOnly);
+        const filteredSapOnly = filterList(validationReportData.sapOnly);
+        const filteredConforme = filterList(validationReportData.conforme);
+
+        return (
+          <div className="fixed inset-0 z-[90] flex items-center justify-center p-2 sm:p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl h-[90vh] flex flex-col overflow-hidden transform animate-in zoom-in-95 duration-200">
+              {/* Header */}
+              <div className="px-6 py-3.5 bg-slate-50 border-b border-gray-200 flex justify-between items-center shrink-0">
+                <div className="flex items-center gap-2">
+                  <FileCheck className="w-5 h-5 text-blue-600 shrink-0" />
+                  <div>
+                    <h3 className="text-sm sm:text-base font-black text-gray-800 uppercase tracking-tight">Reporte de Validación (SAP vs Logistic)</h3>
+                    <p className="text-[10px] sm:text-xs text-gray-500 font-medium">
+                      Comparación multi-fecha automatizada por Código ICO y Fecha de Registro
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleExportValidationReport}
+                    className="flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-3 py-1.5 rounded-lg text-[10px] sm:text-xs font-black uppercase transition-all shadow-xs cursor-pointer"
+                    title="Descargar archivo Excel con datos filtrados"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Exportar Excel</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowValidationReportModal(false)}
+                    className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+
+              {/* Multi-Date Bar & Live Search */}
+              <div className="px-4 py-2.5 bg-slate-100/70 border-b border-gray-200 flex flex-col md:flex-row md:items-center justify-between gap-2 shrink-0">
+                {/* Date Pills */}
+                <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none py-0.5">
+                  <div className="flex items-center gap-1 text-[11px] font-black text-slate-500 uppercase shrink-0 mr-1">
+                    <Calendar className="w-3.5 h-3.5 text-blue-600" />
+                    <span>Fechas:</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setReportDateFilter('ALL')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-black transition-all shrink-0 cursor-pointer ${
+                      reportDateFilter === 'ALL'
+                        ? 'bg-blue-600 text-white shadow-xs'
+                        : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'
+                    }`}
+                  >
+                    Todas ({validationReportData.datesFound.length})
+                  </button>
+                  {validationReportData.datesFound.map((d) => {
+                    const stats = validationReportData.summaryByDate[d];
+                    const isSelected = reportDateFilter === d;
+                    return (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => setReportDateFilter(d)}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                          isSelected
+                            ? 'bg-blue-600 text-white shadow-xs'
+                            : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'
+                        }`}
+                      >
+                        <span>📅 {formatDate(d)}</span>
+                        {stats && (
+                          <span
+                            className={`text-[10px] px-1.5 py-0.2 rounded-full font-black ${
+                              isSelected
+                                ? 'bg-white/20 text-white'
+                                : stats.differences > 0
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-emerald-100 text-emerald-800'
+                            }`}
+                          >
+                            {stats.differences > 0 ? `${stats.differences} dif` : '✓'}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Search Box */}
+                <div className="relative shrink-0 md:w-64">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={reportSearchTerm}
+                    onChange={(e) => setReportSearchTerm(e.target.value)}
+                    placeholder="Buscar código o producto..."
+                    className="w-full pl-8 pr-3 py-1 bg-white border border-slate-300 rounded-lg text-xs font-medium text-slate-800 placeholder-slate-400 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                  />
+                  {reportSearchTerm && (
+                    <button
+                      type="button"
+                      onClick={() => setReportSearchTerm('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Quick Summary Cards */}
+              <div className="p-3 grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-3 bg-white border-b border-gray-100 shrink-0">
+                <div 
+                  onClick={() => setActiveReportTab('differences')}
+                  className={`p-2.5 sm:p-3 rounded-xl border transition-all cursor-pointer ${activeReportTab === 'differences' ? 'bg-amber-50/80 border-amber-300 shadow-xs' : 'bg-slate-50 border-gray-100 hover:bg-slate-100/70'}`}
+                >
+                  <span className="block text-[9px] font-black uppercase text-amber-700 tracking-wider">Diferencias / Faltantes</span>
+                  <span className="text-base sm:text-lg font-black text-amber-900">{filteredDifferences.length}</span>
+                </div>
+                <div 
+                  onClick={() => setActiveReportTab('appOnly')}
+                  className={`p-2.5 sm:p-3 rounded-xl border transition-all cursor-pointer ${activeReportTab === 'appOnly' ? 'bg-blue-50/80 border-blue-300 shadow-xs' : 'bg-slate-50 border-gray-100 hover:bg-slate-100/70'}`}
+                >
+                  <span className="block text-[9px] font-black uppercase text-blue-700 tracking-wider">Solo en App (No SAP)</span>
+                  <span className="text-base sm:text-lg font-black text-blue-900">{filteredAppOnly.length}</span>
+                </div>
+                <div 
+                  onClick={() => setActiveReportTab('sapOnly')}
+                  className={`p-2.5 sm:p-3 rounded-xl border transition-all cursor-pointer ${activeReportTab === 'sapOnly' ? 'bg-orange-50/80 border-orange-300 shadow-xs' : 'bg-slate-50 border-gray-100 hover:bg-slate-100/70'}`}
+                >
+                  <span className="block text-[9px] font-black uppercase text-orange-700 tracking-wider">Solo en SAP (No App)</span>
+                  <span className="text-base sm:text-lg font-black text-orange-900">{filteredSapOnly.length}</span>
+                </div>
+                <div 
+                  onClick={() => setActiveReportTab('conforme')}
+                  className={`p-2.5 sm:p-3 rounded-xl border transition-all cursor-pointer ${activeReportTab === 'conforme' ? 'bg-emerald-50/80 border-emerald-300 shadow-xs' : 'bg-slate-50 border-gray-100 hover:bg-slate-100/70'}`}
+                >
+                  <span className="block text-[9px] font-black uppercase text-emerald-700 tracking-wider">Conformes</span>
+                  <span className="text-base sm:text-lg font-black text-emerald-900">{filteredConforme.length}</span>
+                </div>
+              </div>
+
+              {/* Interactive Tabs */}
+              <div className="px-4 bg-white border-b border-gray-200 flex overflow-x-auto shrink-0 scrollbar-none">
                 <button
                   type="button"
-                  onClick={handleExportValidationReport}
-                  className="flex items-center gap-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-3 py-1.5 rounded-lg text-[10px] sm:text-xs font-black uppercase transition-all shadow-sm"
-                  title="Descargar archivo Excel con todas las hojas"
+                  onClick={() => setActiveReportTab('differences')}
+                  className={`py-3 px-4 font-black text-xs uppercase border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 cursor-pointer ${
+                    activeReportTab === 'differences' 
+                    ? 'border-amber-500 text-amber-700 bg-amber-50/30' 
+                    : 'border-transparent text-gray-400 hover:text-gray-600'
+                  }`}
                 >
-                  <Download className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Exportar Excel</span>
+                  Diferencias ({filteredDifferences.length})
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveReportTab('appOnly')}
+                  className={`py-3 px-4 font-black text-xs uppercase border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 cursor-pointer ${
+                    activeReportTab === 'appOnly' 
+                    ? 'border-blue-500 text-blue-700 bg-blue-50/30' 
+                    : 'border-transparent text-gray-400 hover:text-gray-600'
+                  }`}
+                >
+                  Solo en App ({filteredAppOnly.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveReportTab('sapOnly')}
+                  className={`py-3 px-4 font-black text-xs uppercase border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 cursor-pointer ${
+                    activeReportTab === 'sapOnly' 
+                    ? 'border-orange-500 text-orange-700 bg-orange-50/30' 
+                    : 'border-transparent text-gray-400 hover:text-gray-600'
+                  }`}
+                >
+                  Solo en SAP ({filteredSapOnly.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveReportTab('conforme')}
+                  className={`py-3 px-4 font-black text-xs uppercase border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 cursor-pointer ${
+                    activeReportTab === 'conforme' 
+                    ? 'border-emerald-500 text-emerald-700 bg-emerald-50/30' 
+                    : 'border-transparent text-gray-400 hover:text-gray-600'
+                  }`}
+                >
+                  Conformes ({filteredConforme.length})
+                </button>
+              </div>
+
+              {/* Table Area */}
+              <div className="flex-1 overflow-y-auto p-4 bg-slate-50/40">
+                {(() => {
+                  let currentList: any[] = [];
+                  let emptyMessage = '';
+                  let alertColor = 'text-gray-400';
+
+                  if (activeReportTab === 'differences') {
+                    currentList = filteredDifferences;
+                    emptyMessage = 'No se encontraron diferencias de cantidades en los registros analizados.';
+                    alertColor = 'text-amber-500';
+                  } else if (activeReportTab === 'appOnly') {
+                    currentList = filteredAppOnly;
+                    emptyMessage = 'No hay registros en la aplicación que falten en el archivo SAP.';
+                    alertColor = 'text-blue-500';
+                  } else if (activeReportTab === 'sapOnly') {
+                    currentList = filteredSapOnly;
+                    emptyMessage = 'No hay registros en el archivo SAP que falten en la aplicación.';
+                    alertColor = 'text-orange-500';
+                  } else {
+                    currentList = filteredConforme;
+                    emptyMessage = 'No hay registros coincidentes 100% conformes.';
+                    alertColor = 'text-emerald-500';
+                  }
+
+                  if (currentList.length === 0) {
+                    return (
+                      <div className="h-full min-h-[250px] flex flex-col items-center justify-center text-center p-6">
+                        <div className="w-16 h-16 bg-white rounded-full shadow-xs border border-gray-100 flex items-center justify-center mb-3">
+                          <CheckCircle className={`w-8 h-8 ${alertColor}`} />
+                        </div>
+                        <p className="text-sm font-bold text-gray-600 max-w-md">{emptyMessage}</p>
+                        <p className="text-xs text-gray-400 mt-1">Los datos ingresados coinciden correctamente para esta selección de fecha y búsqueda.</p>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-xs">
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse">
+                          <thead>
+                            <tr className="bg-slate-50 border-b border-gray-200">
+                              <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider">Fecha</th>
+                              <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider">Código ICO</th>
+                              <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider">Producto</th>
+                              <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider text-right">Cant. SAP</th>
+                              <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider text-right">Cant. App</th>
+                              <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider text-right">Diferencia</th>
+                              <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider">Estado / Detalle</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100 text-xs">
+                            {currentList.map((item, idx) => {
+                              let diffBadgeColor = 'text-gray-600 bg-gray-50';
+                              if (item.diferencia > 0) {
+                                diffBadgeColor = 'text-rose-600 bg-rose-50 font-bold';
+                              } else if (item.diferencia < 0) {
+                                diffBadgeColor = 'text-amber-600 bg-amber-50 font-bold';
+                              } else {
+                                diffBadgeColor = 'text-emerald-600 bg-emerald-50 font-medium';
+                              }
+
+                              return (
+                                <tr key={`${idx}-${item.fecha}-${item.codigo}`} className="hover:bg-slate-50/70 transition-colors">
+                                  <td className="px-4 py-3 font-bold text-slate-700 whitespace-nowrap">
+                                    <span className="inline-flex items-center gap-1 bg-slate-100 text-slate-800 px-2 py-0.5 rounded text-[11px]">
+                                      📅 {formatDate(item.fecha)}
+                                    </span>
+                                  </td>
+                                  <td className="px-4 py-3 font-mono font-bold text-gray-800 whitespace-nowrap">
+                                    {item.codigo}
+                                  </td>
+                                  <td className="px-4 py-3 font-medium text-gray-700 min-w-[200px] max-w-[320px] truncate" title={item.nombre}>
+                                    {item.nombre}
+                                  </td>
+                                  <td className="px-4 py-3 text-right font-mono font-bold text-gray-900">
+                                    {item.cantSap}
+                                  </td>
+                                  <td className="px-4 py-3 text-right font-mono font-bold text-gray-900">
+                                    {item.cantApp}
+                                  </td>
+                                  <td className="px-4 py-3 text-right">
+                                    <span className={`inline-block px-2 py-0.5 rounded font-mono ${diffBadgeColor}`}>
+                                      {item.diferencia > 0 ? `+${item.diferencia}` : item.diferencia}
+                                    </span>
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <span className={`text-[10px] font-black uppercase tracking-tight px-2 py-1 rounded-full ${
+                                      activeReportTab === 'differences' 
+                                        ? 'bg-amber-100/60 text-amber-800' 
+                                        : activeReportTab === 'appOnly' 
+                                          ? 'bg-blue-100/60 text-blue-800' 
+                                          : activeReportTab === 'sapOnly' 
+                                            ? 'bg-orange-100/60 text-orange-800' 
+                                            : 'bg-emerald-100/60 text-emerald-800'
+                                    }`}>
+                                      {item.comentario}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-3.5 bg-slate-50 border-t border-gray-200 flex justify-between items-center shrink-0">
+                <span className="text-[10px] sm:text-xs text-gray-400 font-bold uppercase">Smartrack WMS v2.6 • Multi-Fecha SAP</span>
                 <button
                   type="button"
                   onClick={() => setShowValidationReportModal(false)}
-                  className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-md transition-all active:scale-[0.98] uppercase text-xs tracking-wider cursor-pointer"
                 >
-                  <X className="w-5 h-5" />
+                  Cerrar Reporte
                 </button>
               </div>
             </div>
-
-            {/* Quick Summary Cards */}
-            <div className="p-4 grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-3 bg-white border-b border-gray-100 shrink-0">
-              <div 
-                onClick={() => setActiveReportTab('differences')}
-                className={`p-2.5 sm:p-3 rounded-xl border transition-all cursor-pointer ${activeReportTab === 'differences' ? 'bg-amber-50/80 border-amber-300 shadow-sm' : 'bg-slate-50 border-gray-100 hover:bg-slate-100/70'}`}
-              >
-                <span className="block text-[9px] font-black uppercase text-amber-700 tracking-wider">Diferencias / Faltantes</span>
-                <span className="text-base sm:text-lg font-black text-amber-900">{validationReportData.differences.length}</span>
-              </div>
-              <div 
-                onClick={() => setActiveReportTab('appOnly')}
-                className={`p-2.5 sm:p-3 rounded-xl border transition-all cursor-pointer ${activeReportTab === 'appOnly' ? 'bg-blue-50/80 border-blue-300 shadow-sm' : 'bg-slate-50 border-gray-100 hover:bg-slate-100/70'}`}
-              >
-                <span className="block text-[9px] font-black uppercase text-blue-700 tracking-wider">Solo en App (No SAP)</span>
-                <span className="text-base sm:text-lg font-black text-blue-900">{validationReportData.appOnly.length}</span>
-              </div>
-              <div 
-                onClick={() => setActiveReportTab('sapOnly')}
-                className={`p-2.5 sm:p-3 rounded-xl border transition-all cursor-pointer ${activeReportTab === 'sapOnly' ? 'bg-orange-50/80 border-orange-300 shadow-sm' : 'bg-slate-50 border-gray-100 hover:bg-slate-100/70'}`}
-              >
-                <span className="block text-[9px] font-black uppercase text-orange-700 tracking-wider">Solo en SAP (No App)</span>
-                <span className="text-base sm:text-lg font-black text-orange-900">{validationReportData.sapOnly.length}</span>
-              </div>
-              <div 
-                onClick={() => setActiveReportTab('conforme')}
-                className={`p-2.5 sm:p-3 rounded-xl border transition-all cursor-pointer ${activeReportTab === 'conforme' ? 'bg-emerald-50/80 border-emerald-300 shadow-sm' : 'bg-slate-50 border-gray-100 hover:bg-slate-100/70'}`}
-              >
-                <span className="block text-[9px] font-black uppercase text-emerald-700 tracking-wider">Conformes</span>
-                <span className="text-base sm:text-lg font-black text-emerald-900">{validationReportData.conforme.length}</span>
-              </div>
-            </div>
-
-            {/* Interactive Tabs */}
-            <div className="px-4 bg-white border-b border-gray-200 flex overflow-x-auto shrink-0 scrollbar-none">
-              <button
-                type="button"
-                onClick={() => setActiveReportTab('differences')}
-                className={`py-3 px-4 font-black text-xs uppercase border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 ${
-                  activeReportTab === 'differences' 
-                  ? 'border-amber-500 text-amber-700 bg-amber-50/30' 
-                  : 'border-transparent text-gray-400 hover:text-gray-600'
-                }`}
-              >
-                Diferencias ({validationReportData.differences.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveReportTab('appOnly')}
-                className={`py-3 px-4 font-black text-xs uppercase border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 ${
-                  activeReportTab === 'appOnly' 
-                  ? 'border-blue-500 text-blue-700 bg-blue-50/30' 
-                  : 'border-transparent text-gray-400 hover:text-gray-600'
-                }`}
-              >
-                Solo en App ({validationReportData.appOnly.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveReportTab('sapOnly')}
-                className={`py-3 px-4 font-black text-xs uppercase border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 ${
-                  activeReportTab === 'sapOnly' 
-                  ? 'border-orange-500 text-orange-700 bg-orange-50/30' 
-                  : 'border-transparent text-gray-400 hover:text-gray-600'
-                }`}
-              >
-                Solo en SAP ({validationReportData.sapOnly.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveReportTab('conforme')}
-                className={`py-3 px-4 font-black text-xs uppercase border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 ${
-                  activeReportTab === 'conforme' 
-                  ? 'border-emerald-500 text-emerald-700 bg-emerald-50/30' 
-                  : 'border-transparent text-gray-400 hover:text-gray-600'
-                }`}
-              >
-                Conformes ({validationReportData.conforme.length})
-              </button>
-            </div>
-
-            {/* Table Area */}
-            <div className="flex-1 overflow-y-auto p-4 bg-slate-50/40">
-              {(() => {
-                let currentList: any[] = [];
-                let emptyMessage = '';
-                let alertColor = 'text-gray-400';
-
-                if (activeReportTab === 'differences') {
-                  currentList = validationReportData.differences;
-                  emptyMessage = 'No se encontraron diferencias de cantidades en los ingresos coincidentes.';
-                  alertColor = 'text-amber-500';
-                } else if (activeReportTab === 'appOnly') {
-                  currentList = validationReportData.appOnly;
-                  emptyMessage = 'No hay registros en la aplicación que falten en el archivo SAP.';
-                  alertColor = 'text-blue-500';
-                } else if (activeReportTab === 'sapOnly') {
-                  currentList = validationReportData.sapOnly;
-                  emptyMessage = 'No hay registros en el archivo SAP que falten en la aplicación.';
-                  alertColor = 'text-orange-500';
-                } else {
-                  currentList = validationReportData.conforme;
-                  emptyMessage = 'No hay registros coincidentes 100% conformes.';
-                  alertColor = 'text-emerald-500';
-                }
-
-                if (currentList.length === 0) {
-                  return (
-                    <div className="h-full min-h-[250px] flex flex-col items-center justify-center text-center p-6">
-                      <div className="w-16 h-16 bg-white rounded-full shadow-sm border border-gray-100 flex items-center justify-center mb-3">
-                        <CheckCircle className={`w-8 h-8 ${alertColor}`} />
-                      </div>
-                      <p className="text-sm font-bold text-gray-600 max-w-md">{emptyMessage}</p>
-                      <p className="text-xs text-gray-400 mt-1">Los datos ingresados coinciden correctamente para esta sección.</p>
-                    </div>
-                  );
-                }
-
-                return (
-                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left border-collapse">
-                        <thead>
-                          <tr className="bg-slate-50 border-b border-gray-200">
-                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider">Fecha</th>
-                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider">Código ICO</th>
-                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider">Producto</th>
-                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider text-right">Cant. SAP</th>
-                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider text-right">Cant. App</th>
-                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider text-right">Diferencia</th>
-                            <th className="px-4 py-3 text-[10px] font-black uppercase text-gray-500 tracking-wider">Estado / Detalle</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-100 text-xs">
-                          {currentList.map((item, idx) => {
-                            let diffBadgeColor = 'text-gray-600 bg-gray-50';
-                            if (item.diferencia > 0) {
-                              diffBadgeColor = 'text-rose-600 bg-rose-50 font-bold';
-                            } else if (item.diferencia < 0) {
-                              diffBadgeColor = 'text-amber-600 bg-amber-50 font-bold';
-                            } else {
-                              diffBadgeColor = 'text-emerald-600 bg-emerald-50 font-medium';
-                            }
-
-                            return (
-                              <tr key={`${idx}-${item.codigo}`} className="hover:bg-slate-50/70 transition-colors">
-                                <td className="px-4 py-3 font-medium text-gray-600 whitespace-nowrap">
-                                  {item.fecha}
-                                </td>
-                                <td className="px-4 py-3 font-mono font-bold text-gray-800 whitespace-nowrap">
-                                  {item.codigo}
-                                </td>
-                                <td className="px-4 py-3 font-medium text-gray-700 min-w-[200px] max-w-[320px] truncate" title={item.nombre}>
-                                  {item.nombre}
-                                </td>
-                                <td className="px-4 py-3 text-right font-mono font-bold text-gray-900">
-                                  {item.cantSap}
-                                </td>
-                                <td className="px-4 py-3 text-right font-mono font-bold text-gray-900">
-                                  {item.cantApp}
-                                </td>
-                                <td className="px-4 py-3 text-right">
-                                  <span className={`inline-block px-2 py-0.5 rounded font-mono ${diffBadgeColor}`}>
-                                    {item.diferencia > 0 ? `+${item.diferencia}` : item.diferencia}
-                                  </span>
-                                </td>
-                                <td className="px-4 py-3">
-                                  <span className={`text-[10px] font-black uppercase tracking-tight px-2 py-1 rounded-full ${
-                                    activeReportTab === 'differences' 
-                                      ? 'bg-amber-100/60 text-amber-800' 
-                                      : activeReportTab === 'appOnly' 
-                                        ? 'bg-blue-100/60 text-blue-800' 
-                                        : activeReportTab === 'sapOnly' 
-                                          ? 'bg-orange-100/60 text-orange-800' 
-                                          : 'bg-emerald-100/60 text-emerald-800'
-                                  }`}>
-                                    {item.comentario}
-                                  </span>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-
-            {/* Footer */}
-            <div className="px-6 py-4 bg-slate-50 border-t border-gray-200 flex justify-between items-center shrink-0">
-              <span className="text-[10px] sm:text-xs text-gray-400 font-bold uppercase">Smartrack WMS v2.6</span>
-              <button
-                type="button"
-                onClick={() => setShowValidationReportModal(false)}
-                className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-md transition-all active:scale-[0.98] uppercase text-xs tracking-wider"
-              >
-                Cerrar Reporte
-              </button>
-            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Validation Modal */}
       {showValidationModal.show && (

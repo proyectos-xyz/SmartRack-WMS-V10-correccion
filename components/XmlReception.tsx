@@ -63,90 +63,117 @@ const XmlReception: React.FC<XmlReceptionProps> = ({ catalog, currentUser, onSel
   };
 
   const handleXmlUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
 
     setIsParsingXml(true);
     setCurrentPage(1);
     try {
-      const text = await file.text();
-      const parser = new DOMParser();
-      const xmlDoc = parser.parseFromString(text, "text/xml");
-      
-      const isInvoice = xmlDoc.documentElement.localName === 'Invoice';
-      const isDespatch = xmlDoc.documentElement.localName === 'DespatchAdvice';
-
       // UBL 2.1 Namespaces
       const ns = {
         cac: "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2",
         cbc: "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2"
       };
 
-      let lines: HTMLCollectionOf<Element>;
-      if (isInvoice) {
-        lines = xmlDoc.getElementsByTagNameNS(ns.cac, "InvoiceLine");
-      } else if (isDespatch) {
-        lines = xmlDoc.getElementsByTagNameNS(ns.cac, "DespatchLine");
-      } else {
-        alert("Formato XML no reconocido. Debe ser Factura o Guía de Remisión UBL.");
-        setIsParsingXml(false);
+      const parser = new DOMParser();
+      const allParsedItems: any[] = [];
+      const fileList = Array.from(files);
+
+      for (let f = 0; f < fileList.length; f++) {
+        const file = fileList[f];
+        const text = await file.text();
+        const xmlDoc = parser.parseFromString(text, "text/xml");
+        
+        const isInvoice = xmlDoc.documentElement.localName === 'Invoice';
+        const isDespatch = xmlDoc.documentElement.localName === 'DespatchAdvice';
+
+        if (!isInvoice && !isDespatch) {
+          console.warn(`Archivo ${file.name} no reconocido como UBL Invoice o DespatchAdvice.`);
+          continue;
+        }
+
+        // Get Document ID (e.g. F001-12345 or T001-1234)
+        const docId = xmlDoc.getElementsByTagNameNS(ns.cbc, "ID")[0]?.textContent?.trim() || file.name.replace('.xml', '');
+
+        let lines: HTMLCollectionOf<Element>;
+        if (isInvoice) {
+          lines = xmlDoc.getElementsByTagNameNS(ns.cac, "InvoiceLine");
+        } else {
+          lines = xmlDoc.getElementsByTagNameNS(ns.cac, "DespatchLine");
+        }
+
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          const lineId = line.getElementsByTagNameNS(ns.cbc, "ID")[0]?.textContent;
+          
+          const qtyNode = isInvoice 
+            ? line.getElementsByTagNameNS(ns.cbc, "InvoicedQuantity")[0]
+            : line.getElementsByTagNameNS(ns.cbc, "DeliveredQuantity")[0];
+            
+          const qty = parseFloat(qtyNode?.textContent || "0");
+          const unitCode = qtyNode?.getAttribute("unitCode") || "NIU";
+          
+          const item = line.getElementsByTagNameNS(ns.cac, "Item")[0];
+          const description = item?.getElementsByTagNameNS(ns.cbc, "Description")[0]?.textContent || '';
+          const sellersId = item?.getElementsByTagNameNS(ns.cac, "SellersItemIdentification")[0];
+          const providerCode = sellersId?.getElementsByTagNameNS(ns.cbc, "ID")[0]?.textContent?.trim() || '';
+
+          // Match with catalog using extranjero, codigo, sku, or ean_bulto
+          const matchedProduct = catalog.find(p => 
+            (p.extranjero && providerCode && p.extranjero.trim().toLowerCase() === providerCode.toLowerCase()) ||
+            (p.codigo && providerCode && p.codigo.trim().toLowerCase() === providerCode.toLowerCase()) ||
+            (p.sku && providerCode && p.sku.trim().toLowerCase() === providerCode.toLowerCase()) ||
+            (p.ean_bulto && providerCode && p.ean_bulto.trim().toLowerCase() === providerCode.toLowerCase())
+          );
+
+          // Extract expiration date from description if available
+          let extractedExpDate = '';
+          if (description) {
+            // Pattern 1: ;;DD.MM.YYYY;
+            const match1 = description.match(/;;(\d{2})\.(\d{2})\.(\d{4})/);
+            if (match1) {
+              extractedExpDate = `${match1[3]}-${match1[2]}-${match1[1]}`;
+            } else {
+              // Pattern 2: DD/MM/YYYY or DD-MM-YYYY
+              const match2 = description.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{4})/);
+              if (match2) {
+                extractedExpDate = `${match2[3]}-${match2[2]}-${match2[1]}`;
+              }
+            }
+          }
+
+          allParsedItems.push({
+            id: `xml-${f}-${i}-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+            fileName: file.name,
+            documentNumber: docId,
+            lineId: lineId || `${i + 1}`,
+            providerCode: providerCode || 'N/A',
+            code: matchedProduct?.codigo || providerCode || 'N/A',
+            description: description || matchedProduct?.nombre || 'N/A',
+            quantity: qty,
+            unitCode: unitCode,
+            product: matchedProduct,
+            expirationDate: extractedExpDate || new Date().toISOString().split('T')[0],
+            lote: ''
+          });
+        }
+      }
+
+      if (allParsedItems.length === 0) {
+        alert("No se encontraron líneas de productos válidas en los archivos XML seleccionados.");
         return;
       }
 
-      const parsedItems: any[] = [];
-
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const id = line.getElementsByTagNameNS(ns.cbc, "ID")[0]?.textContent;
-        
-        const qtyNode = isInvoice 
-          ? line.getElementsByTagNameNS(ns.cbc, "InvoicedQuantity")[0]
-          : line.getElementsByTagNameNS(ns.cbc, "DeliveredQuantity")[0];
-          
-        const qty = parseFloat(qtyNode?.textContent || "0");
-        const unitCode = qtyNode?.getAttribute("unitCode");
-        
-        const item = line.getElementsByTagNameNS(ns.cac, "Item")[0];
-        const description = item?.getElementsByTagNameNS(ns.cbc, "Description")[0]?.textContent;
-        const sellersId = item?.getElementsByTagNameNS(ns.cac, "SellersItemIdentification")[0];
-        const providerCode = sellersId?.getElementsByTagNameNS(ns.cbc, "ID")[0]?.textContent?.trim();
-
-        // Match with catalog using 'extranjero' field
-        const matchedProduct = catalog.find(p => 
-          p.extranjero?.trim().toLowerCase() === providerCode?.toLowerCase()
-        );
-
-        // Extract expiration date if DespatchAdvice
-        let extractedExpDate = '';
-        if (isDespatch && description) {
-          // Format: [DESCRIPTION @#@ U.M.;;DD.MM.YYYY;...]
-          const match = description.match(/;;(\d{2})\.(\d{2})\.(\d{4})/);
-          if (match) {
-            extractedExpDate = `${match[3]}-${match[2]}-${match[1]}`;
-          }
-        }
-
-        parsedItems.push({
-          id: id || `item-${i}-${Date.now()}`,
-          providerCode: providerCode || 'N/A',
-          code: matchedProduct?.codigo || providerCode || 'N/A',
-          description: description || 'N/A',
-          quantity: qty,
-          unitCode: unitCode || 'NIU',
-          product: matchedProduct,
-          expirationDate: extractedExpDate,
-          lote: ''
-        });
-      }
-
-      setXmlItems(parsedItems);
-      // Select all by default
-      setSelectedItemIds(new Set(parsedItems.map(item => item.id)));
+      setXmlItems(prev => [...allParsedItems, ...prev]);
+      // Select all loaded items
+      setSelectedItemIds(new Set(allParsedItems.map(item => item.id)));
     } catch (err) {
       console.error("Error parsing XML:", err);
-      alert("Error al procesar el archivo XML. Asegúrese que sea un formato UBL válido.");
+      alert("Error al procesar los archivos XML. Asegúrese de que tengan formato UBL válido.");
     } finally {
       setIsParsingXml(false);
+      // Reset input value so same files can be re-selected if needed
+      if (e.target) e.target.value = '';
     }
   };
 
@@ -229,8 +256,9 @@ const XmlReception: React.FC<XmlReceptionProps> = ({ catalog, currentUser, onSel
         usuario_registro: currentUser?.username || 'SISTEMA_XML',
         fecha_registro: new Date().toISOString(),
         proveedor: 'CARGA_XML',
-        guia_factura: 'XML_IMPORT',
-        estado: 'PENDIENTE_LAIVE'
+        guia_factura: item.documentNumber || item.fileName || 'XML_IMPORT',
+        estado: 'PENDIENTE_LAIVE',
+        sede_id: currentUser?.sede_id || null
       }));
 
       let { error } = await supabase.from('recepcion_productos').insert(entries);
@@ -244,7 +272,7 @@ const XmlReception: React.FC<XmlReceptionProps> = ({ catalog, currentUser, onSel
         throw error;
       }
 
-      alert(`${itemsToProcess.length} ítems procesados correctamente.`);
+      alert(`✅ ${itemsToProcess.length} ítems procesados correctamente.\nYa están disponibles en OPERACIONES / RECEPCION / RECEPCION LAIVE / PENDIENTES.`);
       // Remove processed items from list
       setXmlItems(prev => prev.filter(item => !selectedItemIds.has(item.id)));
       setSelectedItemIds(new Set());
@@ -277,6 +305,7 @@ const XmlReception: React.FC<XmlReceptionProps> = ({ catalog, currentUser, onSel
         type="file" 
         ref={fileInputRef}
         accept=".xml"
+        multiple
         onChange={handleXmlUpload}
         className="hidden"
       />
