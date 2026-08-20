@@ -4,7 +4,7 @@ import { InventoryItem, Product, ZoneType, StocktakeRecord, Usuario, SystemStock
 import { BarChart as RechartsBarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LineChart, Line, Legend } from 'recharts';
 import { Search, AlertTriangle, Camera, CheckCircle, ClipboardList, PlusCircle, History, FileSpreadsheet, XCircle, Scan, ChevronLeft, ChevronRight, FileText, Calculator, Bell, Delete, RefreshCw, User, Upload, Download, BarChart3, X, Clock } from './Icons';
 import { supabase } from '../supabaseClient';
-import { compressImage, generateStorageFileName } from '../utils';
+import { compressImage, generateStorageFileName, getPeruDayRangeISO } from '../utils';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
@@ -189,6 +189,30 @@ const InventoryList: React.FC<InventoryListProps> = ({
 
   const [recentExpiries, setRecentExpiries] = useState<RecentExpiryOption[]>([]);
 
+  // Real-time calculation of uploaded system stock and total counted today for countProduct
+  const productSystemStock = useMemo(() => {
+    if (!countProduct || !systemStock || systemStock.length === 0) return null;
+    const targetCode = (countProduct.codigo || '').trim().toLowerCase();
+    const targetSku = (countProduct.sku || '').trim().toLowerCase();
+    const found = systemStock.find(s => {
+      const c = (s.codigo || '').trim().toLowerCase();
+      return c === targetCode || (targetSku !== '' && c === targetSku);
+    });
+    return found ? found.cantidad : null;
+  }, [countProduct, systemStock]);
+
+  const productTotalCountedToday = useMemo(() => {
+    if (!countProduct || !todayCounts) return 0;
+    const targetCode = (countProduct.codigo || '').trim().toLowerCase();
+    const targetSku = (countProduct.sku || '').trim().toLowerCase();
+    return todayCounts
+      .filter(c => {
+        const code = (c.codigo || '').trim().toLowerCase();
+        return code === targetCode || (targetSku !== '' && code === targetSku);
+      })
+      .reduce((sum, item) => sum + (Number(item.cantidad) || 0), 0);
+  }, [countProduct, todayCounts]);
+
   // Fetch recent expiration dates registered in the last 2 weeks for countProduct
   useEffect(() => {
     if (!countProduct?.codigo) {
@@ -318,16 +342,13 @@ const InventoryList: React.FC<InventoryListProps> = ({
   const fetchTodayCounts = async () => {
     setIsLoadingCounts(true);
     try {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
+        const { startISO, endISO } = getPeruDayRangeISO();
 
         let query = supabase
             .from('conteo_inventario')
             .select('*')
-            .gte('fecha_registro', today.toISOString())
-            .lt('fecha_registro', tomorrow.toISOString());
+            .gte('fecha_registro', startISO)
+            .lte('fecha_registro', endISO);
 
         if (currentUser?.sede_id) {
             query = query.eq('sede_id', currentUser.sede_id);
@@ -354,10 +375,8 @@ const InventoryList: React.FC<InventoryListProps> = ({
   };
 
   useEffect(() => {
-    if (activeTab === 'LIST' || activeTab === 'RECOUNT') {
-        fetchTodayCounts();
-    }
-  }, [activeTab]);
+    fetchTodayCounts();
+  }, [activeTab, currentUser?.sede_id]);
 
   const handleUpdateCount = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -992,8 +1011,10 @@ const InventoryList: React.FC<InventoryListProps> = ({
           await onSaveStocktake(newRecord);
           // Refresh expiring soon bell
           fetchExpiringSoon();
-          // Update local session history
-          setSessionHistory(prev => [{ ...newRecord, id: Date.now().toString() } as StocktakeRecord, ...prev]);
+          // Update local session history & today counts
+          const savedRec = { ...newRecord, id: Date.now().toString() } as StocktakeRecord;
+          setSessionHistory(prev => [savedRec, ...prev]);
+          setTodayCounts(prev => [savedRec, ...prev]);
       } catch (err) {
           console.error("Error al registrar escaneo rápido:", err);
       }
@@ -1120,8 +1141,10 @@ const InventoryList: React.FC<InventoryListProps> = ({
               // Refresh expiring soon bell
               fetchExpiringSoon();
 
-              // Update local session history
-              setSessionHistory(prev => [{ ...newRecord, id: Date.now().toString() } as StocktakeRecord, ...prev]);
+              // Update local session history & today counts
+              const savedRec = { ...newRecord, id: Date.now().toString() } as StocktakeRecord;
+              setSessionHistory(prev => [savedRec, ...prev]);
+              setTodayCounts(prev => [savedRec, ...prev]);
           } catch (err: any) {
               console.error("Error in background save:", err);
               // Optional: notify user of failure if critical
@@ -1434,45 +1457,92 @@ const InventoryList: React.FC<InventoryListProps> = ({
             const ws = wb.Sheets[wsname];
             const data = XLSX.utils.sheet_to_json(ws) as any[];
 
-            setUploadProgress(30);
-            const mapped = data.map(row => {
+            setUploadProgress(25);
+            // Group and consolidate rows by codigo to prevent duplicate key violations
+            const consolidatedMap = new Map<string, SystemStock>();
+
+            data.forEach(row => {
                 // Normalize keys: lowercase and trim spaces
                 const normalizedRow: any = {};
                 Object.keys(row).forEach(key => {
                     normalizedRow[key.toLowerCase().trim()] = row[key];
                 });
 
-                const codigo = String(normalizedRow.codigo || normalizedRow.code || '').trim();
-                const cantidad = parseFloat(normalizedRow.cantidad || normalizedRow['stock del día'] || normalizedRow.stock || normalizedRow.qty || '0');
-                const costo = parseFloat(normalizedRow.costo || normalizedRow.price || '0');
+                const codigo = String(normalizedRow.codigo || normalizedRow.code || normalizedRow.sku || '').trim();
+                if (!codigo) return;
 
-                return { 
-                    codigo, 
-                    cantidad, 
-                    costo,
-                    ...(currentUser?.sede_id ? { sede_id: currentUser.sede_id } : {})
-                };
-            }).filter(item => item.codigo !== '');
+                const cantidadRaw = normalizedRow.cantidad ?? normalizedRow['stock del día'] ?? normalizedRow['stock del dia'] ?? normalizedRow['stock_dia'] ?? normalizedRow.stock ?? normalizedRow.qty ?? normalizedRow.stock_sistema ?? 0;
+                const cantidad = isNaN(parseFloat(cantidadRaw)) ? 0 : parseFloat(cantidadRaw);
 
-            if (mapped.length === 0) {
-                throw new Error("No se encontraron registros válidos en el archivo. Verifique que las columnas sean 'codigo', 'stock del día' y 'costo'.");
+                const costoRaw = normalizedRow.costo ?? normalizedRow.price ?? normalizedRow.cost ?? 0;
+                const costo = isNaN(parseFloat(costoRaw)) ? 0 : parseFloat(costoRaw);
+
+                const movRaw = normalizedRow.movimiento ?? normalizedRow.movement;
+                const movimiento = (movRaw !== undefined && movRaw !== null && movRaw !== '') && !isNaN(parseFloat(movRaw)) ? parseFloat(movRaw) : undefined;
+
+                if (consolidatedMap.has(codigo)) {
+                    const existing = consolidatedMap.get(codigo)!;
+                    existing.cantidad += cantidad;
+                    if (costo > 0) existing.costo = costo;
+                    if (movimiento !== undefined) {
+                        existing.movimiento = (existing.movimiento || 0) + movimiento;
+                    }
+                } else {
+                    consolidatedMap.set(codigo, {
+                        codigo,
+                        cantidad,
+                        costo,
+                        ...(movimiento !== undefined ? { movimiento } : {}),
+                        ...(currentUser?.sede_id ? { sede_id: currentUser.sede_id } : {})
+                    });
+                }
+            });
+
+            const consolidatedList = Array.from(consolidatedMap.values());
+
+            if (consolidatedList.length === 0) {
+                throw new Error("No se encontraron registros válidos en el archivo. Verifique que las columnas contengan 'codigo', 'stock del día' y 'costo'.");
             }
 
-            setUploadProgress(50);
-            // Clear and insert
+            setUploadProgress(45);
+            // 1. Clear previous stock for the branch/system
             let delQuery = supabase.from('stock_sistema').delete();
             if (currentUser?.sede_id) {
                 delQuery = delQuery.eq('sede_id', currentUser.sede_id);
             }
             const { error: delError } = await delQuery.neq('codigo', '_EMPTY_');
-            if (delError) throw delError;
+            if (delError) {
+                console.warn("Aviso al eliminar stock anterior:", delError.message);
+            }
             
-            setUploadProgress(70);
-            const { error: insError } = await supabase.from('stock_sistema').insert(mapped);
-            if (insError) throw insError;
+            setUploadProgress(60);
+            // 2. Perform batched upsert to safely replace/insert records without duplicate key collision
+            const chunkSize = 500;
+            const totalChunks = Math.ceil(consolidatedList.length / chunkSize);
+
+            for (let i = 0; i < consolidatedList.length; i += chunkSize) {
+                const chunk = consolidatedList.slice(i, i + chunkSize);
+                const chunkNum = Math.floor(i / chunkSize) + 1;
+
+                const { error: upsertError } = await supabase
+                    .from('stock_sistema')
+                    .upsert(chunk, { onConflict: 'codigo' });
+
+                if (upsertError) {
+                    console.warn(`Error en upsert con columnas completas (Lote ${chunkNum}/${totalChunks}), reintentando sin movimiento:`, upsertError);
+                    const fallbackChunk = chunk.map(({ movimiento, ...rest }) => rest);
+                    const { error: fallbackErr } = await supabase
+                        .from('stock_sistema')
+                        .upsert(fallbackChunk, { onConflict: 'codigo' });
+
+                    if (fallbackErr) throw fallbackErr;
+                }
+
+                setUploadProgress(60 + Math.round((chunkNum / totalChunks) * 35));
+            }
 
             setUploadProgress(100);
-            setSystemStock(mapped);
+            setSystemStock(consolidatedList);
             setUploadSuccess(true);
             fetchTodayCounts(); // Refresh
             
@@ -2658,12 +2728,23 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                     </button>
                                 </div>
                                 {countProduct ? (
-                                    <div className="flex flex-col bg-blue-600 text-white p-2 md:p-4 rounded-lg shadow-md">
-                                        <div className="flex justify-between items-start">
-                                            {/* Fix: countProduct.nombre, countProduct.codigo */}
+                                    <div className="flex flex-col bg-gradient-to-br from-blue-600 via-blue-700 to-indigo-800 text-white p-3 md:p-3.5 rounded-xl shadow-lg border border-blue-400/30">
+                                        {/* Top row: Name, Code/SKU and Cambiar button */}
+                                        <div className="flex justify-between items-start gap-2">
                                             <div className="min-w-0 flex-1">
-                                                <div className="font-black text-base md:text-lg leading-tight">{countProduct.nombre}</div>
-                                                <div className="text-xs opacity-75 font-mono">{countProduct.codigo}</div>
+                                                <div className="font-black text-sm md:text-base leading-tight uppercase tracking-tight text-white drop-shadow-xs">
+                                                    {countProduct.nombre}
+                                                </div>
+                                                <div className="flex items-center gap-2 mt-0.5">
+                                                    <span className="text-[11px] font-mono font-bold text-blue-200 bg-blue-900/50 px-1.5 py-0.5 rounded border border-blue-400/30">
+                                                        {countProduct.codigo}
+                                                    </span>
+                                                    {countProduct.sku && countProduct.sku !== countProduct.codigo && (
+                                                        <span className="text-[10px] font-mono text-blue-200/80">
+                                                            SKU: {countProduct.sku}
+                                                        </span>
+                                                    )}
+                                                </div>
                                             </div>
                                             <button 
                                                 onClick={() => {
@@ -2673,30 +2754,81 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                                     setCountPhotos([]);
                                                     setTimeout(() => searchInputRef.current?.focus(), 100);
                                                 }}
-                                                className="text-white hover:bg-blue-700 px-3 py-1 rounded-full text-xs font-bold border border-white/30 ml-2 h-max"
+                                                className="text-white hover:bg-white/20 active:scale-95 px-3 py-1 rounded-full text-xs font-black border border-white/30 transition-all flex-shrink-0 cursor-pointer shadow-xs"
                                             >
                                                 Cambiar
                                             </button>
                                         </div>
                                         
-                                        {/* Pack Info - Displaying units per box from the product master */}
-                                        <div className="mt-2 pt-2 border-t border-white/20 flex flex-wrap gap-4 text-xs md:text-sm font-sans">
-                                            <div className="font-bold">
-                                                UM: <span className="font-mono bg-white/20 px-1 rounded">{countProduct.unidad_venta || 'UND'}</span>
+                                        {/* Pack Specs row: UM, UXCj, CjxP */}
+                                        <div className="mt-2 pt-2 border-t border-white/15 flex flex-wrap items-center gap-2 text-xs">
+                                            <div className="flex items-center gap-1 bg-white/10 px-2 py-0.5 rounded-md border border-white/15 shadow-2xs">
+                                                <span className="text-[10px] font-bold text-blue-200 uppercase tracking-tight">UM:</span>
+                                                <span className="font-mono font-black text-white">{countProduct.unidad_venta || 'UND'}</span>
                                             </div>
-                                            <div className="font-bold flex items-center gap-1">
-                                                <span className="font-sans">Unidades x Caja:</span> <span className="font-mono text-yellow-300 text-base md:text-lg">{countProduct.unidades_por_caja}</span>
+
+                                            <div className="flex items-center gap-1 bg-white/10 px-2 py-0.5 rounded-md border border-white/15 shadow-2xs">
+                                                <span className="text-[10px] font-bold text-blue-200 uppercase tracking-tight">UXCj:</span>
+                                                <span className="font-mono font-black text-amber-300">{countProduct.unidades_por_caja ?? 1}</span>
                                             </div>
+
                                             {(countProduct.cajas_por_palet ?? 0) > 0 && (
-                                                <div className="font-bold flex items-center gap-1">
-                                                    <span className="font-sans">Cajas x Palet:</span> <span className="font-mono text-yellow-300 text-base md:text-lg">{countProduct.cajas_por_palet}</span>
+                                                <div className="flex items-center gap-1 bg-white/10 px-2 py-0.5 rounded-md border border-white/15 shadow-2xs">
+                                                    <span className="text-[10px] font-bold text-blue-200 uppercase tracking-tight">CjxP:</span>
+                                                    <span className="font-mono font-black text-amber-300">{countProduct.cajas_por_palet}</span>
                                                 </div>
                                             )}
+
                                             {countProduct.unidad_compra && (
-                                                <div className="font-bold opacity-80 italic">
+                                                <div className="text-[11px] font-medium text-blue-200/80 italic ml-0.5">
                                                     ({countProduct.unidad_compra})
                                                 </div>
                                             )}
+                                        </div>
+
+                                        {/* Metrics Row: Stock SAP | Conteo | DIF */}
+                                        <div className="mt-2.5 grid grid-cols-3 gap-1.5 md:gap-2 text-center">
+                                            {/* Stock SAP */}
+                                            <div className="bg-black/25 backdrop-blur-xs p-1.5 md:p-2 rounded-lg border border-white/15 flex flex-col justify-center">
+                                                <span className="text-[9px] md:text-[10px] font-black text-blue-200 uppercase tracking-wider leading-none">Stock SAP</span>
+                                                <div className="font-mono font-black text-xs md:text-sm text-amber-300 mt-1 leading-none truncate">
+                                                    {productSystemStock !== null ? Number(productSystemStock).toLocaleString() : '0'}
+                                                    <span className="text-[9px] md:text-[10px] font-sans font-normal text-blue-200 ml-0.5">{countProduct.unidad_venta || 'UND'}</span>
+                                                </div>
+                                            </div>
+
+                                            {/* Conteo */}
+                                            <div className="bg-emerald-950/40 backdrop-blur-xs p-1.5 md:p-2 rounded-lg border border-emerald-400/30 flex flex-col justify-center">
+                                                <span className="text-[9px] md:text-[10px] font-black text-emerald-300 uppercase tracking-wider leading-none">Conteo</span>
+                                                <div className="font-mono font-black text-xs md:text-sm text-white mt-1 leading-none truncate">
+                                                    {Number(productTotalCountedToday).toLocaleString()}
+                                                    <span className="text-[9px] md:text-[10px] font-sans font-normal text-emerald-200 ml-0.5">{countProduct.unidad_venta || 'UND'}</span>
+                                                </div>
+                                            </div>
+
+                                            {/* DIF */}
+                                            <div className={`p-1.5 md:p-2 rounded-lg border flex flex-col justify-center ${
+                                                productSystemStock === null
+                                                    ? 'bg-black/20 border-white/15 text-blue-200'
+                                                    : (productTotalCountedToday - productSystemStock) === 0
+                                                    ? 'bg-emerald-500/25 border-emerald-400/40 text-emerald-300'
+                                                    : (productTotalCountedToday - productSystemStock) > 0
+                                                    ? 'bg-amber-500/25 border-amber-400/40 text-amber-300'
+                                                    : 'bg-rose-500/30 border-rose-400/40 text-rose-300'
+                                            }`}>
+                                                <span className="text-[9px] md:text-[10px] font-black uppercase tracking-wider leading-none opacity-90">DIF</span>
+                                                <div className="font-mono font-black text-xs md:text-sm mt-1 leading-none truncate">
+                                                    {productSystemStock !== null ? (
+                                                        <>
+                                                            {(productTotalCountedToday - productSystemStock) > 0 ? '+' : ''}
+                                                            {(productTotalCountedToday - productSystemStock).toLocaleString()}
+                                                            <span className="text-[9px] md:text-[10px] font-sans font-normal ml-0.5 opacity-80">{countProduct.unidad_venta || 'UND'}</span>
+                                                        </>
+                                                    ) : (
+                                                        <span className="text-xs opacity-70">--</span>
+                                                    )}
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
                                 ) : (

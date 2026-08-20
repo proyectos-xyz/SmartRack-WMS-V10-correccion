@@ -112,3 +112,20 @@ export const generateStorageFileName = (extension: string = 'jpg'): string => {
   const randomCode = Math.random().toString(36).substring(2, 10).toUpperCase();
   return `${datePrefix}${randomCode}.${extension}`;
 };
+
+export const getPeruDateString = (date: Date = new Date()): string => {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Lima',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(date);
+};
+
+export const getPeruDayRangeISO = (dateStr?: string) => {
+  const peruDate = dateStr || getPeruDateString();
+  const startISO = new Date(`${peruDate}T00:00:00.000-05:00`).toISOString();
+  const endISO = new Date(`${peruDate}T23:59:59.999-05:00`).toISOString();
+  return { peruDate, startISO, endISO };
+};
+

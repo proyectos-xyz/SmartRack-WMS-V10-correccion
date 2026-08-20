@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from '../supabaseClient';
 import { Product, StocktakeRecord, SystemStock, Usuario } from '../types';
 import { Upload, AlertTriangle, CheckCircle, Search, RefreshCw, Download, Save, X } from './Icons';
+import { getPeruDateString, getPeruDayRangeISO } from '../utils';
 import * as XLSX from 'xlsx';
 
 interface ConciliationProps {
@@ -36,13 +37,13 @@ const Conciliation: React.FC<ConciliationProps> = ({ catalog, currentUser }) => 
             const { data: sysData } = await sysQuery;
             if (sysData) setSystemStock(sysData as SystemStock[]);
 
-            // Load Daily Counts (today) - Optimized columns
-            const today = new Date().toISOString().split('T')[0];
+            // Load Daily Counts (today in America/Lima)
+            const { peruDate, startISO, endISO } = getPeruDayRangeISO();
             let countQuery = supabase
                 .from('conteo_inventario')
                 .select('id, codigo, nombre, cantidad, fecha_vencimiento, zona, fecha_registro')
-                .gte('fecha_registro', `${today}T00:00:00`)
-                .lte('fecha_registro', `${today}T23:59:59`);
+                .gte('fecha_registro', startISO)
+                .lte('fecha_registro', endISO);
             
             if (currentUser?.sede_id) {
                 countQuery = countQuery.eq('sede_id', currentUser.sede_id);
@@ -55,7 +56,7 @@ const Conciliation: React.FC<ConciliationProps> = ({ catalog, currentUser }) => 
             let dateQuery = supabase
                 .from('historial_diferencias')
                 .select('fecha')
-                .lt('fecha', today)
+                .lt('fecha', peruDate)
                 .order('fecha', { ascending: false })
                 .limit(1);
             
@@ -137,28 +138,50 @@ const Conciliation: React.FC<ConciliationProps> = ({ catalog, currentUser }) => 
                 const ws = wb.Sheets[wsname];
                 const data = XLSX.utils.sheet_to_json(ws) as any[];
 
-                const mapped: SystemStock[] = data.map(row => {
-                    const codigo = String(row.codigo || row.Codigo || row.CODE || '').trim();
-                    const cantidad = parseFloat(row.cantidad || row.Cantidad || row.stock_dia || row.Stock || row.QTY || row.stock_sistema || '0');
-                    const costo = parseFloat(row.costo || row.Costo || 0);
-                    
-                    let movimiento: number | undefined = undefined;
-                    const movRaw = row.movimiento !== undefined ? row.movimiento : row.Movimiento;
-                    if (movRaw !== undefined && movRaw !== null && movRaw !== '') {
-                        movimiento = parseFloat(movRaw);
+                // Consolidate rows by codigo to avoid unique constraint violations
+                const consolidatedMap = new Map<string, SystemStock>();
+
+                data.forEach(row => {
+                    // Normalize keys: lowercase and trim spaces
+                    const normalizedRow: any = {};
+                    Object.keys(row).forEach(key => {
+                        normalizedRow[key.toLowerCase().trim()] = row[key];
+                    });
+
+                    const codigo = String(normalizedRow.codigo || normalizedRow.code || normalizedRow.sku || '').trim();
+                    if (!codigo) return;
+
+                    const cantidadRaw = normalizedRow.cantidad ?? normalizedRow['stock del día'] ?? normalizedRow['stock del dia'] ?? normalizedRow['stock_dia'] ?? normalizedRow.stock ?? normalizedRow.qty ?? normalizedRow.stock_sistema ?? 0;
+                    const cantidad = isNaN(parseFloat(cantidadRaw)) ? 0 : parseFloat(cantidadRaw);
+
+                    const costoRaw = normalizedRow.costo ?? normalizedRow.price ?? normalizedRow.cost ?? 0;
+                    const costo = isNaN(parseFloat(costoRaw)) ? 0 : parseFloat(costoRaw);
+
+                    const movRaw = normalizedRow.movimiento ?? normalizedRow.movement;
+                    const movimiento = (movRaw !== undefined && movRaw !== null && movRaw !== '') && !isNaN(parseFloat(movRaw)) ? parseFloat(movRaw) : undefined;
+
+                    if (consolidatedMap.has(codigo)) {
+                        const existing = consolidatedMap.get(codigo)!;
+                        existing.cantidad += cantidad;
+                        if (costo > 0) existing.costo = costo;
+                        if (movimiento !== undefined) {
+                            existing.movimiento = (existing.movimiento || 0) + movimiento;
+                        }
+                    } else {
+                        consolidatedMap.set(codigo, {
+                            codigo,
+                            cantidad,
+                            costo,
+                            ...(movimiento !== undefined ? { movimiento } : {}),
+                            ...(currentUser?.sede_id ? { sede_id: currentUser.sede_id } : {})
+                        });
                     }
+                });
 
-                    return {
-                        codigo,
-                        cantidad,
-                        costo,
-                        movimiento,
-                        ...(currentUser?.sede_id ? { sede_id: currentUser.sede_id } : {})
-                    };
-                }).filter(item => item.codigo !== '');
+                const consolidatedList = Array.from(consolidatedMap.values());
 
-                if (mapped.length === 0) {
-                    throw new Error("No se encontraron registros válidos en el archivo. Las columnas requeridas son 'codigo' y 'stock_dia'.");
+                if (consolidatedList.length === 0) {
+                    throw new Error("No se encontraron registros válidos en el archivo. Las columnas requeridas son 'codigo' y 'stock_dia' (o 'stock del día').");
                 }
 
                 // Clear old system stock
@@ -168,18 +191,31 @@ const Conciliation: React.FC<ConciliationProps> = ({ catalog, currentUser }) => 
                 }
                 await delQuery.neq('codigo', '_EMPTY_');
                 
-                // Resilient insertion
-                const { error } = await supabase.from('stock_sistema').insert(mapped);
-                if (error) {
-                    console.warn("DB insert error with 'movimiento' column, trying fallback without it:", error);
-                    const fallbackMapped = mapped.map(({ movimiento, ...rest }) => rest);
-                    const { error: fallbackError } = await supabase.from('stock_sistema').insert(fallbackMapped);
-                    if (fallbackError) throw fallbackError;
+                // Resilient batch upsert
+                const chunkSize = 500;
+                let hadMovimientoFallback = false;
 
-                    setSystemStock(mapped);
+                for (let i = 0; i < consolidatedList.length; i += chunkSize) {
+                    const chunk = consolidatedList.slice(i, i + chunkSize);
+                    const { error } = await supabase
+                        .from('stock_sistema')
+                        .upsert(chunk, { onConflict: 'codigo' });
+
+                    if (error) {
+                        console.warn("DB upsert error with 'movimiento' column, trying fallback without it:", error);
+                        const fallbackChunk = chunk.map(({ movimiento, ...rest }) => rest);
+                        const { error: fallbackError } = await supabase
+                            .from('stock_sistema')
+                            .upsert(fallbackChunk, { onConflict: 'codigo' });
+                        if (fallbackError) throw fallbackError;
+                        hadMovimientoFallback = true;
+                    }
+                }
+
+                setSystemStock(consolidatedList);
+                if (hadMovimientoFallback) {
                     setSuccessMsg("Stock guardado. (Nota: los movimientos se muestran en pantalla, para guardarlos permanentemente configure la columna 'movimiento' numeric en su BD).");
                 } else {
-                    setSystemStock(mapped);
                     setSuccessMsg("Stock del sistema cargado y guardado correctamente.");
                 }
 
@@ -212,16 +248,16 @@ const Conciliation: React.FC<ConciliationProps> = ({ catalog, currentUser }) => 
         setShowConfirmModal(false);
 
         try {
-            const today = new Date().toISOString().split('T')[0];
+            const today = getPeruDateString();
             const historyRecords = allData
-                .filter(item => item.systemQty > 0 || item.countedQty > 0 || item.diff !== 0)
+                .filter(item => Number(item.systemQty || 0) > 0 || Number(item.countedQty || 0) > 0 || Number(item.diff || 0) !== 0)
                 .map(item => ({
                     fecha: today,
                     codigo: item.codigo,
                     nombre: item.nombre,
-                    stock_sistema: item.systemQty,
-                    conteo_fisico: item.countedQty,
-                    diferencia: item.diff,
+                    stock_sistema: Number(item.systemQty || 0),
+                    conteo_fisico: Number(item.countedQty || 0),
+                    diferencia: Number(item.diff || 0),
                     procesado_por: currentUser?.nombre || 'Admin', // Use authenticated user
                     fecha_procesado: new Date().toISOString(),
                     ...(currentUser?.sede_id ? { sede_id: currentUser.sede_id } : {})
@@ -263,22 +299,24 @@ const Conciliation: React.FC<ConciliationProps> = ({ catalog, currentUser }) => 
     // Merge everything
     const getConciliationData = () => {
         const allCodes = new Set([
-            ...systemStock.map(s => s.codigo),
+            ...systemStock.map(s => (s.codigo || '').trim()),
             ...Object.keys(groupedCounts)
         ]);
 
-        return Array.from(allCodes).map(code => {
-            const sys = systemStock.find(s => s.codigo === code);
-            const counted = groupedCounts[code] || 0;
-            const product = catalog.find(p => p.codigo === code);
+        return Array.from(allCodes).filter(Boolean).map(code => {
+            const cleanCode = code.trim();
+            const sys = systemStock.find(s => (s.codigo || '').trim().toLowerCase() === cleanCode.toLowerCase());
+            const counted = groupedCounts[cleanCode] || 0;
+            const product = catalog.find(p => (p.codigo || '').trim().toLowerCase() === cleanCode.toLowerCase());
+            const countRecord = dailyCounts.find(c => (c.codigo || '').trim().toLowerCase() === cleanCode.toLowerCase());
             
-            const systemQty = sys ? sys.cantidad : 0;
+            const systemQty = sys ? Number(sys.cantidad || 0) : 0;
             const diff = counted - systemQty;
             const needsRecount = Math.abs(diff) > 5;
 
             return {
-                codigo: code,
-                nombre: product?.nombre || 'N/A',
+                codigo: cleanCode,
+                nombre: product?.nombre || countRecord?.nombre || `Producto ${cleanCode}`,
                 categoria: product?.categoria || 'N/A',
                 marca: product?.marca || 'N/A',
                 zona: product?.zona_predeterminada || 'SECO',
@@ -286,7 +324,7 @@ const Conciliation: React.FC<ConciliationProps> = ({ catalog, currentUser }) => 
                 countedQty: counted,
                 movimiento: sys ? sys.movimiento : undefined,
                 diff,
-                lastDiff: lastDifferences[code],
+                lastDiff: lastDifferences[cleanCode],
                 needsRecount,
                 status: counted > 0 ? 'Contado' : 'Pendiente'
             };
@@ -380,7 +418,7 @@ const Conciliation: React.FC<ConciliationProps> = ({ catalog, currentUser }) => 
         const ws = XLSX.utils.json_to_sheet(data);
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, "Conciliación");
-        XLSX.writeFile(wb, `Conciliacion_${new Date().toISOString().split('T')[0]}.xlsx`);
+        XLSX.writeFile(wb, `Conciliacion_${getPeruDateString()}.xlsx`);
     };
 
     return (
