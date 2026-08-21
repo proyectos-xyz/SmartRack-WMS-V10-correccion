@@ -56,6 +56,7 @@ export const AlertMonitor: React.FC<AlertMonitorProps> = ({ currentUser, onLogou
   }, [currentUser]);
 
   const pendingAlerts = alerts.filter(a => {
+    if (a.estado === 'ELIMINADO') return false;
     if (a.estado !== undefined) {
       return a.estado === 'PENDIENTE';
     }
@@ -171,7 +172,8 @@ export const AlertMonitor: React.FC<AlertMonitorProps> = ({ currentUser, onLogou
     try {
       let query = supabase
         .from('alertas_recepcion')
-        .select('*');
+        .select('*')
+        .neq('estado', 'ELIMINADO');
       
       // Filter by branch if assigned
       if (currentUser?.sede_id) {

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { supabase } from '../supabaseClient';
-import { XCircle, CheckCircle2, AlertTriangle, Calendar, Ban, Award, Layers, Eye, Check, RefreshCw, Bell } from 'lucide-react';
+import { XCircle, CheckCircle2, AlertTriangle, Calendar, Ban, Award, Layers, Eye, Check, RefreshCw, Bell, Trash2 } from 'lucide-react';
 
 const parseTvuAlertDetails = (valorAlerta: string, fechaVencimiento?: string, fechaAlerta?: string) => {
   let tvuPercentage = '---';
@@ -92,6 +92,78 @@ export const AlertsReviewModal: React.FC<AlertsReviewModalProps> = ({
   const [editQtyInput, setEditQtyInput] = useState('');
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
+  // Deleting invalid / wrongly registered alerts
+  const [alertToDelete, setAlertToDelete] = useState<any | null>(null);
+  const [deleteReason, setDeleteReason] = useState('Mal registrado / Error de digitación');
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const handleConfirmDeleteAlert = async () => {
+    if (!alertToDelete) return;
+    setIsDeleting(true);
+    const alertId = alertToDelete.id;
+    const currentUserName = currentUser?.nombre || 'Administrador';
+    const reason = deleteReason.trim() || 'Alerta mal registrada / Eliminada';
+
+    // 1. Instantly remove from local state
+    setLocalAlerts(prev => prev.filter(a => a.id !== alertId));
+    setAlertToDelete(null);
+    setSelectedAlertForView(null);
+
+    // 2. Perform database update
+    try {
+      const updatePayload: any = {
+        estado: 'ELIMINADO',
+        recepcionado: true,
+        decision_por: currentUserName,
+        motivo_decision: reason,
+        fecha_decision: new Date().toISOString()
+      };
+
+      const { error } = await supabase
+        .from('alertas_recepcion')
+        .update(updatePayload)
+        .eq('id', alertId);
+
+      if (error) {
+        console.error("Error al actualizar alerta como ELIMINADO:", error);
+      }
+
+      // Also update any associated recepcion_productos so it never appears in reports
+      try {
+        let hasAlertaId = true;
+        try {
+          const { error: alertColErr } = await supabase.from('recepcion_productos').select('alerta_id').limit(1);
+          if (alertColErr && (alertColErr.code === 'PGRST100' || alertColErr.message?.includes('alerta_id'))) {
+            hasAlertaId = false;
+          }
+        } catch (_) {
+          hasAlertaId = false;
+        }
+
+        if (hasAlertaId) {
+          await supabase
+            .from('recepcion_productos')
+            .update({
+              estado: 'ELIMINADO',
+              observaciones: `Eliminado por ${currentUserName}: ${reason}`,
+              verificado_por: currentUserName,
+              fecha_verificacion: new Date().toISOString()
+            })
+            .eq('alerta_id', alertId);
+        }
+      } catch (errRec) {
+        console.warn("Error al actualizar recepcion_productos secundariamente:", errRec);
+      }
+
+      onRefresh();
+    } catch (err: any) {
+      console.error("Error al eliminar alerta:", err);
+      alert("Error al eliminar alerta: " + (err.message || 'Error desconocido'));
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   const handleSaveAlertEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingAlert) return;
@@ -169,6 +241,7 @@ export const AlertsReviewModal: React.FC<AlertsReviewModalProps> = ({
   if (!isOpen) return null;
 
   const pendingAlerts = localAlerts.filter(a => {
+    if (a.estado === 'ELIMINADO') return false;
     if (hasEstadoCol && a.estado !== undefined) {
       return a.estado === 'PENDIENTE';
     }
@@ -176,22 +249,24 @@ export const AlertsReviewModal: React.FC<AlertsReviewModalProps> = ({
   });
 
   const processedAlerts = localAlerts.filter(a => {
+    if (a.estado === 'ELIMINADO') return false;
     if (hasEstadoCol && a.estado !== undefined) {
       return a.estado === 'ACEPTADO' || a.estado === 'RECHAZADO';
     }
     return a.recepcionado;
   });
 
-  // Statistics calculation
-  const totalAlerts = localAlerts.length;
-  const totalAccepted = localAlerts.filter(a => {
+  // Statistics calculation (Strictly excludes ELIMINADO)
+  const activeAlerts = localAlerts.filter(a => a.estado !== 'ELIMINADO');
+  const totalAlerts = activeAlerts.length;
+  const totalAccepted = activeAlerts.filter(a => {
     if (hasEstadoCol && a.estado !== undefined) {
       return a.estado === 'ACEPTADO';
     }
     return a.recepcionado && a.autorizado_por;
   }).length;
 
-  const totalRejected = localAlerts.filter(a => {
+  const totalRejected = activeAlerts.filter(a => {
     if (hasEstadoCol && a.estado !== undefined) {
       return a.estado === 'RECHAZADO';
     }
@@ -203,7 +278,7 @@ export const AlertsReviewModal: React.FC<AlertsReviewModalProps> = ({
 
   // Supplier incident count
   const supplierIncidents: Record<string, number> = {};
-  localAlerts.forEach(a => {
+  activeAlerts.forEach(a => {
     const prov = a.proveedor || 'No especificado';
     supplierIncidents[prov] = (supplierIncidents[prov] || 0) + 1;
   });
@@ -760,7 +835,7 @@ export const AlertsReviewModal: React.FC<AlertsReviewModalProps> = ({
                               </button>
                             </td>
                             <td className="py-3 px-4 text-right whitespace-nowrap">
-                              <div className="flex justify-end gap-1.55">
+                              <div className="flex justify-end gap-1.5">
                                 <button
                                   type="button"
                                   onClick={() => {
@@ -798,6 +873,18 @@ export const AlertsReviewModal: React.FC<AlertsReviewModalProps> = ({
                                 >
                                   <Ban className="w-3 h-3" />
                                   Rechazar
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setAlertToDelete(alert);
+                                    setDeleteReason('Mal registrado / Error de digitación');
+                                  }}
+                                  className="px-2.5 py-1.5 bg-rose-700 hover:bg-rose-800 text-white text-[10px] font-black uppercase tracking-tight rounded-lg flex items-center gap-1 shadow-sm transition-all active:scale-95 cursor-pointer font-bold"
+                                  title="Eliminar alerta mal registrada (no se mostrará en reportes)"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  Eliminar
                                 </button>
                               </div>
                             </td>
@@ -1191,10 +1278,22 @@ export const AlertsReviewModal: React.FC<AlertsReviewModalProps> = ({
                       setAuthorizedByText('');
                       setDecisionReason('');
                     }}
-                    className="flex-1 py-2.5 bg-red-650 hover:bg-red-750 text-white font-black text-xs uppercase tracking-wider rounded-xl transition-all shadow-md flex items-center justify-center gap-1 cursor-pointer active:scale-95 bg-red-600 hover:bg-red-700"
+                    className="flex-1 py-2.5 bg-red-600 hover:bg-red-700 text-white font-black text-xs uppercase tracking-wider rounded-xl transition-all shadow-md flex items-center justify-center gap-1 cursor-pointer active:scale-95"
                   >
                     <Ban className="w-4 h-4" />
                     Rechazar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAlertToDelete(selectedAlertForView);
+                      setDeleteReason('Mal registrado / Error de digitación');
+                    }}
+                    className="flex-1 py-2.5 bg-rose-700 hover:bg-rose-800 text-white font-black text-xs uppercase tracking-wider rounded-xl transition-all shadow-md flex items-center justify-center gap-1 cursor-pointer active:scale-95"
+                    title="Eliminar alerta mal registrada"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Eliminar
                   </button>
                 </div>
 
@@ -1332,6 +1431,78 @@ export const AlertsReviewModal: React.FC<AlertsReviewModalProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* MODAL DE CONFIRMACIÓN PARA ELIMINAR ALERTA MAL REGISTRADA */}
+      {alertToDelete && (
+        <div className="fixed inset-0 z-[210] bg-black/75 backdrop-blur-sm flex justify-center items-center p-4 text-slate-800 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden p-6 space-y-4 border border-rose-150 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3 border-b border-slate-100 pb-3">
+              <div className="p-3 bg-rose-100 text-rose-600 rounded-2xl">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black uppercase text-slate-900">Eliminar Alerta Mal Registrada</h3>
+                <p className="text-[11px] text-slate-500 font-semibold">Esta alerta quedará en estado <strong>ELIMINADO</strong> y no aparecerá en ningún reporte ni historial.</p>
+              </div>
+            </div>
+
+            <div className="bg-rose-50/80 border border-rose-200/70 rounded-2xl p-3.5 space-y-2 text-xs">
+              <div className="flex justify-between items-center text-[11px]">
+                <span className="text-slate-500 font-bold uppercase">Producto:</span>
+                <span className="font-extrabold text-slate-900 truncate max-w-[220px]">{alertToDelete.nombre || alertToDelete.producto_nombre || '---'}</span>
+              </div>
+              <div className="flex justify-between items-center text-[11px]">
+                <span className="text-slate-500 font-bold uppercase">SKU / Código:</span>
+                <span className="font-mono font-black text-rose-700 bg-rose-100/70 px-2 py-0.5 rounded-lg">{alertToDelete.codigo || '---'}</span>
+              </div>
+              <div className="flex justify-between items-center text-[11px]">
+                <span className="text-slate-500 font-bold uppercase">Cantidad:</span>
+                <span className="font-extrabold text-slate-800">{alertToDelete.cantidad !== undefined && alertToDelete.cantidad !== null ? `${alertToDelete.cantidad} un.` : '---'}</span>
+              </div>
+              <div className="flex justify-between items-center text-[11px]">
+                <span className="text-slate-500 font-bold uppercase">Operador:</span>
+                <span className="font-bold text-slate-700">{alertToDelete.usuario_registro || 'Desconocido'}</span>
+              </div>
+              {alertToDelete.fecha_vencimiento_llegada && (
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="text-slate-500 font-bold uppercase">Vencimiento:</span>
+                  <span className="font-bold text-slate-700">{alertToDelete.fecha_vencimiento_llegada.slice(0, 10)}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Motivo de Eliminación:*</label>
+              <input
+                type="text"
+                value={deleteReason}
+                onChange={(e) => setDeleteReason(e.target.value)}
+                placeholder="Ej. Registro duplicado, error de digitación, prueba..."
+                className="w-full px-3.5 py-2.5 bg-slate-100 border border-slate-200 rounded-xl text-xs font-bold focus:border-rose-500 outline-none text-slate-800"
+              />
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={handleConfirmDeleteAlert}
+                className="flex-1 py-3 text-xs font-black text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow-md transition-all uppercase cursor-pointer active:scale-[0.97] flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                <Trash2 className="w-4 h-4" />
+                {isDeleting ? 'Eliminando...' : 'Sí, Eliminar Registro'}
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setAlertToDelete(null)}
+                className="px-4 py-3 text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl transition-colors cursor-pointer"
+              >
+                Cancelar
+              </button>
+            </div>
           </div>
         </div>
       )}

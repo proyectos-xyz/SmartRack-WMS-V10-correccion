@@ -447,6 +447,7 @@ const App: React.FC = () => {
   const [showAlertsReviewModal, setShowAlertsReviewModal] = useState(false);
 
   const receptionsAlertsCount = receptionsAlerts.filter((a: any) => {
+    if (a.estado === 'ELIMINADO') return false;
     if (a.estado !== undefined) {
       return a.estado === 'PENDIENTE';
     }
@@ -1014,7 +1015,8 @@ const App: React.FC = () => {
     try {
       let query = supabase
         .from('alertas_recepcion')
-        .select('*');
+        .select('*')
+        .neq('estado', 'ELIMINADO');
       
       // Filter by branch only if user is NOT an ADMIN
       if (currentUser.rol !== 'ADMIN') {

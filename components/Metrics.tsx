@@ -18,7 +18,8 @@ const Metrics: React.FC = () => {
         setLoading(true);
         const { data, error } = await supabase
             .from('alertas_recepcion')
-            .select('*');
+            .select('*')
+            .neq('estado', 'ELIMINADO');
         if (!error && data) {
             setAlerts(data);
         }

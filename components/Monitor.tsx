@@ -110,7 +110,8 @@ const Monitor: React.FC = () => {
         try {
             let query = supabase
                 .from('alertas_recepcion')
-                .select('*');
+                .select('*')
+                .neq('estado', 'ELIMINADO');
             
             const sedeId = currentUser?.sede_id;
             if (sedeId) {
