@@ -182,7 +182,7 @@ export interface MixedItem {
     unitOfMeasure?: string;
 }
 
-export type EstadoLPN = 'PENDIENTE' | 'GENERADO' | 'CROSS' | 'ELIMINADO' | 'UBICADO';
+export type EstadoLPN = 'PENDIENTE' | 'GENERADO' | 'CROSS' | 'ELIMINADO' | 'UBICADO' | 'RESERVA' | 'PICKING';
 
 export interface Pallet {
   lpn: string; 
@@ -312,7 +312,8 @@ export enum ViewState {
   ALERT_MONITOR = 'ALERT_MONITOR',
   PENDIENTES = 'PENDIENTES',
   EXPIRATIONS = 'EXPIRATIONS',
-  SALIDAS_LPN = 'SALIDAS_LPN'
+  SALIDAS_LPN = 'SALIDAS_LPN',
+  MOVIMIENTOS_LPN = 'MOVIMIENTOS_LPN'
 }
 
 export interface Cliente {

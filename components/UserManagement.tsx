@@ -369,6 +369,8 @@ const UserManagement: React.FC<UserManagementProps> = ({ currentUser, onUpdateCu
                 { key: ViewState.RECEPTION_VALIDATE, label: 'Validar Ingreso' },
                 { key: ViewState.DISPATCH_PROVINCE, label: 'Despachos' },
                 { key: ViewState.REVERSE_LOGISTICS, label: 'Logíst. Inversa' },
+                { key: ViewState.SALIDAS_LPN, label: 'Salidas LPN' },
+                { key: ViewState.MOVIMIENTOS_LPN, label: 'Mover LPN / Picking' },
                 { key: ViewState.CORTES, label: 'Cortes' }
             ]
         },

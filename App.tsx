@@ -35,8 +35,9 @@ import { AlertMonitor } from './components/AlertMonitor';
 import { Expirations } from './components/Expirations';
 import { EnsayosPicking } from './components/EnsayosPicking';
 import SalidasLpn from './components/SalidasLpn';
+import { MovimientosLpn } from './components/MovimientosLpn';
 import { InventoryItem, Rack, Zone, ViewState, Slot, RackLocation, Product, Task, Usuario, StocktakeRecord, ZoneType } from './types';
-import { LayoutGrid, ArrowDownToLine, Settings, ClipboardList, Database, Beaker, Tag, Truck, ListChecks, Menu, XCircle, Sun, Moon, RefreshCw, ChevronRight, User, Upload, History as HistoryIcon, Monitor as MonitorIcon, Scale, Trash2, FileCheck, ChevronUp, ChevronDown, Package, TrendingUp, Building2, Bell, Printer, CheckCircle, Clock, LogOut } from './components/Icons';
+import { LayoutGrid, ArrowDownToLine, Settings, ClipboardList, Database, Beaker, Tag, Truck, ListChecks, Menu, XCircle, Sun, Moon, RefreshCw, ChevronRight, User, Upload, History as HistoryIcon, Monitor as MonitorIcon, Scale, Trash2, FileCheck, ChevronUp, ChevronDown, Package, TrendingUp, Building2, Bell, Printer, CheckCircle, Clock, LogOut, Layers } from './components/Icons';
 import { supabase } from './supabaseClient';
 
 const LOGO_URL = 'https://iili.io/fsmAapV.png';
@@ -652,7 +653,7 @@ const App: React.FC = () => {
           to = 999;
           hasMore = true;
           // Only columns needed for the inventory list
-          const invColumns = 'lpn, producto_id, cantidad_total, fecha_vencimiento_critica, fecha_recepcion, recibido_por, es_mixto, ubicacion_id, generado, estado_lpn, ubicaciones(id, nivel, posicion, estantes(id, pasillo))';
+          const invColumns = 'lpn, producto_id, cantidad_total, fecha_vencimiento_critica, fecha_recepcion, recibido_por, es_mixto, ubicacion_id, generado, estado_lpn, tipo, ubicaciones(id, nivel, posicion, estantes(id, pasillo))';
 
           while (hasMore) {
               const { data: invData, error: invError } = await supabase
@@ -728,7 +729,8 @@ const App: React.FC = () => {
                           generado: (d as any).generado,
                           fecha_generado: (d as any).fecha_generado,
                           usuario_generado: (d as any).usuario_generado,
-                          estado_lpn: (d as any).estado_lpn || ((d as any).generado ? 'GENERADO' : 'PENDIENTE')
+                          estado_lpn: (d as any).estado_lpn || ((d as any).generado ? 'GENERADO' : 'PENDIENTE'),
+                          tipo: (d as any).tipo || ((d as any).generado ? 'GENERADO' : 'RECEPCION')
                       };
                   });
                   allInv = [...allInv, ...mappedInv];
@@ -1671,6 +1673,7 @@ const App: React.FC = () => {
         },
         { view: ViewState.DISPATCH_PROVINCE, icon: <Truck className="w-5 h-5" />, label: "Despachos Provincia" },
         { view: ViewState.SALIDAS_LPN, icon: <LogOut className="w-5 h-5 text-amber-600 dark:text-amber-400" />, label: "Salidas LPN" },
+        { view: ViewState.MOVIMIENTOS_LPN, icon: <Layers className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />, label: "Mover LPN / Picking" },
         { view: ViewState.REVERSE_LOGISTICS, icon: <RefreshCw className="w-5 h-5" />, label: "Logíst. Inversa" },
         { view: ViewState.CORTES, icon: <ClipboardList className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />, label: "Cortes" },
       ]
@@ -2120,9 +2123,9 @@ const App: React.FC = () => {
                     {view === ViewState.RECEPTION && <Reception 
                         onReceive={handleReceive} 
                         lastMixedSequence={mixedSequenceCounter} 
-                        pendingItems={inventory.filter(i => !i.location && i.tipo !== 'GENERADO')} 
+                        pendingItems={inventory.filter(i => !i.location && i.tipo !== 'GENERADO' && !i.generado)} 
                         catalog={catalog} 
-                        currentInventory={inventory.filter(i => i.tipo !== 'GENERADO')} 
+                        currentInventory={inventory.filter(i => i.tipo !== 'GENERADO' && !i.generado)} 
                         onDeleteItems={async (lpns) => {
                             setInventory(inventory.filter(i => !lpns.includes(i.lpn)));
                             try {
@@ -2161,7 +2164,7 @@ const App: React.FC = () => {
                         }} 
                     />}
 
-                    {view === ViewState.RECEPTION_VALIDATE && <Reception onReceive={handleReceive} lastMixedSequence={mixedSequenceCounter} pendingItems={inventory.filter(i => !i.location && i.tipo !== 'GENERADO')} catalog={catalog} currentInventory={inventory.filter(i => i.tipo !== 'GENERADO')} onDeleteItems={async (lpns) => {
+                    {view === ViewState.RECEPTION_VALIDATE && <Reception onReceive={handleReceive} lastMixedSequence={mixedSequenceCounter} pendingItems={inventory.filter(i => !i.location && i.tipo !== 'GENERADO' && !i.generado)} catalog={catalog} currentInventory={inventory.filter(i => i.tipo !== 'GENERADO' && !i.generado)} onDeleteItems={async (lpns) => {
                         setInventory(inventory.filter(i => !lpns.includes(i.lpn)));
                         try {
                             await supabase.from('paletas_lpn').update({ estado: 'ELIMINADO', estado_lpn: 'ELIMINADO' }).in('lpn', lpns);
@@ -2180,6 +2183,7 @@ const App: React.FC = () => {
                     {view === ViewState.LAYOUT && <Layout inventory={inventory} catalog={catalog} racks={racks} zones={zones} onAssignLocation={(lpn, loc) => handleAssignLocation(lpn, loc)} onDispatch={(lpn) => handleDispatch(lpn)} onReceive={handleReceive} itemsPendingLocation={inventory.filter(i => !i.location)} lastMixedSequence={mixedSequenceCounter} lastSequence={sequenceCounter} />}
                     {view === ViewState.DISPATCH_PROVINCE && <DispatchProvince catalog={catalog} user={currentUser} />}
                     {view === ViewState.SALIDAS_LPN && <SalidasLpn inventory={inventory} catalog={catalog} currentUser={currentUser} onDispatch={handleDispatch} onRefresh={loadInitialData} />}
+                    {view === ViewState.MOVIMIENTOS_LPN && <MovimientosLpn inventory={inventory} catalog={catalog} racks={racks} currentUser={currentUser} onAssignLocation={handleAssignLocation} onRefresh={loadInitialData} />}
                     {view === ViewState.PICKING && <AfternoonCar catalog={catalog} user={currentUser} initialViewMode="CARGA" />}
                     {view === ViewState.VALIDADOR && <AfternoonCar catalog={catalog} user={currentUser} initialViewMode="VALIDADOR" />}
                     {view === ViewState.PICKING_CONTROL && <AfternoonMonitor onClose={() => setView(ViewState.PICKING)} />}

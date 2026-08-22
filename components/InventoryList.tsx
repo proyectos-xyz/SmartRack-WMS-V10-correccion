@@ -32,6 +32,56 @@ const MONTH_OPTIONS = [
   { value: '12', label: '12-DIC' },
 ];
 
+// Helper for robust date parsing (prevents timezone 1-day rollback)
+const parseDate = (dateStr: any): Date | null => {
+  if (!dateStr) return null;
+  if (dateStr instanceof Date) return dateStr;
+  if (typeof dateStr !== 'string') return null;
+  
+  const trimmed = dateStr.trim();
+  if (!trimmed || ['ROTO', 'REMAR', 'DESTRUCCION', 'CORTE', 'POR_REVISAR', 'N/A'].includes(trimmed)) return null;
+
+  let exp: Date | null = null;
+
+  // Try YYYY-MM-DD (e.g. "2026-08-10")
+  if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) {
+      const parts = trimmed.split(/[- : T]/);
+      const year = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10);
+      const day = parseInt(parts[2], 10);
+      if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+          exp = new Date(year, month - 1, day, 12, 0, 0);
+      }
+  } 
+  // Try DD/MM/YYYY
+  else if (/^\d{2}\/\d{2}\/\d{4}/.test(trimmed)) {
+      const parts = trimmed.split(/[\/ :]/);
+      const day = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10);
+      const year = parseInt(parts[2], 10);
+      if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+          exp = new Date(year, month - 1, day, 12, 0, 0);
+      }
+  }
+  // Try DD-MM-YYYY
+  else if (/^\d{2}-\d{2}-\d{4}/.test(trimmed)) {
+      const parts = trimmed.split(/[- :]/);
+      const day = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10);
+      const year = parseInt(parts[2], 10);
+      if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+          exp = new Date(year, month - 1, day, 12, 0, 0);
+      }
+  }
+
+  if (exp && !isNaN(exp.getTime())) return exp;
+
+  // Fallback for full ISO strings or uncommon formats
+  const fallback = new Date(trimmed);
+  if (!isNaN(fallback.getTime())) return fallback;
+  return null;
+};
+
 const InventoryList: React.FC<InventoryListProps> = ({ 
     inventory, 
     onUpdateItem,
@@ -87,6 +137,8 @@ const InventoryList: React.FC<InventoryListProps> = ({
   const [sessionHistory, setSessionHistory] = useState<StocktakeRecord[]>([]);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [expiryWarning, setExpiryWarning] = useState<string | null>(null);
+  const [receptionExpiries, setReceptionExpiries] = useState<string[]>([]);
+  const [isLoadingReceptionExpiries, setIsLoadingReceptionExpiries] = useState(false);
   const [fastScanMode, setFastScanMode] = useState(false);
 
   // Download Modal State
@@ -213,7 +265,172 @@ const InventoryList: React.FC<InventoryListProps> = ({
       .reduce((sum, item) => sum + (Number(item.cantidad) || 0), 0);
   }, [countProduct, todayCounts]);
 
-  // Fetch recent expiration dates registered in the last 2 weeks for countProduct
+  // Fetch all reception expiration dates for countProduct to validate against reception history
+  useEffect(() => {
+    if (!countProduct?.codigo) {
+      setReceptionExpiries([]);
+      return;
+    }
+
+    let isMounted = true;
+    const fetchReceptionDates = async () => {
+      setIsLoadingReceptionExpiries(true);
+      try {
+        let query = supabase
+          .from('recepcion_productos')
+          .select('fecha_vencimiento, estado')
+          .or(`codigo.eq.${countProduct.codigo}${countProduct.sku ? `,codigo.eq.${countProduct.sku}` : ''}`)
+          .neq('estado', 'ELIMINADO');
+
+        if (currentUser?.sede_id) {
+          query = query.eq('sede_id', currentUser.sede_id);
+        }
+
+        const { data, error } = await query;
+        if (!error && data && isMounted) {
+          const datesSet = new Set<string>();
+          data.forEach((r: any) => {
+            if (r.fecha_vencimiento && !['ROTO', 'REMAR', 'DESTRUCCION', 'N/A', 'CORTE', 'POR_REVISAR'].includes(r.fecha_vencimiento)) {
+              const parsed = parseDate(r.fecha_vencimiento);
+              if (parsed) {
+                const y = parsed.getFullYear();
+                const m = String(parsed.getMonth() + 1).padStart(2, '0');
+                const d = String(parsed.getDate()).padStart(2, '0');
+                datesSet.add(`${y}-${m}-${d}`);
+              }
+            }
+          });
+          setReceptionExpiries(Array.from(datesSet));
+        }
+      } catch (err) {
+        console.error("Error al consultar recepciones para validación de inventario:", err);
+      } finally {
+        if (isMounted) setIsLoadingReceptionExpiries(false);
+      }
+    };
+
+    fetchReceptionDates();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [countProduct, currentUser?.sede_id]);
+
+  // Real-time validation of TVU (>100%) and match with reception dates
+  const dateValidation = useMemo(() => {
+    if (!countProduct || !countDate) {
+      return {
+        isExceededTvu: false,
+        tvuPercentage: 0,
+        diffDays: 0,
+        maxDays: 0,
+        notInReception: false,
+        isConditionStatus: false,
+        formattedDate: ''
+      };
+    }
+
+    if (['ROTO', 'REMAR', 'DESTRUCCION', 'CORTE', 'POR_REVISAR'].includes(countDate)) {
+      return {
+        isExceededTvu: false,
+        tvuPercentage: 0,
+        diffDays: 0,
+        maxDays: 0,
+        notInReception: false,
+        isConditionStatus: true,
+        formattedDate: countDate
+      };
+    }
+
+    const parsed = parseDate(countDate);
+    if (!parsed || isNaN(parsed.getTime())) {
+      return {
+        isExceededTvu: false,
+        tvuPercentage: 0,
+        diffDays: 0,
+        maxDays: 0,
+        notInReception: false,
+        isConditionStatus: false,
+        formattedDate: countDate
+      };
+    }
+
+    const day = String(parsed.getDate()).padStart(2, '0');
+    const month = String(parsed.getMonth() + 1).padStart(2, '0');
+    const year = parsed.getFullYear();
+    const ymd = `${year}-${month}-${day}`;
+    const formattedDisplay = `${day}/${month}/${year}`;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const diffTime = parsed.getTime() - today.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    const maxDays = countProduct.vida_util_dias || 0;
+
+    let isExceededTvu = false;
+    let tvuPercentage = 0;
+
+    if (maxDays > 0) {
+      tvuPercentage = Math.round((diffDays / maxDays) * 100);
+      if (diffDays > maxDays) {
+        isExceededTvu = true;
+      }
+    }
+
+    // Validate whether the expiration date entered was ever in reception
+    let notInReception = false;
+    if (!isExceededTvu && !isLoadingReceptionExpiries) {
+      if (!receptionExpiries.includes(ymd)) {
+        notInReception = true;
+      }
+    }
+
+    return {
+      isExceededTvu,
+      tvuPercentage,
+      diffDays,
+      maxDays,
+      notInReception,
+      isConditionStatus: false,
+      formattedDate: formattedDisplay
+    };
+  }, [countProduct, countDate, receptionExpiries, isLoadingReceptionExpiries]);
+
+  // Validation for Edit Count Modal
+  const editingProductObj = useMemo(() => {
+    if (!editingCount) return null;
+    return catalog.find(p => p.codigo === editingCount.codigo || (p.sku && p.sku === editingCount.codigo)) || null;
+  }, [editingCount, catalog]);
+
+  const editDateValidation = useMemo(() => {
+    if (!editingProductObj || !editDate || ['ROTO', 'REMAR', 'DESTRUCCION', 'CORTE', 'POR_REVISAR'].includes(editDate)) {
+      return { isExceededTvu: false, diffDays: 0, maxDays: 0, tvuPercentage: 0, formattedDate: '' };
+    }
+    const parsed = parseDate(editDate);
+    if (!parsed || isNaN(parsed.getTime())) {
+      return { isExceededTvu: false, diffDays: 0, maxDays: 0, tvuPercentage: 0, formattedDate: '' };
+    }
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const diffTime = parsed.getTime() - today.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    const maxDays = editingProductObj.vida_util_dias || 0;
+    
+    if (maxDays > 0 && diffDays > maxDays) {
+      const day = String(parsed.getDate()).padStart(2, '0');
+      const month = String(parsed.getMonth() + 1).padStart(2, '0');
+      const year = parsed.getFullYear();
+      return {
+        isExceededTvu: true,
+        diffDays,
+        maxDays,
+        tvuPercentage: Math.round((diffDays / maxDays) * 100),
+        formattedDate: `${day}/${month}/${year}`
+      };
+    }
+    return { isExceededTvu: false, diffDays: 0, maxDays: 0, tvuPercentage: 0, formattedDate: '' };
+  }, [editingProductObj, editDate]);
   useEffect(() => {
     if (!countProduct?.codigo) {
       setRecentExpiries([]);
@@ -382,6 +599,11 @@ const InventoryList: React.FC<InventoryListProps> = ({
     e.preventDefault();
     if (!editingCount) return;
 
+    if (editDateValidation.isExceededTvu) {
+        alert(`⛔ LA FECHA QUE ESTA REGISTRANDO NO ES CORRECTA\n\nLa fecha seleccionada (${editDateValidation.formattedDate}) supera el 100% del TVU (${editDateValidation.diffDays} días restantes vs ${editDateValidation.maxDays} días de vida útil máxima - ${editDateValidation.tvuPercentage}% TVU).\n\nNo se permite registrar esta fecha.`);
+        return;
+    }
+
     try {
         const { error } = await supabase
             .from('conteo_inventario')
@@ -468,19 +690,13 @@ const InventoryList: React.FC<InventoryListProps> = ({
 
   // Check expiration immediately on input
   useEffect(() => {
-    if (countDate && !['ROTO', 'REMAR', 'DESTRUCCION'].includes(countDate)) {
+    if (countDate && !['ROTO', 'REMAR', 'DESTRUCCION', 'CORTE', 'POR_REVISAR'].includes(countDate)) {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         
-        let exp: Date;
-        if (/^\d{4}-\d{2}-\d{2}$/.test(countDate)) {
-            const [year, month, day] = countDate.split('-').map(Number);
-            exp = new Date(year, month - 1, day);
-        } else {
-            exp = new Date(countDate);
-        }
+        let exp: Date | null = parseDate(countDate);
 
-        if (!isNaN(exp.getTime())) {
+        if (exp && !isNaN(exp.getTime())) {
             const diffDays = Math.ceil((exp.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
             
             if (diffDays <= 5) {
@@ -495,56 +711,6 @@ const InventoryList: React.FC<InventoryListProps> = ({
         setExpiryWarning(null);
     }
   }, [countDate]);
-
-  // Helper for robust date parsing (prevents timezone 1-day rollback)
-  const parseDate = (dateStr: any): Date | null => {
-    if (!dateStr) return null;
-    if (dateStr instanceof Date) return dateStr;
-    if (typeof dateStr !== 'string') return null;
-    
-    const trimmed = dateStr.trim();
-    if (!trimmed || ['ROTO', 'REMAR', 'DESTRUCCION', 'N/A'].includes(trimmed)) return null;
-
-    let exp: Date | null = null;
-
-    // Try YYYY-MM-DD (e.g. "2026-08-10")
-    if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) {
-        const parts = trimmed.split(/[- : T]/);
-        const year = parseInt(parts[0], 10);
-        const month = parseInt(parts[1], 10);
-        const day = parseInt(parts[2], 10);
-        if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
-            exp = new Date(year, month - 1, day, 12, 0, 0);
-        }
-    } 
-    // Try DD/MM/YYYY
-    else if (/^\d{2}\/\d{2}\/\d{4}/.test(trimmed)) {
-        const parts = trimmed.split(/[\/ :]/);
-        const day = parseInt(parts[0], 10);
-        const month = parseInt(parts[1], 10);
-        const year = parseInt(parts[2], 10);
-        if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
-            exp = new Date(year, month - 1, day, 12, 0, 0);
-        }
-    }
-    // Try DD-MM-YYYY
-    else if (/^\d{2}-\d{2}-\d{4}/.test(trimmed)) {
-        const parts = trimmed.split(/[- :]/);
-        const day = parseInt(parts[0], 10);
-        const month = parseInt(parts[1], 10);
-        const year = parseInt(parts[2], 10);
-        if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
-            exp = new Date(year, month - 1, day, 12, 0, 0);
-        }
-    }
-
-    if (exp && !isNaN(exp.getTime())) return exp;
-
-    // Fallback for full ISO strings or uncommon formats
-    const fallback = new Date(trimmed);
-    if (!isNaN(fallback.getTime())) return fallback;
-    return null;
-  };
 
   // Calculate expiration status for list view
   const fetchExpiringSoon = async () => {
@@ -1034,6 +1200,12 @@ const InventoryList: React.FC<InventoryListProps> = ({
       
       if (totalQty <= 0) {
           alert("La cantidad total debe ser mayor a 0");
+          return;
+      }
+
+      // Validar si la fecha supera el 100% de TVU
+      if (dateValidation.isExceededTvu) {
+          alert(`⛔ LA FECHA QUE ESTA REGISTRANDO NO ES CORRECTA\n\nLa fecha seleccionada (${dateValidation.formattedDate}) supera el 100% de la vida útil del producto (${dateValidation.diffDays} días restantes vs ${dateValidation.maxDays} días de vida útil máxima - ${dateValidation.tvuPercentage}% TVU).\n\nNo se permite registrar esta fecha.`);
           return;
       }
 
@@ -3101,8 +3273,12 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                                         disabled={!!countStatus}
                                                         onClick={() => setShowDayModal(true)}
                                                         className={`w-full p-2.5 md:p-3 border rounded-xl text-sm md:text-base font-extrabold outline-none bg-white flex items-center justify-between transition-all cursor-pointer ${
-                                                            countDay ? 'text-blue-600 border-blue-500 bg-blue-50/20' : 'text-gray-700 border-gray-300 hover:border-blue-400'
-                                                        } ${expiryWarning ? 'border-red-500 ring-1 ring-red-100' : ''}`}
+                                                            dateValidation.isExceededTvu
+                                                                ? 'text-red-700 border-red-500 bg-red-50/50 ring-2 ring-red-200'
+                                                                : countDay 
+                                                                    ? 'text-blue-600 border-blue-500 bg-blue-50/20' 
+                                                                    : 'text-gray-700 border-gray-300 hover:border-blue-400'
+                                                        } ${expiryWarning && !dateValidation.isExceededTvu ? 'border-amber-500 ring-1 ring-amber-100' : ''}`}
                                                     >
                                                         <span>{countDay ? `DÍA: ${countDay}` : 'DIA'}</span>
                                                         <span className="text-xs text-gray-400">▼</span>
@@ -3113,8 +3289,12 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                                         disabled={!!countStatus}
                                                         onClick={() => setShowMonthModal(true)}
                                                         className={`w-full p-2.5 md:p-3 border rounded-xl text-sm md:text-base font-extrabold outline-none bg-white flex items-center justify-between transition-all cursor-pointer ${
-                                                            countMonth ? 'text-blue-600 border-blue-500 bg-blue-50/20' : 'text-gray-700 border-gray-300 hover:border-blue-400'
-                                                        } ${expiryWarning ? 'border-red-500 ring-1 ring-red-100' : ''}`}
+                                                            dateValidation.isExceededTvu
+                                                                ? 'text-red-700 border-red-500 bg-red-50/50 ring-2 ring-red-200'
+                                                                : countMonth 
+                                                                    ? 'text-blue-600 border-blue-500 bg-blue-50/20' 
+                                                                    : 'text-gray-700 border-gray-300 hover:border-blue-400'
+                                                        } ${expiryWarning && !dateValidation.isExceededTvu ? 'border-amber-500 ring-1 ring-amber-100' : ''}`}
                                                     >
                                                         <span>{countMonth ? (MONTH_OPTIONS.find(m => m.value === countMonth)?.label || countMonth) : 'MES'}</span>
                                                         <span className="text-xs text-gray-400">▼</span>
@@ -3127,7 +3307,13 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                                             type="button"
                                                             disabled={!!countStatus}
                                                             onClick={() => setCountYear(year.toString())}
-                                                            className={`flex-1 py-1.5 px-1 rounded-lg text-[10px] md:text-xs font-black transition-all border-2 ${countYear === year.toString() ? 'bg-blue-600 border-blue-600 text-white shadow-lg' : 'bg-white border-gray-200 text-gray-400 hover:border-blue-300'}`}
+                                                            className={`flex-1 py-1.5 px-1 rounded-lg text-[10px] md:text-xs font-black transition-all border-2 ${
+                                                                countYear === year.toString() 
+                                                                    ? dateValidation.isExceededTvu
+                                                                        ? 'bg-red-600 border-red-600 text-white shadow-lg shadow-red-200'
+                                                                        : 'bg-blue-600 border-blue-600 text-white shadow-lg' 
+                                                                    : 'bg-white border-gray-200 text-gray-400 hover:border-blue-300'
+                                                            }`}
                                                         >
                                                             {year}
                                                         </button>
@@ -3153,8 +3339,53 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                     </div>
                                 </div>
 
-                                {/* Expiration Alert */}
-                                {expiryWarning && (
+                                {/* ALERTA 1: FECHA SUPERA 100% TVU (BLOQUEANTE) */}
+                                {dateValidation.isExceededTvu && (
+                                    <div className="bg-red-50 border-2 border-red-500 text-red-900 p-3.5 md:p-4 rounded-2xl text-xs md:text-sm shadow-md flex items-start gap-3 animate-in fade-in duration-200">
+                                        <div className="p-2 bg-red-100 text-red-600 rounded-xl shrink-0 mt-0.5">
+                                            <XCircle className="w-6 h-6 animate-pulse" />
+                                        </div>
+                                        <div className="space-y-1">
+                                            <p className="font-black uppercase text-red-700 tracking-wide flex items-center gap-1.5">
+                                                <span>LA FECHA QUE ESTÁ REGISTRANDO NO ES CORRECTA</span>
+                                            </p>
+                                            <p className="font-semibold text-red-800 text-[11px] md:text-xs leading-relaxed">
+                                                La fecha <strong>{dateValidation.formattedDate}</strong> supera el <strong>100% del TVU</strong> ({dateValidation.diffDays} días restantes vs <strong>{dateValidation.maxDays} días</strong> de vida útil máxima del producto - <strong>{dateValidation.tvuPercentage}% TVU</strong>).
+                                            </p>
+                                            <p className="text-[10px] font-black text-red-600 uppercase tracking-tight">
+                                                ⛔ No se permite registrar esta fecha. Por favor corrija el día, mes o año.
+                                            </p>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* ALERTA 2: FECHA NO INGRESADA POR RECEPCIÓN (PERMISIVA) */}
+                                {!dateValidation.isExceededTvu && dateValidation.notInReception && countDate && (
+                                    <div className="bg-amber-50 border border-amber-400 text-amber-950 p-3.5 md:p-4 rounded-2xl text-xs md:text-sm shadow-sm flex items-start gap-3 animate-in fade-in duration-200">
+                                        <div className="p-2 bg-amber-100 text-amber-700 rounded-xl shrink-0 mt-0.5">
+                                            <AlertTriangle className="w-6 h-6 text-amber-600" />
+                                        </div>
+                                        <div className="space-y-1 flex-1">
+                                            <div className="flex items-center justify-between">
+                                                <p className="font-black uppercase text-amber-800 tracking-wide text-xs">
+                                                    ESTA FECHA NO HA SIDO INGRESADA POR RECEPCIÓN
+                                                </p>
+                                                <span className="text-[9px] font-black uppercase px-2 py-0.5 bg-amber-200/70 text-amber-900 rounded-full">
+                                                    Aviso Informativo
+                                                </span>
+                                            </div>
+                                            <p className="font-medium text-amber-900 text-[11px] md:text-xs leading-relaxed">
+                                                La fecha <strong>{dateValidation.formattedDate}</strong> no coincide con ningún lote registrado previamente en el módulo de Recepción para este producto ({countProduct?.codigo}).
+                                            </p>
+                                            <p className="text-[10px] font-bold text-amber-700">
+                                                ✓ Se permite registrar el conteo si el producto se encuentra físicamente en almacén.
+                                            </p>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Expiration Alert (Próximo a Vencer <= 5 días) */}
+                                {!dateValidation.isExceededTvu && expiryWarning && (
                                     <div className="bg-red-100 border-2 border-red-500 text-red-900 p-3 md:p-4 rounded-lg text-xs md:text-sm shadow-md flex items-center gap-3">
                                         <AlertTriangle className="w-8 h-8 text-red-600 animate-bounce shrink-0" />
                                         <div>
@@ -3212,14 +3443,21 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                         </div>
                                      )}
                                      
-                                     <button 
-                                        type="submit" 
-                                        disabled={!countProduct}
-                                        className={`w-full bg-[#82BD02] hover:bg-[#74a902] text-white font-black py-4 md:py-5 rounded-2xl shadow-xl shadow-[#82BD02]/20 transform active:scale-[0.98] transition-all flex justify-center items-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed`}
-                                     >
-                                        <PlusCircle className="w-6 h-6"/>
-                                        GUARDAR
-                                     </button>
+                                     {dateValidation.isExceededTvu ? (
+                                         <div className="w-full bg-red-600 text-white font-black py-4 md:py-5 rounded-2xl shadow-xl shadow-red-500/20 flex justify-center items-center gap-2 cursor-not-allowed opacity-95 text-xs md:text-sm uppercase tracking-wider text-center px-4">
+                                             <XCircle className="w-6 h-6 shrink-0" />
+                                             <span>LA FECHA QUE ESTÁ REGISTRANDO NO ES CORRECTA</span>
+                                         </div>
+                                     ) : (
+                                         <button 
+                                            type="submit" 
+                                            disabled={!countProduct}
+                                            className={`w-full bg-[#82BD02] hover:bg-[#74a902] text-white font-black py-4 md:py-5 rounded-2xl shadow-xl shadow-[#82BD02]/20 transform active:scale-[0.98] transition-all flex justify-center items-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer`}
+                                         >
+                                            <PlusCircle className="w-6 h-6"/>
+                                            GUARDAR
+                                         </button>
+                                     )}
                                 </div>
                             </form>
                         </div>
@@ -3630,22 +3868,42 @@ const InventoryList: React.FC<InventoryListProps> = ({
                             <label className="text-xs font-black text-gray-400 uppercase tracking-widest block mb-1">Vencimiento</label>
                             <input 
                                 type="date" 
-                                className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl font-bold outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                className={`w-full p-3 bg-gray-50 border rounded-xl font-bold outline-none focus:ring-2 ${
+                                    editDateValidation.isExceededTvu 
+                                        ? 'border-red-500 text-red-700 bg-red-50/40 focus:ring-red-200' 
+                                        : 'border-gray-200 focus:border-blue-500 focus:ring-blue-100'
+                                }`}
                                 value={editDate}
                                 onChange={e => setEditDate(e.target.value)}
                             />
                         </div>
+                        {editDateValidation.isExceededTvu && (
+                            <div className="bg-red-50 border border-red-400 text-red-800 p-3 rounded-xl text-xs space-y-1">
+                                <p className="font-black uppercase flex items-center gap-1.5 text-red-700">
+                                    <XCircle className="w-4 h-4 text-red-600 shrink-0" />
+                                    LA FECHA QUE ESTÁ REGISTRANDO NO ES CORRECTA
+                                </p>
+                                <p className="text-[11px] leading-tight">
+                                    Supera el 100% del TVU ({editDateValidation.diffDays} días restantes vs {editDateValidation.maxDays} días de vida útil máxima). No se permite guardar.
+                                </p>
+                            </div>
+                        )}
                         <div className="pt-4 flex gap-3">
                             <button 
                                 type="button"
                                 onClick={() => setEditingCount(null)}
-                                className="flex-1 py-3 bg-gray-100 text-gray-500 font-bold rounded-xl hover:bg-gray-200 transition-all"
+                                className="flex-1 py-3 bg-gray-100 text-gray-500 font-bold rounded-xl hover:bg-gray-200 transition-all cursor-pointer"
                             >
                                 Cancelar
                             </button>
                             <button 
-                                type="submit"
-                                className="flex-1 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 shadow-lg shadow-blue-200 transition-all"
+                                type="submit" 
+                                disabled={editDateValidation.isExceededTvu}
+                                className={`flex-1 py-3 font-bold rounded-xl shadow-lg transition-all ${
+                                    editDateValidation.isExceededTvu
+                                        ? 'bg-red-400 text-white cursor-not-allowed opacity-70'
+                                        : 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-200 cursor-pointer'
+                                }`}
                             >
                                 Guardar Cambios
                             </button>

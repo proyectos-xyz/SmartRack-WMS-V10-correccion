@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { jsPDF } from 'jspdf';
 import { generateLPN, generateMixedLPN, formatDate, formatCompactDate } from '../utils';
 import { Pallet, InventoryItem, Product, MixedItem, Usuario, RackLocation } from '../types';
@@ -82,6 +82,11 @@ const Reception: React.FC<ReceptionProps> = ({
   const [manualLocation, setManualLocation] = useState('');
   const [scanBuffer, setScanBuffer] = useState('');
   const [locateStep, setLocateStep] = useState<'SCAN_LPN' | 'SCAN_LOC'>('SCAN_LPN');
+
+  // Strict Reception-Only Pending Items Filter (Excludes any rotulado/generado)
+  const receptionPendingItems: InventoryItem[] = useMemo(() => {
+    return pendingItems.filter((i: InventoryItem) => i.tipo !== 'GENERADO' && !i.generado);
+  }, [pendingItems]);
 
   // TVM Alert State
   const [alertType, setAlertType] = useState<'none' | 'rotation' | 'tvm' | 'both' | 'overstock' | 'tvu_over_100' | 'weekly_over_rotation'>('none');
@@ -1554,9 +1559,11 @@ const Reception: React.FC<ReceptionProps> = ({
                         estado_lpn: infoMap[r.lpn].estado_lpn
                     } : null
                 }));
-                setReceptionHistory(joinedData);
+                // Filter out any items that are rotulos (tipo === 'GENERADO')
+                const onlyReceptions = joinedData.filter(r => r.paletas_lpn?.tipo !== 'GENERADO' && r.tipo !== 'GENERADO');
+                setReceptionHistory(onlyReceptions);
             } else {
-                setReceptionHistory(historyData);
+                setReceptionHistory(historyData.filter(r => r.tipo !== 'GENERADO'));
             }
         } else {
             setReceptionHistory([]);
@@ -1734,9 +1741,10 @@ const Reception: React.FC<ReceptionProps> = ({
 
       // 3. Build comprehensive structured report data
       setExportProgress(88);
-      setExportStatusText(`Formateando ${historyData.length} filas para Excel...`);
+      const filteredHistoryData = historyData.filter(record => record.tipo !== 'GENERADO' && palletMap[record.lpn]?.tipo !== 'GENERADO');
+      setExportStatusText(`Formateando ${filteredHistoryData.length} filas para Excel...`);
 
-      const reportData = historyData.map(record => {
+      const reportData = filteredHistoryData.map(record => {
         const matchedProduct = catalog.find(p => p.id === record.producto_id || p.codigo === record.codigo);
         const totalLife = matchedProduct ? (matchedProduct.tvm_dias || matchedProduct.vida_util_dias || 0) : 0;
         
@@ -1956,7 +1964,7 @@ const Reception: React.FC<ReceptionProps> = ({
         if (!code) return;
 
         if (locateStep === 'SCAN_LPN') {
-          const item = pendingItems.find(i => i.lpn === code && (i.estado_lpn === 'GENERADO' || i.generado));
+          const item = receptionPendingItems.find(i => i.lpn === code && (i.estado_lpn === 'GENERADO' || (i as any).generado));
           if (item) {
             setLocatingLpn(code);
             setLocateStep('SCAN_LOC');
@@ -1974,7 +1982,7 @@ const Reception: React.FC<ReceptionProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeMobileTab, scanBuffer, locateStep, locatingLpn, pendingItems]);
+  }, [activeMobileTab, scanBuffer, locateStep, locatingLpn, receptionPendingItems]);
 
   const handleBulkGenerate = async () => {
     if (selectedLpns.size === 0 || !currentUser) return;
@@ -1985,7 +1993,7 @@ const Reception: React.FC<ReceptionProps> = ({
     const total = selectedLpns.size;
     let count = 0;
     
-    const selectedItems = pendingItems.filter(item => selectedLpns.has(item.lpn));
+    const selectedItems = receptionPendingItems.filter(item => selectedLpns.has(item.lpn));
     const now = new Date().toISOString();
     
     // Create PDF
@@ -2398,10 +2406,10 @@ const Reception: React.FC<ReceptionProps> = ({
       setShowConfirmModal({ ...showConfirmModal, show: false });
   };
 
-  // Paginate pending items helper
+  // Paginate pending items helper (Excludes all rotulos/generados)
   const currentPendingList = (activeMobileTab === 'LOCATE' 
-      ? pendingItems.filter(i => i.estado_lpn === 'GENERADO' && !i.location) 
-      : pendingItems.filter(i => i.estado_lpn === 'PENDIENTE')
+      ? receptionPendingItems.filter(i => (i.estado_lpn === 'GENERADO' || (i as any).generado) && !i.location) 
+      : receptionPendingItems.filter(i => i.estado_lpn === 'PENDIENTE')
   ).slice().sort((a, b) => {
       const dateA = a.receptionDate ? new Date(a.receptionDate).getTime() : 0;
       const dateB = b.receptionDate ? new Date(b.receptionDate).getTime() : 0;
@@ -2429,7 +2437,7 @@ const Reception: React.FC<ReceptionProps> = ({
          >
             <div className="flex items-center gap-1">
                 Pendientes
-                <span className="bg-orange-500 text-white text-[9px] px-1.5 py-0.5 rounded-full">{pendingItems.filter(i => i.estado_lpn === 'PENDIENTE').length}</span>
+                <span className="bg-orange-500 text-white text-[9px] px-1.5 py-0.5 rounded-full">{receptionPendingItems.filter(i => i.estado_lpn === 'PENDIENTE').length}</span>
             </div>
          </button>
          <button 
@@ -2438,7 +2446,7 @@ const Reception: React.FC<ReceptionProps> = ({
          >
             <div className="flex items-center gap-1">
                 Ubicar
-                <span className="bg-indigo-500 text-white text-[9px] px-1.5 py-0.5 rounded-full">{pendingItems.filter(i => i.estado_lpn === 'GENERADO').length}</span>
+                <span className="bg-indigo-500 text-white text-[9px] px-1.5 py-0.5 rounded-full">{receptionPendingItems.filter(i => (i.estado_lpn === 'GENERADO' || (i as any).generado) && !i.location).length}</span>
             </div>
          </button>
          <button 
@@ -3214,14 +3222,14 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                         className={`flex-1 py-2 text-[10px] font-black uppercase border-b-2 transition-all flex items-center justify-center gap-2 ${activeMobileTab === 'PENDING' ? 'border-orange-500 text-orange-600 bg-orange-50' : 'border-transparent text-gray-400 hover:text-gray-600'}`}
                     >
                         <ArrowDownToLine className="w-3 h-3"/>
-                        Pendientes ({pendingItems.filter(i => i.estado_lpn === 'PENDIENTE').length})
+                        Pendientes ({receptionPendingItems.filter(i => i.estado_lpn === 'PENDIENTE').length})
                     </button>
                     <button 
                         onClick={() => setActiveMobileTab('LOCATE')}
                         className={`flex-1 py-2 text-[10px] font-black uppercase border-b-2 transition-all flex items-center justify-center gap-2 ${activeMobileTab === 'LOCATE' ? 'border-indigo-500 text-indigo-600 bg-indigo-50' : 'border-transparent text-gray-400 hover:text-gray-600'}`}
                     >
                         <LayoutGrid className="w-3 h-3"/>
-                        Por Ubicar ({pendingItems.filter(i => i.estado_lpn === 'GENERADO' && !i.location).length})
+                        Por Ubicar ({receptionPendingItems.filter(i => (i.estado_lpn === 'GENERADO' || (i as any).generado) && !i.location).length})
                     </button>
                     <button 
                         onClick={() => setActiveMobileTab('HISTORY')}
@@ -3641,13 +3649,13 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                             className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
                             checked={
                                 (activeMobileTab === 'LOCATE' 
-                                    ? pendingItems.filter(i => i.estado_lpn === 'GENERADO').length > 0 && selectedLpns.size === pendingItems.filter(i => i.estado_lpn === 'GENERADO').length
-                                    : pendingItems.filter(i => i.estado_lpn === 'PENDIENTE').length > 0 && selectedLpns.size === pendingItems.filter(i => i.estado_lpn === 'PENDIENTE').length)
+                                    ? receptionPendingItems.filter(i => (i.estado_lpn === 'GENERADO' || (i as any).generado) && !i.location).length > 0 && selectedLpns.size === receptionPendingItems.filter(i => (i.estado_lpn === 'GENERADO' || (i as any).generado) && !i.location).length
+                                    : receptionPendingItems.filter(i => i.estado_lpn === 'PENDIENTE').length > 0 && selectedLpns.size === receptionPendingItems.filter(i => i.estado_lpn === 'PENDIENTE').length)
                             }
                             onChange={() => {
                                 const currentList = activeMobileTab === 'LOCATE' 
-                                    ? pendingItems.filter(i => i.estado_lpn === 'GENERADO')
-                                    : pendingItems.filter(i => i.estado_lpn === 'PENDIENTE');
+                                    ? receptionPendingItems.filter(i => (i.estado_lpn === 'GENERADO' || (i as any).generado) && !i.location)
+                                    : receptionPendingItems.filter(i => i.estado_lpn === 'PENDIENTE');
                                 
                                 if (selectedLpns.size === currentList.length && currentList.length > 0) {
                                     setSelectedLpns(new Set());
@@ -3662,7 +3670,7 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                 {activeMobileTab === 'LOCATE' ? 'Por Ubicar' : 'LPN'}
                             </h3>
                             <span className={`${activeMobileTab === 'LOCATE' ? 'bg-indigo-100 text-indigo-700' : 'bg-orange-100 text-orange-700'} px-2 py-0.5 rounded-full text-[10px] font-bold`}>
-                                {activeMobileTab === 'LOCATE' ? pendingItems.filter(i => i.estado_lpn === 'GENERADO').length : pendingItems.filter(i => i.estado_lpn === 'PENDIENTE').length}
+                                {activeMobileTab === 'LOCATE' ? receptionPendingItems.filter(i => (i.estado_lpn === 'GENERADO' || (i as any).generado) && !i.location).length : receptionPendingItems.filter(i => i.estado_lpn === 'PENDIENTE').length}
                             </span>
                         </div>
                     </div>
@@ -3735,7 +3743,7 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                 onKeyDown={(e) => {
                                     if (e.key === 'Enter' && manualLocation.trim()) {
                                         if (locateStep === 'SCAN_LPN') {
-                                            const item = pendingItems.find(i => i.lpn === manualLocation.trim() && (i.estado_lpn === 'GENERADO' || i.generado));
+                                            const item = receptionPendingItems.find(i => i.lpn === manualLocation.trim() && (i.estado_lpn === 'GENERADO' || (i as any).generado));
                                             if (item) {
                                                 setLocatingLpn(manualLocation.trim());
                                                 setLocateStep('SCAN_LOC');
@@ -3753,7 +3761,7 @@ ALTER TABLE public.alertas_recepcion ADD COLUMN IF NOT EXISTS decision_por TEXT;
                                 onClick={() => {
                                     if (manualLocation.trim()) {
                                         if (locateStep === 'SCAN_LPN') {
-                                            const item = pendingItems.find(i => i.lpn === manualLocation.trim() && (i.estado_lpn === 'GENERADO' || i.generado));
+                                            const item = receptionPendingItems.find(i => i.lpn === manualLocation.trim() && (i.estado_lpn === 'GENERADO' || (i as any).generado));
                                             if (item) {
                                                 setLocatingLpn(manualLocation.trim());
                                                 setLocateStep('SCAN_LOC');
