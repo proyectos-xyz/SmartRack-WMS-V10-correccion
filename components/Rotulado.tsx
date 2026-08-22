@@ -19,8 +19,58 @@ import {
   User, 
   Clock,
   RefreshCw,
-  MessageSquare
+  MessageSquare,
+  AlertTriangle
 } from './Icons';
+
+const MONTH_OPTIONS = [
+  { value: '1', label: '01 - ENE' },
+  { value: '2', label: '02 - FEB' },
+  { value: '3', label: '03 - MAR' },
+  { value: '4', label: '04 - ABR' },
+  { value: '5', label: '05 - MAY' },
+  { value: '6', label: '06 - JUN' },
+  { value: '7', label: '07 - JUL' },
+  { value: '8', label: '08 - AGO' },
+  { value: '9', label: '09 - SEP' },
+  { value: '10', label: '10 - OCT' },
+  { value: '11', label: '11 - NOV' },
+  { value: '12', label: '12 - DIC' },
+];
+
+const parseDate = (dateStr: any): Date | null => {
+  if (!dateStr) return null;
+  if (dateStr instanceof Date) return dateStr;
+  if (typeof dateStr !== 'string') return null;
+  
+  const trimmed = dateStr.trim();
+  if (!trimmed || ['ROTO', 'REMAR', 'DESTRUCCION', 'CORTE', 'POR_REVISAR', 'N/A'].includes(trimmed)) return null;
+
+  let exp: Date | null = null;
+
+  // Try YYYY-MM-DD (e.g. "2026-08-10")
+  if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) {
+      const parts = trimmed.split(/[- : T]/);
+      const year = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10);
+      const day = parseInt(parts[2], 10);
+      if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+          exp = new Date(year, month - 1, day, 12, 0, 0);
+      }
+  } 
+  // Try DD/MM/YYYY
+  else if (/^\d{2}\/\d{2}\/\d{4}/.test(trimmed)) {
+      const parts = trimmed.split(/[\/ :]/);
+      const day = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10);
+      const year = parseInt(parts[2], 10);
+      if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+          exp = new Date(year, month - 1, day, 12, 0, 0);
+      }
+  }
+
+  return exp;
+};
 
 interface RotuladoProps {
   catalog: Product[];
@@ -116,7 +166,159 @@ export const Rotulado: React.FC<RotuladoProps> = ({
   const [pallets, setPallets] = useState('');
   const [boxes, setBoxes] = useState('');
   const [units, setUnits] = useState('');
+  const [expDay, setExpDay] = useState('');
+  const [expMonth, setExpMonth] = useState('');
+  const [expYear, setExpYear] = useState('');
   const [expirationDate, setExpirationDate] = useState('');
+
+  // Reception Expiries for validation
+  const [receptionExpiries, setReceptionExpiries] = useState<string[]>([]);
+  const [isLoadingReceptionExpiries, setIsLoadingReceptionExpiries] = useState(false);
+
+  // Year options for dropdown
+  const yearOptions = useMemo(() => {
+    const currentYear = new Date().getFullYear();
+    return Array.from({ length: 12 }, (_, i) => currentYear - 1 + i);
+  }, []);
+
+  // Fetch reception expiration dates for selected product to validate
+  useEffect(() => {
+    if (!selectedProduct?.codigo) {
+      setReceptionExpiries([]);
+      return;
+    }
+
+    let isMounted = true;
+    const fetchReceptionDates = async () => {
+      setIsLoadingReceptionExpiries(true);
+      try {
+        let query = supabase
+          .from('recepcion_productos')
+          .select('fecha_vencimiento, estado')
+          .or(`codigo.eq.${selectedProduct.codigo}${selectedProduct.sku ? `,codigo.eq.${selectedProduct.sku}` : ''}`)
+          .neq('estado', 'ELIMINADO');
+
+        if (currentUser?.sede_id) {
+          query = query.eq('sede_id', currentUser.sede_id);
+        }
+
+        const { data, error } = await query;
+        if (!error && data && isMounted) {
+          const datesSet = new Set<string>();
+          data.forEach((r: any) => {
+            if (r.fecha_vencimiento && !['ROTO', 'REMAR', 'DESTRUCCION', 'N/A', 'CORTE', 'POR_REVISAR'].includes(r.fecha_vencimiento)) {
+              const parsed = parseDate(r.fecha_vencimiento);
+              if (parsed) {
+                const y = parsed.getFullYear();
+                const m = String(parsed.getMonth() + 1).padStart(2, '0');
+                const d = String(parsed.getDate()).padStart(2, '0');
+                datesSet.add(`${y}-${m}-${d}`);
+              }
+            }
+          });
+          setReceptionExpiries(Array.from(datesSet));
+        }
+      } catch (err) {
+        console.error("Error al consultar recepciones para validación de rotulado:", err);
+      } finally {
+        if (isMounted) setIsLoadingReceptionExpiries(false);
+      }
+    };
+
+    fetchReceptionDates();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedProduct, currentUser?.sede_id]);
+
+  // Real-time validation of TVU (>100%) and match with reception dates
+  const dateValidation = useMemo(() => {
+    if (!selectedProduct || !expirationDate) {
+      return {
+        isExceededTvu: false,
+        tvuPercentage: 0,
+        diffDays: 0,
+        maxDays: 0,
+        isExpired: false,
+        notInReception: false,
+        formattedDate: ''
+      };
+    }
+
+    const parsed = parseDate(expirationDate);
+    if (!parsed || isNaN(parsed.getTime())) {
+      return {
+        isExceededTvu: false,
+        tvuPercentage: 0,
+        diffDays: 0,
+        maxDays: 0,
+        isExpired: false,
+        notInReception: false,
+        formattedDate: expirationDate
+      };
+    }
+
+    const day = String(parsed.getDate()).padStart(2, '0');
+    const month = String(parsed.getMonth() + 1).padStart(2, '0');
+    const year = parsed.getFullYear();
+    const ymd = `${year}-${month}-${day}`;
+    const formattedDisplay = `${day}/${month}/${year}`;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const diffTime = parsed.getTime() - today.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    const maxDays = selectedProduct.vida_util_dias || selectedProduct.tvm_dias || 0;
+
+    let isExceededTvu = false;
+    let tvuPercentage = 0;
+    let isExpired = false;
+
+    if (diffDays < 0) {
+      isExpired = true;
+    }
+
+    if (maxDays > 0) {
+      tvuPercentage = Math.round((diffDays / maxDays) * 100);
+      if (diffDays > maxDays) {
+        isExceededTvu = true;
+      }
+    }
+
+    // Validate whether the expiration date entered was ever in reception
+    let notInReception = false;
+    if (!isExceededTvu && !isExpired && !isLoadingReceptionExpiries) {
+      if (!receptionExpiries.includes(ymd)) {
+        notInReception = true;
+      }
+    }
+
+    return {
+      isExceededTvu,
+      tvuPercentage,
+      diffDays,
+      maxDays,
+      isExpired,
+      notInReception,
+      formattedDate: formattedDisplay
+    };
+  }, [selectedProduct, expirationDate, receptionExpiries, isLoadingReceptionExpiries]);
+
+  // Handle dropdown date changes
+  const handleDateSelectChange = (day: string, month: string, year: string) => {
+    setExpDay(day);
+    setExpMonth(month);
+    setExpYear(year);
+
+    if (day && month && year) {
+      const formattedYmd = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+      setExpirationDate(formattedYmd);
+    } else {
+      setExpirationDate('');
+    }
+  };
 
   // Draft items list (can hold multiple items, making it implicitly mixed if count > 1)
   const [draftItems, setDraftItems] = useState<MixedItem[]>([]);
@@ -388,6 +590,9 @@ export const Rotulado: React.FC<RotuladoProps> = ({
     setPallets('');
     setBoxes('');
     setUnits('');
+    setExpDay('');
+    setExpMonth('');
+    setExpYear('');
     setExpirationDate('');
   };
 
@@ -412,8 +617,12 @@ export const Rotulado: React.FC<RotuladoProps> = ({
       alert("Por favor ingrese una cantidad válida (mayor a 0 unidades).");
       return;
     }
-    if (!expirationDate) {
-      alert("La fecha de vencimiento es obligatoria.");
+    if (!expDay || !expMonth || !expYear || !expirationDate) {
+      alert("La fecha de vencimiento es obligatoria. Por favor seleccione el Día, Mes y Año.");
+      return;
+    }
+    if (dateValidation.isExceededTvu) {
+      alert(`No se puede agregar el ítem: La fecha ${dateValidation.formattedDate} supera el 100% del TVU (${dateValidation.diffDays} días restantes vs ${dateValidation.maxDays} días de vida útil máxima).`);
       return;
     }
 
@@ -437,6 +646,9 @@ export const Rotulado: React.FC<RotuladoProps> = ({
     setPallets('');
     setBoxes('');
     setUnits('');
+    setExpDay('');
+    setExpMonth('');
+    setExpYear('');
     setExpirationDate('');
   };
 
@@ -1478,19 +1690,143 @@ export const Rotulado: React.FC<RotuladoProps> = ({
                   </div>
                 </div>
 
-                {/* Expiration Date Field */}
-                <div className="bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 p-1.5 px-2.5 rounded-lg">
-                  <label className="text-[7px] font-black text-red-500 dark:text-red-400 mb-0.5 block uppercase tracking-wider flex items-center gap-1 shrink-0">
-                    <Calendar className="w-3 h-3 stroke-[2]" />
-                    <span>Vencimiento Lote (Obligatorio)</span>
-                  </label>
-                  <input
-                    type="date"
-                    value={expirationDate}
-                    onChange={e => setExpirationDate(e.target.value)}
-                    className="w-full bg-transparent border-none p-0 focus:ring-0 text-[11px] font-black text-slate-900 dark:text-white outline-none h-5"
-                    required
-                  />
+                {/* Expiration Date Dropdown Selectors */}
+                <div className="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 p-2 rounded-xl space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[7.5px] font-black text-red-500 dark:text-red-400 uppercase tracking-wider flex items-center gap-1 shrink-0">
+                      <Calendar className="w-3 h-3 stroke-[2.5]" />
+                      <span>Vencimiento Lote (Obligatorio)</span>
+                    </label>
+                    {expirationDate && (
+                      <span className="font-mono text-[9px] font-black text-slate-600 dark:text-slate-350">
+                        {dateValidation.formattedDate}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {/* DÍA */}
+                    <div>
+                      <label className="text-[6.5px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-wider block mb-0.5">Día</label>
+                      <select
+                        value={expDay}
+                        onChange={e => handleDateSelectChange(e.target.value, expMonth, expYear)}
+                        className={`w-full bg-white dark:bg-slate-900 border rounded-lg p-1.5 text-xs font-black outline-none transition-all cursor-pointer ${
+                          expDay 
+                            ? 'text-slate-900 dark:text-white border-slate-300 dark:border-slate-700' 
+                            : 'text-slate-400 border-slate-200 dark:border-slate-800'
+                        } ${dateValidation.isExceededTvu ? 'border-red-500 ring-1 ring-red-400' : 'focus:ring-2 focus:ring-[#82BD02]'}`}
+                        required
+                      >
+                        <option value="">DÍA</option>
+                        {Array.from({ length: 31 }, (_, i) => String(i + 1).padStart(2, '0')).map(d => (
+                          <option key={d} value={d}>{d}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* MES */}
+                    <div>
+                      <label className="text-[6.5px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-wider block mb-0.5">Mes</label>
+                      <select
+                        value={expMonth}
+                        onChange={e => handleDateSelectChange(expDay, e.target.value, expYear)}
+                        className={`w-full bg-white dark:bg-slate-900 border rounded-lg p-1.5 text-xs font-black outline-none transition-all cursor-pointer ${
+                          expMonth 
+                            ? 'text-slate-900 dark:text-white border-slate-300 dark:border-slate-700' 
+                            : 'text-slate-400 border-slate-200 dark:border-slate-800'
+                        } ${dateValidation.isExceededTvu ? 'border-red-500 ring-1 ring-red-400' : 'focus:ring-2 focus:ring-[#82BD02]'}`}
+                        required
+                      >
+                        <option value="">MES</option>
+                        {MONTH_OPTIONS.map(m => (
+                          <option key={m.value} value={m.value}>{m.label}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* AÑO */}
+                    <div>
+                      <label className="text-[6.5px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-wider block mb-0.5">Año</label>
+                      <select
+                        value={expYear}
+                        onChange={e => handleDateSelectChange(expDay, expMonth, e.target.value)}
+                        className={`w-full bg-white dark:bg-slate-900 border rounded-lg p-1.5 text-xs font-black outline-none transition-all cursor-pointer ${
+                          expYear 
+                            ? 'text-slate-900 dark:text-white border-slate-300 dark:border-slate-700' 
+                            : 'text-slate-400 border-slate-200 dark:border-slate-800'
+                        } ${dateValidation.isExceededTvu ? 'border-red-500 ring-1 ring-red-400' : 'focus:ring-2 focus:ring-[#82BD02]'}`}
+                        required
+                      >
+                        <option value="">AÑO</option>
+                        {yearOptions.map(y => (
+                          <option key={y} value={String(y)}>{y}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* ALERTA 1: FECHA SUPERA 100% TVU (BLOQUEANTE) */}
+                  {dateValidation.isExceededTvu && (
+                    <div className="bg-red-50 border-2 border-red-500 text-red-900 p-2.5 rounded-xl text-xs shadow-md flex items-start gap-2 animate-in fade-in duration-200 mt-1.5">
+                      <div className="p-1 bg-red-100 text-red-600 rounded-lg shrink-0 mt-0.5">
+                        <XCircle className="w-5 h-5 animate-pulse" />
+                      </div>
+                      <div className="space-y-0.5 flex-1">
+                        <p className="font-black uppercase text-red-700 tracking-wide text-[10.5px]">
+                          LA FECHA QUE ESTÁ REGISTRANDO NO ES CORRECTA
+                        </p>
+                        <p className="font-semibold text-red-800 text-[9.5px] leading-tight">
+                          La fecha <strong>{dateValidation.formattedDate}</strong> supera el <strong>100% del TVU</strong> ({dateValidation.diffDays} días restantes vs <strong>{dateValidation.maxDays} días</strong> de vida útil máxima - <strong>{dateValidation.tvuPercentage}% TVU</strong>).
+                        </p>
+                        <p className="text-[8.5px] font-black text-red-600 uppercase tracking-tight">
+                          ⛔ No se permite rotular esta fecha. Por favor corrija el día, mes o año.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ALERTA 2: PRODUCTO VENCIDO */}
+                  {dateValidation.isExpired && (
+                    <div className="bg-red-50 border border-red-400 text-red-900 p-2 rounded-xl text-xs shadow-sm flex items-start gap-2 animate-in fade-in duration-200 mt-1">
+                      <div className="p-1 bg-red-100 text-red-600 rounded-lg shrink-0 mt-0.5">
+                        <AlertTriangle className="w-4 h-4 text-red-600" />
+                      </div>
+                      <div className="space-y-0.5 flex-1">
+                        <p className="font-black uppercase text-red-700 tracking-wide text-[10px]">
+                          PRODUCTO VENCIDO / CADUCADO
+                        </p>
+                        <p className="font-medium text-red-800 text-[9px] leading-tight">
+                          La fecha <strong>{dateValidation.formattedDate}</strong> ya se encuentra vencida ({Math.abs(dateValidation.diffDays)} días atrás).
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ALERTA 3: FECHA NO INGRESADA POR RECEPCIÓN (AVISO INFORMATIVO) */}
+                  {!dateValidation.isExceededTvu && !dateValidation.isExpired && dateValidation.notInReception && expirationDate && (
+                    <div className="bg-amber-50 border border-amber-400 text-amber-950 p-2.5 rounded-xl text-xs shadow-sm flex items-start gap-2 animate-in fade-in duration-200 mt-1.5">
+                      <div className="p-1 bg-amber-100 text-amber-700 rounded-lg shrink-0 mt-0.5">
+                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                      </div>
+                      <div className="space-y-0.5 flex-1">
+                        <div className="flex items-center justify-between">
+                          <p className="font-black uppercase text-amber-800 tracking-wide text-[10px]">
+                            ESTA FECHA NO HA SIDO INGRESADA POR RECEPCIÓN
+                          </p>
+                          <span className="text-[7.5px] font-black uppercase px-1.5 py-0.5 bg-amber-200/70 text-amber-900 rounded-full">
+                            Aviso Informativo
+                          </span>
+                        </div>
+                        <p className="font-medium text-amber-900 text-[9.5px] leading-tight">
+                          La fecha <strong>{dateValidation.formattedDate}</strong> no coincide con ningún lote registrado previamente en el módulo de Recepción para este producto ({selectedProduct?.codigo}).
+                        </p>
+                        <p className="text-[8.5px] font-bold text-amber-700">
+                          ✓ Se permite rotular si el producto se encuentra físicamente en almacén.
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Unit Conversion HUD */}
@@ -1512,7 +1848,12 @@ export const Rotulado: React.FC<RotuladoProps> = ({
                   </button>
                   <button
                     type="submit"
-                    className="py-2.5 bg-[#82BD02] text-white text-[9px] font-black uppercase tracking-wider rounded-xl active:scale-95 transition-all shadow hover:bg-lime-600 flex items-center justify-center gap-1"
+                    disabled={dateValidation.isExceededTvu}
+                    className={`py-2.5 text-white text-[9px] font-black uppercase tracking-wider rounded-xl active:scale-95 transition-all shadow flex items-center justify-center gap-1 ${
+                      dateValidation.isExceededTvu 
+                        ? 'bg-slate-300 dark:bg-slate-700 cursor-not-allowed opacity-60 text-slate-500' 
+                        : 'bg-[#82BD02] hover:bg-lime-600'
+                    }`}
                   >
                     <PlusCircle className="w-3.5 h-3.5" />
                     Agregar Item
