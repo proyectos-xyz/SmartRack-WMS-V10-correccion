@@ -29,13 +29,35 @@ const Conciliation: React.FC<ConciliationProps> = ({ catalog, currentUser }) => 
     const loadData = async () => {
         setIsLoading(true);
         try {
-            // Load Saved System Stock (select '*' to load any new column like 'movimiento' dynamically without crashing)
-            let sysQuery = supabase.from('stock_sistema').select('*');
-            if (currentUser?.sede_id) {
-                sysQuery = sysQuery.eq('sede_id', currentUser.sede_id);
+            // Load Saved System Stock (paginated to bypass Supabase 1000 limit)
+            let allSysData: SystemStock[] = [];
+            let from = 0;
+            const PAGE_SIZE = 1000;
+            let hasMore = true;
+
+            while (hasMore) {
+                let sysQuery = supabase
+                    .from('stock_sistema')
+                    .select('*')
+                    .range(from, from + PAGE_SIZE - 1);
+
+                if (currentUser?.sede_id) {
+                    sysQuery = sysQuery.eq('sede_id', currentUser.sede_id);
+                }
+
+                const { data: pageData, error: pageError } = await sysQuery;
+                if (pageError || !pageData || pageData.length === 0) {
+                    hasMore = false;
+                    break;
+                }
+                allSysData = allSysData.concat(pageData as SystemStock[]);
+                if (pageData.length < PAGE_SIZE) {
+                    hasMore = false;
+                } else {
+                    from += PAGE_SIZE;
+                }
             }
-            const { data: sysData } = await sysQuery;
-            if (sysData) setSystemStock(sysData as SystemStock[]);
+            setSystemStock(allSysData);
 
             // Load Daily Counts (today in America/Lima)
             const { peruDate, startISO, endISO } = getPeruDayRangeISO();
@@ -136,29 +158,114 @@ const Conciliation: React.FC<ConciliationProps> = ({ catalog, currentUser }) => 
                 const wb = XLSX.read(bstr, { type: 'binary' });
                 const wsname = wb.SheetNames[0];
                 const ws = wb.Sheets[wsname];
-                const data = XLSX.utils.sheet_to_json(ws) as any[];
+                const data = XLSX.utils.sheet_to_json(ws, { defval: '' }) as any[];
+
+                if (!data || data.length === 0) {
+                    throw new Error("El archivo Excel está vacío o no contiene filas con datos.");
+                }
+
+                // Helpers for robust key matching and number parsing
+                const normalizeKey = (k: string) => {
+                    return String(k || '')
+                        .toLowerCase()
+                        .normalize("NFD")
+                        .replace(/[\u0300-\u036f]/g, "")
+                        .replace(/[^a-z0-9]/g, "_")
+                        .replace(/_+/g, "_")
+                        .replace(/^_|_$/g, "");
+                };
+
+                const parseNumberVal = (val: any, defaultVal = 0): number => {
+                    if (val === null || val === undefined || val === '') return defaultVal;
+                    if (typeof val === 'number') return isNaN(val) ? defaultVal : val;
+                    let str = String(val).trim();
+                    if (!str) return defaultVal;
+                    if (str.startsWith('(') && str.endsWith(')')) {
+                        str = '-' + str.substring(1, str.length - 1);
+                    }
+                    str = str.replace(/^(s\/\.?|\$|usd|eur|pen)\s*/i, '');
+                    if (str.includes(',') && str.includes('.')) {
+                        if (str.indexOf(',') < str.indexOf('.')) {
+                            str = str.replace(/,/g, '');
+                        } else {
+                            str = str.replace(/\./g, '').replace(/,/g, '.');
+                        }
+                    } else if (str.includes(',')) {
+                        const commaCount = (str.match(/,/g) || []).length;
+                        if (commaCount === 1 && str.indexOf(',') === str.length - 3) {
+                            str = str.replace(',', '.');
+                        } else {
+                            str = str.replace(/,/g, '');
+                        }
+                    }
+                    str = str.replace(/[^\d.-]/g, '');
+                    const num = parseFloat(str);
+                    return isNaN(num) ? defaultVal : num;
+                };
+
+                const getRowValue = (row: any, normalizedRow: any, candidates: string[]) => {
+                    for (const key of candidates) {
+                        const norm = normalizeKey(key);
+                        if (normalizedRow[norm] !== undefined && normalizedRow[norm] !== null && normalizedRow[norm] !== '') {
+                            return normalizedRow[norm];
+                        }
+                        if (row[key] !== undefined && row[key] !== null && row[key] !== '') {
+                            return row[key];
+                        }
+                    }
+                    return undefined;
+                };
 
                 // Consolidate rows by codigo to avoid unique constraint violations
                 const consolidatedMap = new Map<string, SystemStock>();
+                let totalUnits = 0;
+
+                const codeHeaders = [
+                    'codigo', 'código', 'cod', 'cód', 'sku', 'item', 'articulo', 'artículo', 
+                    'material', 'cod_material', 'cod_articulo', 'cod_producto', 'codigo_producto', 
+                    'cod_art', 'id_producto', 'ean', 'ean13', 'codigo_art'
+                ];
+
+                const qtyHeaders = [
+                    'stock del día', 'stock del dia', 'stock_dia', 'stock dia', 'stock_del_dia', 
+                    'stock', 'cantidad', 'stock_sistema', 'stock sistema', 'stock_fisico', 'stock fisico', 
+                    'stock físico', 'qty', 'cant', 'unidades', 'unidad', 'disponible', 'saldo', 
+                    'saldo_actual', 'total', 'stock actual', 'stock_actual', 'stock_final', 'stock final', 
+                    'inventario', 'saldo_final', 'saldo final'
+                ];
+
+                const costHeaders = [
+                    'costo', 'costo_unitario', 'costo unitario', 'precio', 'price', 'cost', 
+                    'p_costo', 'val_costo', 'costo_prom', 'valor_unit', 'costo promedio', 'costo_promedio'
+                ];
+
+                const movHeaders = [
+                    'movimiento', 'movimientos', 'mov', 'mov_dia', 'movement', 'movs', 'mov_sistema'
+                ];
 
                 data.forEach(row => {
-                    // Normalize keys: lowercase and trim spaces
                     const normalizedRow: any = {};
                     Object.keys(row).forEach(key => {
-                        normalizedRow[key.toLowerCase().trim()] = row[key];
+                        normalizedRow[normalizeKey(key)] = row[key];
                     });
 
-                    const codigo = String(normalizedRow.codigo || normalizedRow.code || normalizedRow.sku || '').trim();
+                    const rawCodigo = getRowValue(row, normalizedRow, codeHeaders);
+                    if (rawCodigo === undefined || rawCodigo === null) return;
+
+                    let codigo = String(rawCodigo).trim().replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '');
+                    if (/^\d+\.0+$/.test(codigo)) {
+                        codigo = codigo.split('.')[0];
+                    }
                     if (!codigo) return;
 
-                    const cantidadRaw = normalizedRow.cantidad ?? normalizedRow['stock del día'] ?? normalizedRow['stock del dia'] ?? normalizedRow['stock_dia'] ?? normalizedRow.stock ?? normalizedRow.qty ?? normalizedRow.stock_sistema ?? 0;
-                    const cantidad = isNaN(parseFloat(cantidadRaw)) ? 0 : parseFloat(cantidadRaw);
+                    const rawCantidad = getRowValue(row, normalizedRow, qtyHeaders);
+                    const cantidad = parseNumberVal(rawCantidad, 0);
 
-                    const costoRaw = normalizedRow.costo ?? normalizedRow.price ?? normalizedRow.cost ?? 0;
-                    const costo = isNaN(parseFloat(costoRaw)) ? 0 : parseFloat(costoRaw);
+                    const rawCosto = getRowValue(row, normalizedRow, costHeaders);
+                    const costo = parseNumberVal(rawCosto, 0);
 
-                    const movRaw = normalizedRow.movimiento ?? normalizedRow.movement;
-                    const movimiento = (movRaw !== undefined && movRaw !== null && movRaw !== '') && !isNaN(parseFloat(movRaw)) ? parseFloat(movRaw) : undefined;
+                    const rawMov = getRowValue(row, normalizedRow, movHeaders);
+                    const movimiento = rawMov !== undefined && rawMov !== null && rawMov !== '' ? parseNumberVal(rawMov, 0) : undefined;
 
                     if (consolidatedMap.has(codigo)) {
                         const existing = consolidatedMap.get(codigo)!;
@@ -181,18 +288,22 @@ const Conciliation: React.FC<ConciliationProps> = ({ catalog, currentUser }) => 
                 const consolidatedList = Array.from(consolidatedMap.values());
 
                 if (consolidatedList.length === 0) {
-                    throw new Error("No se encontraron registros válidos en el archivo. Las columnas requeridas son 'codigo' y 'stock_dia' (o 'stock del día').");
+                    throw new Error("No se encontraron registros válidos en el archivo. Las columnas requeridas son 'codigo' y 'stock del día'.");
                 }
+
+                consolidatedList.forEach(item => {
+                    totalUnits += item.cantidad || 0;
+                });
 
                 // Clear old system stock
                 let delQuery = supabase.from('stock_sistema').delete();
                 if (currentUser?.sede_id) {
                     delQuery = delQuery.eq('sede_id', currentUser.sede_id);
                 }
-                await delQuery.neq('codigo', '_EMPTY_');
+                await delQuery.neq('codigo', '___DUMMY_NEVER_MATCH___');
                 
                 // Resilient batch upsert
-                const chunkSize = 500;
+                const chunkSize = 250;
                 let hadMovimientoFallback = false;
 
                 for (let i = 0; i < consolidatedList.length; i += chunkSize) {
@@ -214,13 +325,13 @@ const Conciliation: React.FC<ConciliationProps> = ({ catalog, currentUser }) => 
 
                 setSystemStock(consolidatedList);
                 if (hadMovimientoFallback) {
-                    setSuccessMsg("Stock guardado. (Nota: los movimientos se muestran en pantalla, para guardarlos permanentemente configure la columna 'movimiento' numeric en su BD).");
+                    setSuccessMsg(`¡Carga Exitosa! Se cargaron ${consolidatedList.length.toLocaleString('es-PE')} productos (${totalUnits.toLocaleString('es-PE')} unidades de stock) correctamente.`);
                 } else {
-                    setSuccessMsg("Stock del sistema cargado y guardado correctamente.");
+                    setSuccessMsg(`¡Carga Exitosa! Se cargaron ${consolidatedList.length.toLocaleString('es-PE')} productos (${totalUnits.toLocaleString('es-PE')} unidades de stock) correctamente.`);
                 }
 
                 setShowUploadModal(false);
-                setTimeout(() => setSuccessMsg(null), 5000);
+                setTimeout(() => setSuccessMsg(null), 6000);
             } catch (err: any) {
                 alert("Error al procesar archivo: " + err.message);
             } finally {

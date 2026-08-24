@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { InventoryItem, Product, ZoneType, StocktakeRecord, Usuario, SystemStock } from '../types';
 import { BarChart as RechartsBarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LineChart, Line, Legend } from 'recharts';
-import { Search, AlertTriangle, Camera, CheckCircle, ClipboardList, PlusCircle, History, FileSpreadsheet, XCircle, Scan, ChevronLeft, ChevronRight, FileText, Calculator, Bell, Delete, RefreshCw, User, Upload, Download, BarChart3, X, Clock } from './Icons';
+import { Search, AlertTriangle, Camera, CheckCircle, Check, ClipboardList, PlusCircle, History, FileSpreadsheet, XCircle, Scan, ChevronLeft, ChevronRight, FileText, Calculator, Bell, Delete, RefreshCw, User, Upload, Download, BarChart3, X, Clock } from './Icons';
 import { supabase } from '../supabaseClient';
 import { compressImage, generateStorageFileName, getPeruDayRangeISO } from '../utils';
 import jsPDF from 'jspdf';
@@ -151,6 +151,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
   const [isDownloading, setIsDownloading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadSuccess, setUploadSuccess] = useState(false);
+  const [uploadStats, setUploadStats] = useState<{ productsCount: number; totalUnits: number; totalCost: number } | null>(null);
 
   // Custom Report Modal State
   const [showReportProductModal, setShowReportProductModal] = useState(false);
@@ -577,13 +578,35 @@ const InventoryList: React.FC<InventoryListProps> = ({
         if (error) throw error;
         setTodayCounts(data || []);
 
-        // Also fetch system stock for Reconteo tab
-        let sysQuery = supabase.from('stock_sistema').select('codigo, cantidad, costo');
-        if (currentUser?.sede_id) {
-            sysQuery = sysQuery.eq('sede_id', currentUser.sede_id);
+        // Also fetch full system stock for Reconteo tab (paginated to bypass Supabase 1000 limit)
+        let allSysData: SystemStock[] = [];
+        let from = 0;
+        const PAGE_SIZE = 1000;
+        let hasMore = true;
+
+        while (hasMore) {
+            let sysQuery = supabase
+                .from('stock_sistema')
+                .select('codigo, cantidad, costo')
+                .range(from, from + PAGE_SIZE - 1);
+
+            if (currentUser?.sede_id) {
+                sysQuery = sysQuery.eq('sede_id', currentUser.sede_id);
+            }
+
+            const { data: pageData, error: pageError } = await sysQuery;
+            if (pageError || !pageData || pageData.length === 0) {
+                hasMore = false;
+                break;
+            }
+            allSysData = allSysData.concat(pageData as SystemStock[]);
+            if (pageData.length < PAGE_SIZE) {
+                hasMore = false;
+            } else {
+                from += PAGE_SIZE;
+            }
         }
-        const { data: sysData } = await sysQuery;
-        if (sysData) setSystemStock(sysData as SystemStock[]);
+        setSystemStock(allSysData);
     } catch (err) {
         console.error("Error fetching today counts:", err);
     } finally {
@@ -1618,6 +1641,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
     setIsDownloading(true);
     setUploadProgress(0);
     setUploadSuccess(false);
+    setUploadStats(null);
     
     const reader = new FileReader();
     reader.onload = async (evt) => {
@@ -1627,30 +1651,119 @@ const InventoryList: React.FC<InventoryListProps> = ({
             const wb = XLSX.read(bstr, { type: 'binary' });
             const wsname = wb.SheetNames[0];
             const ws = wb.Sheets[wsname];
-            const data = XLSX.utils.sheet_to_json(ws) as any[];
+            const data = XLSX.utils.sheet_to_json(ws, { defval: '' }) as any[];
+
+            if (!data || data.length === 0) {
+                throw new Error("El archivo Excel está vacío o no contiene filas con datos.");
+            }
 
             setUploadProgress(25);
+
+            // Helpers for robust key matching and number parsing
+            const normalizeKey = (k: string) => {
+                return String(k || '')
+                    .toLowerCase()
+                    .normalize("NFD")
+                    .replace(/[\u0300-\u036f]/g, "")
+                    .replace(/[^a-z0-9]/g, "_")
+                    .replace(/_+/g, "_")
+                    .replace(/^_|_$/g, "");
+            };
+
+            const parseNumberVal = (val: any, defaultVal = 0): number => {
+                if (val === null || val === undefined || val === '') return defaultVal;
+                if (typeof val === 'number') return isNaN(val) ? defaultVal : val;
+                let str = String(val).trim();
+                if (!str) return defaultVal;
+                if (str.startsWith('(') && str.endsWith(')')) {
+                    str = '-' + str.substring(1, str.length - 1);
+                }
+                // Strip currency prefixes and spaces
+                str = str.replace(/^(s\/\.?|\$|usd|eur|pen)\s*/i, '');
+                if (str.includes(',') && str.includes('.')) {
+                    if (str.indexOf(',') < str.indexOf('.')) {
+                        str = str.replace(/,/g, '');
+                    } else {
+                        str = str.replace(/\./g, '').replace(/,/g, '.');
+                    }
+                } else if (str.includes(',')) {
+                    const commaCount = (str.match(/,/g) || []).length;
+                    if (commaCount === 1 && str.indexOf(',') === str.length - 3) {
+                        str = str.replace(',', '.');
+                    } else {
+                        str = str.replace(/,/g, '');
+                    }
+                }
+                str = str.replace(/[^\d.-]/g, '');
+                const num = parseFloat(str);
+                return isNaN(num) ? defaultVal : num;
+            };
+
+            const getRowValue = (row: any, normalizedRow: any, candidates: string[]) => {
+                for (const key of candidates) {
+                    const norm = normalizeKey(key);
+                    if (normalizedRow[norm] !== undefined && normalizedRow[norm] !== null && normalizedRow[norm] !== '') {
+                        return normalizedRow[norm];
+                    }
+                    if (row[key] !== undefined && row[key] !== null && row[key] !== '') {
+                        return row[key];
+                    }
+                }
+                return undefined;
+            };
+
             // Group and consolidate rows by codigo to prevent duplicate key violations
             const consolidatedMap = new Map<string, SystemStock>();
+            let totalUnitsCount = 0;
+            let totalCostVal = 0;
+
+            const codeHeaders = [
+                'codigo', 'código', 'cod', 'cód', 'sku', 'item', 'articulo', 'artículo', 
+                'material', 'cod_material', 'cod_articulo', 'cod_producto', 'codigo_producto', 
+                'cod_art', 'id_producto', 'ean', 'ean13', 'codigo_art'
+            ];
+
+            const qtyHeaders = [
+                'stock del día', 'stock del dia', 'stock_dia', 'stock dia', 'stock_del_dia', 
+                'stock', 'cantidad', 'stock_sistema', 'stock sistema', 'stock_fisico', 'stock fisico', 
+                'stock físico', 'qty', 'cant', 'unidades', 'unidad', 'disponible', 'saldo', 
+                'saldo_actual', 'total', 'stock actual', 'stock_actual', 'stock_final', 'stock final', 
+                'inventario', 'saldo_final', 'saldo final'
+            ];
+
+            const costHeaders = [
+                'costo', 'costo_unitario', 'costo unitario', 'precio', 'price', 'cost', 
+                'p_costo', 'val_costo', 'costo_prom', 'valor_unit', 'costo promedio', 'costo_promedio'
+            ];
+
+            const movHeaders = [
+                'movimiento', 'movimientos', 'mov', 'mov_dia', 'movement', 'movs', 'mov_sistema'
+            ];
 
             data.forEach(row => {
-                // Normalize keys: lowercase and trim spaces
                 const normalizedRow: any = {};
                 Object.keys(row).forEach(key => {
-                    normalizedRow[key.toLowerCase().trim()] = row[key];
+                    normalizedRow[normalizeKey(key)] = row[key];
                 });
 
-                const codigo = String(normalizedRow.codigo || normalizedRow.code || normalizedRow.sku || '').trim();
+                const rawCodigo = getRowValue(row, normalizedRow, codeHeaders);
+                if (rawCodigo === undefined || rawCodigo === null) return;
+                
+                let codigo = String(rawCodigo).trim().replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '');
+                // Remove trailing .0 from numbers parsed as float in Excel
+                if (/^\d+\.0+$/.test(codigo)) {
+                    codigo = codigo.split('.')[0];
+                }
                 if (!codigo) return;
 
-                const cantidadRaw = normalizedRow.cantidad ?? normalizedRow['stock del día'] ?? normalizedRow['stock del dia'] ?? normalizedRow['stock_dia'] ?? normalizedRow.stock ?? normalizedRow.qty ?? normalizedRow.stock_sistema ?? 0;
-                const cantidad = isNaN(parseFloat(cantidadRaw)) ? 0 : parseFloat(cantidadRaw);
+                const rawCantidad = getRowValue(row, normalizedRow, qtyHeaders);
+                const cantidad = parseNumberVal(rawCantidad, 0);
 
-                const costoRaw = normalizedRow.costo ?? normalizedRow.price ?? normalizedRow.cost ?? 0;
-                const costo = isNaN(parseFloat(costoRaw)) ? 0 : parseFloat(costoRaw);
+                const rawCosto = getRowValue(row, normalizedRow, costHeaders);
+                const costo = parseNumberVal(rawCosto, 0);
 
-                const movRaw = normalizedRow.movimiento ?? normalizedRow.movement;
-                const movimiento = (movRaw !== undefined && movRaw !== null && movRaw !== '') && !isNaN(parseFloat(movRaw)) ? parseFloat(movRaw) : undefined;
+                const rawMov = getRowValue(row, normalizedRow, movHeaders);
+                const movimiento = rawMov !== undefined && rawMov !== null && rawMov !== '' ? parseNumberVal(rawMov, 0) : undefined;
 
                 if (consolidatedMap.has(codigo)) {
                     const existing = consolidatedMap.get(codigo)!;
@@ -1676,20 +1789,25 @@ const InventoryList: React.FC<InventoryListProps> = ({
                 throw new Error("No se encontraron registros válidos en el archivo. Verifique que las columnas contengan 'codigo', 'stock del día' y 'costo'.");
             }
 
+            consolidatedList.forEach(item => {
+                totalUnitsCount += item.cantidad || 0;
+                totalCostVal += (item.cantidad || 0) * (item.costo || 0);
+            });
+
             setUploadProgress(45);
             // 1. Clear previous stock for the branch/system
             let delQuery = supabase.from('stock_sistema').delete();
             if (currentUser?.sede_id) {
                 delQuery = delQuery.eq('sede_id', currentUser.sede_id);
             }
-            const { error: delError } = await delQuery.neq('codigo', '_EMPTY_');
+            const { error: delError } = await delQuery.neq('codigo', '___DUMMY_NEVER_MATCH___');
             if (delError) {
                 console.warn("Aviso al eliminar stock anterior:", delError.message);
             }
             
             setUploadProgress(60);
             // 2. Perform batched upsert to safely replace/insert records without duplicate key collision
-            const chunkSize = 500;
+            const chunkSize = 250;
             const totalChunks = Math.ceil(consolidatedList.length / chunkSize);
 
             for (let i = 0; i < consolidatedList.length; i += chunkSize) {
@@ -1715,15 +1833,15 @@ const InventoryList: React.FC<InventoryListProps> = ({
 
             setUploadProgress(100);
             setSystemStock(consolidatedList);
+            setUploadStats({
+                productsCount: consolidatedList.length,
+                totalUnits: totalUnitsCount,
+                totalCost: totalCostVal
+            });
             setUploadSuccess(true);
-            fetchTodayCounts(); // Refresh
             
-            // Auto-close after 2 seconds
-            setTimeout(() => {
-                setShowUploadStockModal(false);
-                setUploadSuccess(false);
-                setUploadProgress(0);
-            }, 2000);
+            // Refresh counts and theoretical comparison
+            await fetchTodayCounts();
         } catch (err: any) {
             alert("Error al procesar archivo: " + err.message);
             setUploadProgress(0);
@@ -4194,13 +4312,45 @@ const InventoryList: React.FC<InventoryListProps> = ({
                             </div>
                         )}
 
-                        {uploadSuccess && (
-                            <div className="py-10 space-y-4 animate-bounce-in">
-                                <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto">
-                                    <CheckCircle className="w-12 h-12 text-green-600" />
+                        {uploadSuccess && uploadStats && (
+                            <div className="py-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
+                                <div className="w-16 h-16 bg-green-100 dark:bg-green-900/40 rounded-full flex items-center justify-center mx-auto text-green-600 dark:text-green-400 shadow-inner">
+                                    <CheckCircle className="w-10 h-10" />
                                 </div>
-                                <h4 className="font-black text-green-700 uppercase tracking-tight">¡Carga Exitosa!</h4>
-                                <p className="text-xs text-gray-500">El stock del sistema ha sido actualizado correctamente.</p>
+                                <div>
+                                    <h4 className="font-black text-green-700 dark:text-green-400 text-lg uppercase tracking-tight">¡Carga Exitosa!</h4>
+                                    <p className="text-xs text-gray-600 dark:text-gray-300 mt-1">El stock del día se ha cargado y actualizado correctamente.</p>
+                                </div>
+
+                                <div className="bg-green-50/80 dark:bg-green-950/40 border border-green-200 dark:border-green-800/60 rounded-2xl p-4 grid grid-cols-2 gap-3 text-left">
+                                    <div className="bg-white dark:bg-slate-900 p-3 rounded-xl border border-green-100 dark:border-green-900/30 shadow-sm">
+                                        <span className="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase block tracking-wider">Productos</span>
+                                        <span className="text-xl font-black text-slate-800 dark:text-white block mt-0.5">
+                                            {uploadStats.productsCount.toLocaleString('es-PE')}
+                                        </span>
+                                        <span className="text-[9px] font-bold text-green-600 dark:text-green-400 block">SKUs / Códigos únicos</span>
+                                    </div>
+                                    <div className="bg-white dark:bg-slate-900 p-3 rounded-xl border border-green-100 dark:border-green-900/30 shadow-sm">
+                                        <span className="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase block tracking-wider">Total Unidades</span>
+                                        <span className="text-xl font-black text-blue-600 dark:text-blue-400 block mt-0.5">
+                                            {uploadStats.totalUnits.toLocaleString('es-PE')}
+                                        </span>
+                                        <span className="text-[9px] font-bold text-gray-400 block">Unidades en stock</span>
+                                    </div>
+                                </div>
+
+                                <button
+                                    onClick={() => {
+                                        setShowUploadStockModal(false);
+                                        setUploadSuccess(false);
+                                        setUploadStats(null);
+                                        setUploadProgress(0);
+                                    }}
+                                    className="w-full py-3 bg-green-600 hover:bg-green-700 text-white font-black text-xs uppercase tracking-wider rounded-xl transition-all shadow-md active:scale-95 flex items-center justify-center gap-2"
+                                >
+                                    <Check className="w-4 h-4 stroke-[3]" />
+                                    Aceptar y Cerrar
+                                </button>
                             </div>
                         )}
                     </div>

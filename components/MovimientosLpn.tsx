@@ -29,13 +29,15 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
-import { InventoryItem, Product, Usuario, Rack, RackLocation } from '../types';
+import { InventoryItem, Product, Usuario, Rack, RackLocation, Zone } from '../types';
 import { supabase } from '../supabaseClient';
+import { InventoryMapExplorer } from './InventoryMapExplorer';
 
 interface MovimientosLpnProps {
   inventory: InventoryItem[];
   catalog: Product[];
   racks: Rack[];
+  zones?: Zone[];
   currentUser: Usuario | null;
   onAssignLocation: (lpn: string, location: RackLocation, reason?: string) => void;
   onRefresh: () => Promise<void>;
@@ -123,12 +125,13 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
   inventory,
   catalog: _catalog,
   racks,
+  zones = [],
   currentUser,
   onAssignLocation,
   onRefresh
 }) => {
   // Navigation Tabs
-  const [activeTab, setActiveTab] = useState<'SCANNER' | 'RACKS' | 'PENDIENTES' | 'PICKING' | 'HISTORIAL'>('SCANNER');
+  const [activeTab, setActiveTab] = useState<'SCANNER' | 'RACKS' | 'PENDIENTES' | 'PICKING' | 'HISTORIAL' | 'MAPA_INVENTARIO'>('SCANNER');
 
   // Search & Barcode input
   const [scanInput, setScanInput] = useState('');
@@ -1047,48 +1050,62 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
           </div>
         </div>
 
-        {/* 📱 3 ULTRA-COMPACT STATUS PILLS (Click to view list or return to scanner) */}
-        <div className="max-w-2xl mx-auto grid grid-cols-3 gap-1.5 mt-2">
+        {/* 📱 4 STATUS PILLS INCLUDING MAPA DE INVENTARIO (Click to view list or return to scanner) */}
+        <div className="max-w-2xl mx-auto grid grid-cols-4 gap-1.5 mt-2">
           <button
             onClick={() => setActiveTab(activeTab === 'PENDIENTES' ? 'SCANNER' : 'PENDIENTES')}
-            className={`py-1.5 px-2 rounded-xl border text-center transition-all ${
+            className={`py-1.5 px-1.5 rounded-xl border text-center transition-all ${
               activeTab === 'PENDIENTES'
                 ? 'bg-amber-500 text-white border-amber-600 shadow-xs font-black ring-2 ring-amber-300'
                 : 'bg-amber-50/70 border-amber-200 text-amber-900 font-bold hover:bg-amber-100/80'
             }`}
           >
-            <div className="text-[10px] uppercase opacity-90 leading-none">Pendientes</div>
+            <div className="text-[9px] uppercase opacity-90 leading-none">Pendientes</div>
             <div className="text-sm font-black mt-0.5 leading-none">{pendientesList.length}</div>
           </button>
 
           <button
             onClick={() => setActiveTab(activeTab === 'RACKS' ? 'SCANNER' : 'RACKS')}
-            className={`py-1.5 px-2 rounded-xl border text-center transition-all ${
+            className={`py-1.5 px-1.5 rounded-xl border text-center transition-all ${
               activeTab === 'RACKS'
                 ? 'bg-indigo-600 text-white border-indigo-700 shadow-xs font-black ring-2 ring-indigo-300'
                 : 'bg-indigo-50/70 border-indigo-200 text-indigo-900 font-bold hover:bg-indigo-100/80'
             }`}
           >
-            <div className="text-[10px] uppercase opacity-90 leading-none">En Rack</div>
+            <div className="text-[9px] uppercase opacity-90 leading-none">En Rack</div>
             <div className="text-sm font-black mt-0.5 leading-none">{reservasInRackList.length}</div>
           </button>
 
           <button
             onClick={() => setActiveTab(activeTab === 'PICKING' ? 'SCANNER' : 'PICKING')}
-            className={`py-1.5 px-2 rounded-xl border text-center transition-all ${
+            className={`py-1.5 px-1.5 rounded-xl border text-center transition-all ${
               activeTab === 'PICKING'
                 ? 'bg-emerald-600 text-white border-emerald-700 shadow-xs font-black ring-2 ring-emerald-300'
                 : 'bg-emerald-50/70 border-emerald-200 text-emerald-900 font-bold hover:bg-emerald-100/80'
             }`}
           >
-            <div className="text-[10px] uppercase opacity-90 leading-none">Picking</div>
+            <div className="text-[9px] uppercase opacity-90 leading-none">Picking</div>
             <div className="text-sm font-black mt-0.5 leading-none">{pickingList.length}</div>
+          </button>
+
+          <button
+            onClick={() => setActiveTab(activeTab === 'MAPA_INVENTARIO' ? 'SCANNER' : 'MAPA_INVENTARIO')}
+            className={`py-1.5 px-1.5 rounded-xl border text-center transition-all ${
+              activeTab === 'MAPA_INVENTARIO'
+                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white border-blue-700 shadow-xs font-black ring-2 ring-blue-300'
+                : 'bg-blue-50/80 border-blue-200 text-blue-900 font-bold hover:bg-blue-100'
+            }`}
+          >
+            <div className="text-[9px] uppercase opacity-90 leading-none flex items-center justify-center gap-0.5">
+              <span>🗺️ Mapa</span>
+            </div>
+            <div className="text-xs font-black mt-0.5 leading-none">Cámaras</div>
           </button>
         </div>
       </div>
 
       {/* 📱 BODY CONTENT */}
-      <div className="max-w-2xl mx-auto w-full p-2.5 sm:p-4 space-y-2.5 flex-1 pb-24">
+      <div className={`${activeTab === 'MAPA_INVENTARIO' ? 'w-full px-2 sm:px-4' : 'max-w-2xl mx-auto w-full p-2.5 sm:p-4'} space-y-2.5 flex-1 pb-24`}>
         {/* Toast Alert Banner */}
         {toastMessage && (
           <div className={`p-2.5 rounded-xl border font-bold text-xs flex items-center justify-between gap-2 shadow-xs animate-fade-in ${
@@ -1104,6 +1121,25 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
             <button onClick={() => setToastMessage(null)} className="text-slate-400 hover:text-slate-600 p-0.5">
               <X className="w-3.5 h-3.5" />
             </button>
+          </div>
+        )}
+
+        {/* ----------------- TAB: MAPA DE INVENTARIO ----------------- */}
+        {activeTab === 'MAPA_INVENTARIO' && (
+          <div className="w-full h-full min-h-[600px] flex flex-col bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-xs overflow-hidden">
+            <InventoryMapExplorer
+              inventory={inventory}
+              racks={racks}
+              zones={zones}
+              catalog={_catalog}
+              currentUser={currentUser}
+              onAssignLocation={onAssignLocation}
+              onMoveToPicking={async (lpn) => {
+                const item = inventory.find(i => i.lpn === lpn);
+                if (item) await handleBajarAPicking(item);
+              }}
+              onClose={() => setActiveTab('SCANNER')}
+            />
           </div>
         )}
 

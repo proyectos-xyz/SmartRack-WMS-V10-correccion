@@ -389,7 +389,7 @@ const App: React.FC = () => {
             .from('sedes')
             .select('sonido_alerta')
             .eq('id', currentUser.sede_id)
-            .single();
+            .maybeSingle();
           if (data?.sonido_alerta) {
             setCustomAlertSound(data.sonido_alerta);
           } else {
@@ -484,10 +484,12 @@ const App: React.FC = () => {
             .from('configuracion_sistema')
             .select('valor')
             .eq('id', 'min_version_required')
-            .single();
+            .maybeSingle();
         
         if (error) {
-            console.error("Error checking app version:", error);
+            if (error.code !== 'PGRST116') {
+                console.warn("Could not check app version from database:", error.message || error);
+            }
             return;
         }
 
@@ -513,7 +515,7 @@ const App: React.FC = () => {
             }
         }
     } catch (e) {
-        console.error("Critical error in version check", e);
+        console.warn("Version check skipped:", e);
     }
   };
 
@@ -2183,7 +2185,7 @@ const App: React.FC = () => {
                     {view === ViewState.LAYOUT && <Layout inventory={inventory} catalog={catalog} racks={racks} zones={zones} onAssignLocation={(lpn, loc) => handleAssignLocation(lpn, loc)} onDispatch={(lpn) => handleDispatch(lpn)} onReceive={handleReceive} itemsPendingLocation={inventory.filter(i => !i.location)} lastMixedSequence={mixedSequenceCounter} lastSequence={sequenceCounter} />}
                     {view === ViewState.DISPATCH_PROVINCE && <DispatchProvince catalog={catalog} user={currentUser} />}
                     {view === ViewState.SALIDAS_LPN && <SalidasLpn inventory={inventory} catalog={catalog} currentUser={currentUser} onDispatch={handleDispatch} onRefresh={loadInitialData} />}
-                    {view === ViewState.MOVIMIENTOS_LPN && <MovimientosLpn inventory={inventory} catalog={catalog} racks={racks} currentUser={currentUser} onAssignLocation={handleAssignLocation} onRefresh={loadInitialData} />}
+                    {view === ViewState.MOVIMIENTOS_LPN && <MovimientosLpn inventory={inventory} catalog={catalog} racks={racks} zones={zones} currentUser={currentUser} onAssignLocation={handleAssignLocation} onRefresh={loadInitialData} />}
                     {view === ViewState.PICKING && <AfternoonCar catalog={catalog} user={currentUser} initialViewMode="CARGA" />}
                     {view === ViewState.VALIDADOR && <AfternoonCar catalog={catalog} user={currentUser} initialViewMode="VALIDADOR" />}
                     {view === ViewState.PICKING_CONTROL && <AfternoonMonitor onClose={() => setView(ViewState.PICKING)} />}
