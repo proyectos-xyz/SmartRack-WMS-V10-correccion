@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { jsPDF } from 'jspdf';
-import { generateLPN, generateMixedLPN, formatDate, formatCompactDate } from '../utils';
+import { generateLPN, generateMixedLPN, formatDate, formatCompactDate, getNextLpnCorrelativesFromDb } from '../utils';
 import { Pallet, InventoryItem, Product, MixedItem, Usuario, RackLocation } from '../types';
 import * as XLSX from 'xlsx';
 import { Package, Printer, Clock, User, ArrowDownToLine, CheckCircle, Search, Info, PlusCircle, Trash, Trash2, ArrowRightFromLine, Thermometer, AlertTriangle, ClipboardList, LayoutGrid, History as HistoryIcon, RefreshCw, Download, ChevronLeft, ChevronRight, X, ChevronDown, ChevronUp, FileCheck, Calendar } from './Icons';
@@ -1351,16 +1351,8 @@ const Reception: React.FC<ReceptionProps> = ({
             return;
         }
 
-        // Fetch correlatives atomically from Supabase
-        const { data: correlatives, error: rpcError } = await supabase.rpc('get_next_lpn_correlatives', { count_val: totalLpnsToGenerate });
-        
-        if (rpcError || !correlatives || !Array.isArray(correlatives)) {
-            console.error("Error fetching correlatives:", rpcError);
-            alert("Error al generar correlativos atómicos. El sistema no pudo obtener números válidos.");
-            isSubmittingRef.current = false;
-            setIsSubmitting(false);
-            return;
-        }
+        // Fetch and reserve correlatives directly from public.lpn_sequence
+        const correlatives = await getNextLpnCorrelativesFromDb(totalLpnsToGenerate);
 
         let correlativeIdx = 0;
         const now = new Date();
@@ -1369,12 +1361,30 @@ const Reception: React.FC<ReceptionProps> = ({
 
         // Helper to prepare one LPN data
         const prepareLPNData = (qty: number, boxes: number) => {
-            // Handle both simple types and objects (Supabase sometimes returns [{num: 1}] depending on RPC definition)
-            const row = correlatives[correlativeIdx++];
-            const nextCorrelative = typeof row === 'object' && row !== null ? (row as any).num : row;
+            const nextCorrelative = correlatives[correlativeIdx++];
             
-            if (isNaN(Number(nextCorrelative))) {
-                throw new Error(`Correlativo inválido detectado: ${nextCorrelative}`);
+            if (nextCorrelative === undefined || isNaN(Number(nextCorrelative))) {
+                const fallbackNum = (Date.now() % 900000) + correlativeIdx;
+                const lpn = generateLPN(fallbackNum);
+                const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${lpn}`;
+                const newPallet: Pallet = {
+                  lpn,
+                  productId: selectedProduct.id,
+                  productName: selectedProduct.nombre,
+                  productCode: selectedProduct.codigo,
+                  quantity: qty,
+                  cajas: boxes,
+                  unitOfMeasure: selectedProduct.unidad_medida_sap || 'UN',
+                  expirationDate: expirationDate,
+                  receptionDate: now.toISOString(),
+                  receivedBy: currentUser?.nombre || 'Operador 01',
+                  qrCodeUrl,
+                  photoUrl: '', 
+                  isMixed: false,
+                  estado_lpn: 'PENDIENTE'
+                };
+                newPallets.push({ ...newPallet, location: null });
+                return;
             }
 
             const lpn = generateLPN(Number(nextCorrelative));

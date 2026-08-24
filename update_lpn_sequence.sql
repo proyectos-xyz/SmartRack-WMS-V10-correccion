@@ -1,10 +1,12 @@
--- Create a sequence for LPN correlatives
-CREATE SEQUENCE IF NOT EXISTS lpn_correlative_seq START 1;
+-- Table structure for LPN Sequence
+CREATE TABLE IF NOT EXISTS public.lpn_sequence (
+  id integer NOT NULL DEFAULT 1,
+  last_value integer NOT NULL DEFAULT 0,
+  CONSTRAINT lpn_sequence_pkey PRIMARY KEY (id)
+);
 
--- Function to get the next LPN correlatives atomically
-CREATE OR REPLACE FUNCTION get_next_lpn_correlatives(count_val INT DEFAULT 1)
-RETURNS SETOF BIGINT AS $$
-BEGIN
-  RETURN QUERY SELECT nextval('lpn_correlative_seq') FROM generate_series(1, count_val);
-END;
-$$ LANGUAGE plpgsql;
+-- Insert initial row if not exists
+INSERT INTO public.lpn_sequence (id, last_value)
+VALUES (1, 0)
+ON CONFLICT (id) DO NOTHING;
+

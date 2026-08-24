@@ -6,7 +6,7 @@ import {
     ClipboardList, Scan, Keyboard, ArrowRight, AlertTriangle, 
     Layers, CheckCheck, Sparkles, Barcode
 } from 'lucide-react';
-import { formatCompactDate, generateLPN } from '../utils';
+import { formatCompactDate, generateLPN, getNextLpnCorrelativesFromDb } from '../utils';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface ReceptionLaiveProps {
@@ -392,28 +392,12 @@ const ReceptionLaive: React.FC<ReceptionLaiveProps> = ({ currentUser, catalog })
                 return;
             }
 
-            // STEP 2: Fetch atomic correlatives from Supabase
+            // STEP 2: Fetch and reserve correlatives directly from public.lpn_sequence
             await new Promise(r => setTimeout(r, 400));
             setProcessingProgress(50);
-            setProcessingStepText("Obteniendo correlativos atómicos para generar LPNs...");
+            setProcessingStepText("Obteniendo correlativos de lpn_sequence para generar LPNs...");
 
-            let correlatives: number[] = [];
-            try {
-                const { data: rpcCorrelatives, error: rpcError } = await supabase.rpc('get_next_lpn_correlatives', { 
-                    count_val: validEntries.length 
-                });
-                if (!rpcError && Array.isArray(rpcCorrelatives) && rpcCorrelatives.length >= validEntries.length) {
-                    correlatives = rpcCorrelatives.map(r => typeof r === 'object' && r !== null ? Number((r as any).num) : Number(r));
-                }
-            } catch (rpcErr) {
-                console.warn("RPC correlatives fallback:", rpcErr);
-            }
-
-            // Fallback correlatives if RPC failed
-            if (correlatives.length < validEntries.length) {
-                const baseTimestamp = Date.now() % 100000;
-                correlatives = validEntries.map((_, i) => baseTimestamp + i + 1);
-            }
+            const correlatives = await getNextLpnCorrelativesFromDb(validEntries.length);
 
             // STEP 3: Generate LPN pallets and insert into paletas_lpn
             await new Promise(r => setTimeout(r, 400));

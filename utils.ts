@@ -1,3 +1,5 @@
+import { supabase } from './supabaseClient';
+
 export const generateLPN = (correlative: number): string => {
   const now = new Date();
   const year = now.getFullYear().toString().slice(-2);
@@ -12,6 +14,99 @@ export const generateLPN = (correlative: number): string => {
 
 export const generateMixedLPN = (correlative: number): string => {
   return `MIX${correlative}`;
+};
+
+/**
+ * Consumes N correlative numbers directly from public.lpn_sequence table (id = 1).
+ * Updates last_value = last_value + count and returns the reserved numbers array.
+ */
+export const getNextLpnCorrelativesFromDb = async (countVal: number = 1): Promise<number[]> => {
+  const count = Math.max(1, countVal);
+
+  try {
+    // 1. Query lpn_sequence for row id = 1
+    const { data: row, error: selectError } = await supabase
+      .from('lpn_sequence')
+      .select('id, last_value')
+      .eq('id', 1)
+      .maybeSingle();
+
+    let currentLastValue: number = 0;
+    let rowExists = false;
+
+    if (!selectError && row) {
+      currentLastValue = Number(row.last_value) || 0;
+      rowExists = true;
+    } else {
+      // Row or table not initialized yet, check max from paletas_lpn as seed
+      try {
+        const { data: maxLpnRows } = await supabase
+          .from('paletas_lpn')
+          .select('lpn')
+          .not('lpn', 'like', 'MIX%')
+          .order('created_at', { ascending: false })
+          .limit(25);
+
+        if (maxLpnRows && maxLpnRows.length > 0) {
+          for (const item of maxLpnRows) {
+            if (item.lpn && item.lpn.length >= 6) {
+              const last6 = parseInt(item.lpn.slice(-6), 10);
+              if (!isNaN(last6) && last6 > currentLastValue) {
+                currentLastValue = last6;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("Could not check paletas_lpn seed:", e);
+      }
+    }
+
+    const nextLastValue = currentLastValue + count;
+
+    // 2. Persist new last_value into lpn_sequence
+    if (rowExists) {
+      const { error: updateError } = await supabase
+        .from('lpn_sequence')
+        .update({ last_value: nextLastValue })
+        .eq('id', 1);
+
+      if (updateError) {
+        console.warn("Error updating lpn_sequence, trying upsert:", updateError);
+        await supabase.from('lpn_sequence').upsert({ id: 1, last_value: nextLastValue });
+      }
+    } else {
+      const { error: insertError } = await supabase
+        .from('lpn_sequence')
+        .upsert({ id: 1, last_value: nextLastValue });
+
+      if (insertError) {
+        console.warn("Error upserting lpn_sequence:", insertError);
+      }
+    }
+
+    // 3. Return allocated correlatives
+    const correlatives: number[] = [];
+    for (let i = 1; i <= count; i++) {
+      correlatives.push(currentLastValue + i);
+    }
+
+    return correlatives;
+  } catch (error) {
+    console.error("Critical error reserving correlatives from lpn_sequence:", error);
+    // Safe timestamp-based fallback if disconnected
+    const fallbackBase = Date.now() % 900000;
+    const correlatives: number[] = [];
+    for (let i = 1; i <= count; i++) {
+      correlatives.push(fallbackBase + i);
+    }
+    return correlatives;
+  }
+};
+
+export const getNextLpnCorrelative = async (): Promise<number> => {
+  const list = await getNextLpnCorrelativesFromDb(1);
+  return list[0];
 };
 
 export const formatDate = (dateStr: string): string => {

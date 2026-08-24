@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Product, InventoryItem, Usuario, MixedItem } from '../types';
-import { generateLPN, generateMixedLPN, formatDate } from '../utils';
+import { generateLPN, generateMixedLPN, formatDate, getNextLpnCorrelative } from '../utils';
 import { jsPDF } from 'jspdf';
 import JsBarcode from 'jsbarcode';
 import { supabase } from '../supabaseClient';
@@ -668,24 +668,10 @@ export const Rotulado: React.FC<RotuladoProps> = ({
     let correlative: number | null = null;
 
     try {
-      // Fetch atomic sequential value from database
-      const { data, error: rpcError } = await supabase.rpc('get_next_lpn_correlatives', { count_val: 1 });
-      if (!rpcError && data) {
-        let val: any;
-        if (Array.isArray(data)) {
-          const row = data[0];
-          val = typeof row === 'object' && row !== null ? (row as any).num : row;
-        } else {
-          val = data;
-        }
-        if (!isNaN(Number(val))) {
-          correlative = Number(val);
-        }
-      } else if (rpcError) {
-        console.error("RPC Error fetching correlative:", rpcError);
-      }
+      // Consume correlative directly from public.lpn_sequence
+      correlative = await getNextLpnCorrelative();
     } catch (e) {
-      console.error("Exception fetching correlative atomically:", e);
+      console.error("Exception fetching correlative from lpn_sequence:", e);
     }
 
     const nowStr = new Date().toISOString();
