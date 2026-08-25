@@ -6,8 +6,7 @@ import {
   Check, Ban, PlusCircle, ChevronDown, ChevronUp,
   ClipboardList, ArrowLeft
 } from 'lucide-react';
-import { supabase } from '../supabaseClient';
-import { compressImage, generateStorageFileName } from '../utils';
+import { uploadEvidenceImage } from '../utils';
 
 interface PendientesModalProps {
   isOpen: boolean;
@@ -97,27 +96,13 @@ export const PendientesModal: React.FC<PendientesModalProps> = ({
     setIsUploadingPhoto(true);
 
     try {
-      // Compress image client-side to keep size optimized and not fill storage (maxWidth = 800, quality = 0.6)
-      const compressedBlob = await compressImage(file, 800, 0.6);
-      const fileName = generateStorageFileName('jpg');
-      const filePath = `tareas/${fileName}`;
-
-      const { data, error: uploadError } = await supabase.storage
-        .from('evidencias')
-        .upload(filePath, compressedBlob, { contentType: 'image/jpeg' });
-
-      if (uploadError) throw uploadError;
-
-      if (data) {
-        const { data: { publicUrl } } = supabase.storage
-          .from('evidencias')
-          .getPublicUrl(filePath);
-
+      const publicUrl = await uploadEvidenceImage(file, 'tareas');
+      if (publicUrl) {
         setPhotos(prev => [...prev, publicUrl]);
       }
     } catch (err: any) {
       console.error("Error al subir imagen:", err);
-      alert(`Error al subir la imagen al storage: ${err.message || err}`);
+      alert(`Error al subir la imagen: ${err.message || err}`);
     } finally {
       setIsUploadingPhoto(false);
     }

@@ -217,10 +217,136 @@ export const getPeruDateString = (date: Date = new Date()): string => {
   }).format(date);
 };
 
-export const getPeruDayRangeISO = (dateStr?: string) => {
-  const peruDate = dateStr || getPeruDateString();
-  const startISO = new Date(`${peruDate}T00:00:00.000-05:00`).toISOString();
-  const endISO = new Date(`${peruDate}T23:59:59.999-05:00`).toISOString();
+export const getPeruDayRangeISO = (date: Date = new Date()): { peruDate: string; startISO: string; endISO: string } => {
+  const peruDate = getPeruDateString(date); // YYYY-MM-DD
+  // Peru is UTC-5
+  const startISO = `${peruDate}T00:00:00-05:00`;
+  const endISO = `${peruDate}T23:59:59.999-05:00`;
   return { peruDate, startISO, endISO };
 };
+
+export const ensureStorageBucket = async (bucketName: string = 'evidencias'): Promise<boolean> => {
+  try {
+    const { data: buckets } = await supabase.storage.listBuckets();
+    if (buckets && buckets.some(b => b.name === bucketName || b.id === bucketName)) {
+      return true;
+    }
+    const { error } = await supabase.storage.createBucket(bucketName, {
+      public: true,
+      fileSizeLimit: 10485760
+    });
+    if (!error) {
+      console.log(`[Storage] Bucket '${bucketName}' creado exitosamente.`);
+      return true;
+    } else {
+      console.warn(`[Storage] No se pudo crear bucket '${bucketName}' automáticamente:`, error.message);
+      return false;
+    }
+  } catch (e) {
+    console.warn(`[Storage] Excepción al verificar/crear bucket '${bucketName}':`, e);
+    return false;
+  }
+};
+
+/**
+ * Robust image uploader:
+ * 1. Skips already uploaded URLs (http/https).
+ * 2. Compresses base64 or File/Blob using canvas.
+ * 3. Uploads to Supabase Storage in 'evidencias/{folder}/{fileName}'.
+ * 4. If bucket is not found, automatically attempts creating the 'evidencias' bucket and retries.
+ * 5. If storage upload fails, safely falls back to compressed base64 so picking/dispatch transactions never crash.
+ */
+export const uploadEvidenceImage = async (
+  input: string | File | Blob,
+  folder: string = 'picking',
+  customFileName?: string
+): Promise<string> => {
+  if (typeof input === 'string' && (input.startsWith('http://') || input.startsWith('https://'))) {
+    return input;
+  }
+
+  const fileName = customFileName || generateStorageFileName();
+  const filePath = `${folder}/${fileName}`;
+
+  let blob: Blob;
+  let compressedDataUrl: string = '';
+
+  if (typeof input === 'string') {
+    try {
+      const res = await fetch(input);
+      const rawBlob = await res.blob();
+      const file = new File([rawBlob], fileName, { type: rawBlob.type || 'image/jpeg' });
+      blob = await compressImage(file, 1024, 0.6);
+      compressedDataUrl = input;
+    } catch {
+      blob = new Blob([input], { type: 'image/jpeg' });
+      compressedDataUrl = input;
+    }
+  } else if (input instanceof File) {
+    try {
+      blob = await compressImage(input, 1024, 0.6);
+    } catch {
+      blob = input;
+    }
+  } else {
+    blob = input;
+  }
+
+  // Attempt 1: Upload to Supabase Storage
+  try {
+    const { error: uploadError } = await supabase.storage
+      .from('evidencias')
+      .upload(filePath, blob, {
+        contentType: 'image/jpeg',
+        upsert: true
+      });
+
+    if (!uploadError) {
+      const { data: pubData } = supabase.storage
+        .from('evidencias')
+        .getPublicUrl(filePath);
+      return pubData.publicUrl;
+    }
+
+    // If bucket not found, attempt to create it and retry
+    const errorMsg = uploadError.message?.toLowerCase() || '';
+    if (errorMsg.includes('bucket not found') || (uploadError as any).statusCode === '404' || (uploadError as any).error === 'Bucket not found') {
+      console.warn("[Storage] Bucket 'evidencias' no encontrado. Intentando crearlo automáticamente...");
+      const created = await ensureStorageBucket('evidencias');
+      if (created) {
+        const { error: retryError } = await supabase.storage
+          .from('evidencias')
+          .upload(filePath, blob, {
+            contentType: 'image/jpeg',
+            upsert: true
+          });
+        if (!retryError) {
+          const { data: pubData } = supabase.storage
+            .from('evidencias')
+            .getPublicUrl(filePath);
+          return pubData.publicUrl;
+        }
+      }
+    }
+
+    console.warn(`[Storage] No se pudo subir imagen a storage (${uploadError.message}). Usando fallback.`);
+  } catch (err: any) {
+    console.warn("[Storage] Error al subir imagen a Supabase Storage:", err);
+  }
+
+  // Fallback: If we have data URL or can convert blob to compressed data URL, return it
+  if (compressedDataUrl && compressedDataUrl.startsWith('data:image')) {
+    return compressedDataUrl;
+  }
+
+  return new Promise<string>((resolve) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      resolve(reader.result as string || '');
+    };
+    reader.onerror = () => resolve('');
+    reader.readAsDataURL(blob);
+  });
+};
+
 

@@ -12,7 +12,7 @@ import {
 } from './Icons';
 import AfternoonMonitor from './AfternoonMonitor';
 import { motion, AnimatePresence } from 'motion/react';
-import { compressImage, generateStorageFileName } from '../utils';
+import { uploadEvidenceImage } from '../utils';
 
 const EyeOffIcon = ({ className }: { className?: string }) => (
     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
@@ -986,28 +986,18 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
                     return;
                 }
                 
-                const file = new File([blob], "camera_capture.jpg", { type: "image/jpeg" });
-                // Optimizar peso de imagen con maxWidth = 850, quality = 0.6
-                const compressedBlob = await compressImage(file, 850, 0.61);
-                
-                const fileName = generateStorageFileName();
-                const filePath = `picking/${fileName}`;
-                
-                const { error: uploadError } = await supabase.storage
-                    .from('evidencias')
-                    .upload(filePath, compressedBlob, { contentType: 'image/jpeg', upsert: true });
-                
-                if (uploadError) {
-                    throw uploadError;
+                try {
+                    const publicUrl = await uploadEvidenceImage(blob, 'picking');
+                    if (publicUrl) {
+                        setPickedPhotos([publicUrl]);
+                    }
+                    setShowCameraModal(false);
+                    setCameraUploading(false);
+                } catch (upErr: any) {
+                    console.error("Error uploading captured photo:", upErr);
+                    setCameraError("Error al guardar la foto: " + (upErr.message || upErr));
+                    setCameraUploading(false);
                 }
-                
-                const { data: { publicUrl } } = supabase.storage
-                    .from('evidencias')
-                    .getPublicUrl(filePath);
-                
-                setPickedPhotos([publicUrl]);
-                setShowCameraModal(false);
-                setCameraUploading(false);
             }, 'image/jpeg', 0.65);
         } catch (err: any) {
             console.error("Error capturing/uploading photo:", err);
@@ -1023,25 +1013,10 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
             setCameraUploading(true);
             setCameraError(null);
             
-            // Optimizar peso de imagen con maxWidth = 850, quality = 0.6
-            const compressedBlob = await compressImage(file, 850, 0.61);
-            
-            const fileName = generateStorageFileName();
-            const filePath = `picking/${fileName}`;
-            
-            const { error: uploadError } = await supabase.storage
-                .from('evidencias')
-                .upload(filePath, compressedBlob, { contentType: 'image/jpeg', upsert: true });
-                
-            if (uploadError) {
-                throw uploadError;
+            const publicUrl = await uploadEvidenceImage(file, 'picking');
+            if (publicUrl) {
+                setPickedPhotos([publicUrl]);
             }
-            
-            const { data: { publicUrl } } = supabase.storage
-                .from('evidencias')
-                .getPublicUrl(filePath);
-            
-            setPickedPhotos([publicUrl]);
             setShowCameraModal(false);
             setCameraUploading(false);
         } catch (err: any) {

@@ -3,7 +3,7 @@ import React, { useState, useRef } from 'react';
 import { Product, Usuario } from '../types';
 import { Search, Scan, Camera, XCircle, AlertTriangle, Trash2, CheckCircle, User, Calendar, FileText, Info } from './Icons';
 import { supabase } from '../supabaseClient';
-import { compressImage, generateStorageFileName } from '../utils';
+import { uploadEvidenceImage } from '../utils';
 import MermaReports from './MermaReports';
 
 interface MermasProps {
@@ -46,6 +46,7 @@ const Mermas: React.FC<MermasProps> = ({ catalog, currentUser }) => {
             const newFiles = Array.from(e.target.files);
             if (photos.length + newFiles.length > 3) {
                 alert("Máximo 3 fotos permitidas");
+                e.target.value = '';
                 return;
             }
 
@@ -54,6 +55,7 @@ const Mermas: React.FC<MermasProps> = ({ catalog, currentUser }) => {
                 preview: URL.createObjectURL(file)
             }));
             setPhotos(prev => [...prev, ...newPhotos]);
+            e.target.value = '';
         }
     };
 
@@ -79,38 +81,13 @@ const Mermas: React.FC<MermasProps> = ({ catalog, currentUser }) => {
         try {
             const uploadedUrls: string[] = [];
             for (const photo of photos) {
-                const fileName = generateStorageFileName();
-                const filePath = `Mermas/${fileName}`;
-
                 try {
-                    const compressedBlob = await compressImage(photo.file, 1024, 0.6);
-                    const { data, error: uploadError } = await supabase.storage
-                        .from('evidencias')
-                        .upload(filePath, compressedBlob, { contentType: 'image/jpeg' });
-
-                    if (uploadError) throw uploadError;
-
-                    if (data) {
-                        const { data: { publicUrl } } = supabase.storage
-                            .from('evidencias')
-                            .getPublicUrl(filePath);
+                    const publicUrl = await uploadEvidenceImage(photo.file, 'Mermas');
+                    if (publicUrl) {
                         uploadedUrls.push(publicUrl);
                     }
-                } catch (compressErr) {
-                    console.error("Error compressing image:", compressErr);
-                    // Fallback to original
-                    const { data, error: uploadError } = await supabase.storage
-                        .from('evidencias')
-                        .upload(filePath, photo.file);
-                    
-                    if (uploadError) throw uploadError;
-
-                    if (data) {
-                        const { data: { publicUrl } } = supabase.storage
-                            .from('evidencias')
-                            .getPublicUrl(filePath);
-                        uploadedUrls.push(publicUrl);
-                    }
+                } catch (err) {
+                    console.error("Error uploading photo:", err);
                 }
             }
 
@@ -415,7 +392,6 @@ const Mermas: React.FC<MermasProps> = ({ catalog, currentUser }) => {
                                 ref={fileInputRef}
                                 type="file"
                                 accept="image/*"
-                                capture="environment"
                                 className="hidden"
                                 onChange={handlePhotoChange}
                                 multiple

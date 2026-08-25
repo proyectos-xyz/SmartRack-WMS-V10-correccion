@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ReverseLogisticsItem, Product, Usuario } from '../types';
 import { supabase } from '../supabaseClient';
-import { compressImage, generateStorageFileName } from '../utils';
+import { uploadEvidenceImage } from '../utils';
 import { Camera, PlusCircle, History, Truck, Search, CheckCircle, Trash, Clock, Box, XCircle, FileSpreadsheet, RefreshCw } from './Icons';
 import * as XLSX from 'xlsx';
 
@@ -180,7 +180,10 @@ const ReverseLogistics: React.FC<Props> = ({ currentUser, catalog = [], onRefres
     const remainingSlots = 3 - photos.length;
     const filesToAdd = files.slice(0, remainingSlots);
 
-    if (filesToAdd.length === 0) return;
+    if (filesToAdd.length === 0) {
+      e.target.value = '';
+      return;
+    }
 
     setPhotos(prev => [...prev, ...filesToAdd]);
     
@@ -191,6 +194,7 @@ const ReverseLogistics: React.FC<Props> = ({ currentUser, catalog = [], onRefres
       };
       reader.readAsDataURL(file);
     });
+    e.target.value = '';
   };
 
   const removePhoto = (index: number) => {
@@ -221,42 +225,13 @@ const ReverseLogistics: React.FC<Props> = ({ currentUser, catalog = [], onRefres
       const photoUrls: string[] = [];
       for (let i = 0; i < photosToSave.length; i++) {
         const file = photosToSave[i];
-        const fileName = generateStorageFileName();
-        const filePath = `logistica_Inversa/${fileName}`;
-
         try {
-          const compressedBlob = await compressImage(file, 1024, 0.6);
-          const { error: uploadError } = await supabase.storage
-            .from('evidencias')
-            .upload(filePath, compressedBlob, { contentType: 'image/jpeg' });
-
-          if (uploadError) {
-            console.error("Error uploading reverse logistics photo:", uploadError);
-            continue;
+          const publicUrl = await uploadEvidenceImage(file, 'logistica_Inversa');
+          if (publicUrl) {
+            photoUrls.push(publicUrl);
           }
-
-          const { data: { publicUrl } } = supabase.storage
-            .from('evidencias')
-            .getPublicUrl(filePath);
-
-          photoUrls.push(publicUrl);
-        } catch (compressErr) {
-          console.error("Error compressing image:", compressErr);
-          // Fallback
-          const { error: uploadError } = await supabase.storage
-            .from('evidencias')
-            .upload(filePath, file, { contentType: 'image/jpeg' });
-
-          if (uploadError) {
-            console.error("Error uploading reverse logistics photo:", uploadError);
-            continue;
-          }
-
-          const { data: { publicUrl } } = supabase.storage
-            .from('evidencias')
-            .getPublicUrl(filePath);
-
-          photoUrls.push(publicUrl);
+        } catch (err) {
+          console.error("Error uploading reverse logistics photo:", err);
         }
       }
 
@@ -648,7 +623,7 @@ const ReverseLogistics: React.FC<Props> = ({ currentUser, catalog = [], onRefres
                                 <label className="w-16 h-16 border-2 border-dashed border-[#009ED6]/20 bg-[#009ED6]/5 rounded-xl flex flex-col items-center justify-center cursor-pointer hover:bg-[#009ED6]/10 transition-colors shrink-0 group">
                                     <Camera className="w-5 h-5 text-[#009ED6] group-hover:scale-110 transition-transform" />
                                     <span className="text-[7px] font-black text-[#009ED6] uppercase mt-0.5">Capturar</span>
-                                    <input type="file" accept="image/*" capture multiple className="hidden" onChange={handlePhotoUpload} />
+                                    <input type="file" accept="image/*" multiple className="hidden" onChange={handlePhotoUpload} />
                                 </label>
                             )}
                         </div>

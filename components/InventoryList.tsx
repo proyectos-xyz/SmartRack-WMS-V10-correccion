@@ -4,7 +4,7 @@ import { InventoryItem, Product, ZoneType, StocktakeRecord, Usuario, SystemStock
 import { BarChart as RechartsBarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LineChart, Line, Legend } from 'recharts';
 import { Search, AlertTriangle, Camera, CheckCircle, Check, ClipboardList, PlusCircle, History, FileSpreadsheet, XCircle, Scan, ChevronLeft, ChevronRight, FileText, Calculator, Bell, Delete, RefreshCw, User, Upload, Download, BarChart3, X, Clock } from './Icons';
 import { supabase } from '../supabaseClient';
-import { compressImage, generateStorageFileName, getPeruDayRangeISO } from '../utils';
+import { getPeruDayRangeISO, uploadEvidenceImage } from '../utils';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
@@ -1272,39 +1272,13 @@ const InventoryList: React.FC<InventoryListProps> = ({
               const uploadedUrls: string[] = [];
               
               for (const photo of photosToSave) {
-                  const fileName = generateStorageFileName();
-                  const filePath = `evidencias/${fileName}`;
-
                   try {
-                      const compressedBlob = await compressImage(photo.file, 1024, 0.6);
-                      const { data, error } = await supabase.storage
-                          .from('evidencias')
-                          .upload(filePath, compressedBlob, { contentType: 'image/jpeg' });
-
-                      if (error) {
-                          console.error("Error uploading photo in background:", error);
-                          continue;
-                      }
-
-                      if (data) {
-                          const { data: { publicUrl } } = supabase.storage
-                              .from('evidencias')
-                              .getPublicUrl(filePath);
+                      const publicUrl = await uploadEvidenceImage(photo.file, 'evidencias');
+                      if (publicUrl) {
                           uploadedUrls.push(publicUrl);
                       }
-                  } catch (compressErr) {
-                      console.error("Error compressing image:", compressErr);
-                      // Fallback to original if compression fails
-                      const { data } = await supabase.storage
-                          .from('evidencias')
-                          .upload(filePath, photo.file);
-                      
-                      if (data) {
-                          const { data: { publicUrl } } = supabase.storage
-                              .from('evidencias')
-                              .getPublicUrl(filePath);
-                          uploadedUrls.push(publicUrl);
-                      }
+                  } catch (imgErr) {
+                      console.error("Error uploading inventory photo:", imgErr);
                   }
               }
 

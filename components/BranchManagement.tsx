@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { Building2, Plus, RefreshCw, Palette, MapPin, Hash, Pencil, Save, X } from './Icons';
 import { Volume2, Play, Square, Music, Trash2, Loader2, VolumeX } from 'lucide-react';
 import { supabase } from '../supabaseClient';
+import { ensureStorageBucket } from '../utils';
 import { Sede, Usuario } from '../types';
 
 interface BranchManagementProps {
@@ -67,6 +68,7 @@ const BranchManagement: React.FC<BranchManagementProps> = () => {
 
         setIsUploading(true);
         try {
+            await ensureStorageBucket('evidencias');
             const code = isEdit ? editCode : newCode;
             const fileExt = 'mp3';
             const fileName = `AudiosAlerta/sede_${code || 'temp'}_${Date.now()}.${fileExt}`;

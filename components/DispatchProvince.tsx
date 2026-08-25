@@ -4,7 +4,7 @@ import * as XLSX from 'xlsx-js-style';
 import { DespachoEncabezado, DespachoItem, Product } from '../types';
 import { Upload, FileSpreadsheet, Truck, Box, CheckCircle, XCircle, Printer, Clock, Plus, Minus, Camera, X, Eye, AlertTriangle, Info, Bell, ChevronDown, ChevronLeft, ChevronRight, Pencil, Scale, Image as ImageIcon, Trash2, Save, BarChart3, MapPin } from './Icons';
 import { supabase } from '../supabaseClient';
-import { compressImage, generateStorageFileName } from '../utils';
+import { uploadEvidenceImage } from '../utils';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { 
@@ -1354,59 +1354,21 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
       // 3. Background Processing
       (async () => {
           try {
-              // Subir fotos al Storage y obtener URLs
+              // Subir fotos al Storage de forma segura con auto-creación de bucket y fallback
               const photoUrls: string[] = [];
               
               for (let i = 0; i < photosToUpload.length; i++) {
-                  const base64Data = photosToUpload[i];
-                  if (base64Data.startsWith('http')) {
-                      photoUrls.push(base64Data);
-                      continue;
-                  }
-                  
-                  const res = await fetch(base64Data);
-                  const blob = await res.blob();
-                  const file = new File([blob], `photo_${i}.jpg`, { type: 'image/jpeg' });
-                  
-                  const fileName = generateStorageFileName();
-                  const filePath = `picking/${fileName}`;
-
+                  const photoItem = photosToUpload[i];
                   try {
-                      const compressedBlob = await compressImage(file, 1024, 0.6);
-                      const { error: uploadError } = await supabase.storage
-                          .from('evidencias')
-                          .upload(filePath, compressedBlob, { 
-                              contentType: 'image/jpeg',
-                              upsert: true 
-                          });
-
-                      if (uploadError) {
-                          console.error("DEBUG: Storage error in evidencias bucket:", uploadError);
-                          throw new Error(`Error subiendo imagen: ${uploadError.message}`);
+                      const uploadedUrl = await uploadEvidenceImage(photoItem, 'picking');
+                      if (uploadedUrl) {
+                          photoUrls.push(uploadedUrl);
                       }
-
-                      const { data: pubData } = supabase.storage
-                          .from('evidencias')
-                          .getPublicUrl(filePath);
-                      
-                      photoUrls.push(pubData.publicUrl);
-                  } catch (compressErr: any) {
-                      console.error("Error compressing/uploading image:", compressErr);
-                      // Fallback to original blob if compression fails
-                      const { error: uploadError } = await supabase.storage
-                          .from('evidencias')
-                          .upload(filePath, blob, { 
-                              contentType: 'image/jpeg',
-                              upsert: true
-                          });
-
-                      if (uploadError) throw new Error(`Error subiendo imagen: ${uploadError.message}`);
-
-                      const { data: pubData } = supabase.storage
-                          .from('evidencias')
-                          .getPublicUrl(filePath);
-                      
-                      photoUrls.push(pubData.publicUrl);
+                  } catch (imgErr) {
+                      console.warn("No se pudo procesar imagen, usando dato original:", imgErr);
+                      if (typeof photoItem === 'string' && photoItem.length > 0) {
+                          photoUrls.push(photoItem);
+                      }
                   }
               }
 

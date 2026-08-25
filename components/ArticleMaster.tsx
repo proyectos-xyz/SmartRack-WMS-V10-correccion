@@ -3,7 +3,7 @@ import React, { useState, useMemo } from 'react';
 import { Product, ZoneType } from '../types';
 import { Upload, Database, Search, FileSpreadsheet, CheckCircle, XCircle, AlertTriangle, Clock, Camera, Download, ChevronLeft, ChevronRight, Plus, Trash, Scale } from './Icons';
 import { supabase } from '../supabaseClient';
-import { compressImage, generateStorageFileName } from '../utils';
+import { uploadEvidenceImage } from '../utils';
 
 declare var XLSX: any;
 
@@ -324,43 +324,13 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
       if (file && editingProduct) {
           setIsProcessing(true);
           try {
-              const fileName = generateStorageFileName();
-              const filePath = `productos/${fileName}`;
-
-              // Compresión de imagen
-              const compressedBlob = await compressImage(file, 800, 0.6);
-
-              const { error: uploadError } = await supabase.storage
-                  .from('evidencias')
-                  .upload(filePath, compressedBlob, { contentType: 'image/jpeg', upsert: true });
-
-              if (uploadError) {
-                  if (uploadError.message.includes('Bucket not found')) {
-                      throw new Error('El bucket "evidencias" no existe en Supabase Storage. Por favor, créalo.');
-                  }
-                  throw uploadError;
+              const publicUrl = await uploadEvidenceImage(file, 'productos');
+              if (publicUrl) {
+                  setEditingProduct({ ...editingProduct, [campo]: publicUrl });
               }
-
-              const { data: { publicUrl } } = supabase.storage
-                  .from('evidencias')
-                  .getPublicUrl(filePath);
-
-              setEditingProduct({ ...editingProduct, [campo]: publicUrl });
           } catch (err: any) {
               console.error("Error compressing/uploading image:", err);
-              // Fallback
-              try {
-                  const fileName = generateStorageFileName();
-                  const filePath = `productos/${fileName}`;
-                  const { error: uploadError } = await supabase.storage
-                      .from('evidencias')
-                      .upload(filePath, file!, { contentType: 'image/jpeg', upsert: true });
-                  if (uploadError) throw uploadError;
-                  const { data: { publicUrl } } = supabase.storage.from('evidencias').getPublicUrl(filePath);
-                  setEditingProduct({ ...editingProduct, [campo]: publicUrl });
-              } catch (fallbackErr: any) {
-                  alert("Error al subir imagen: " + fallbackErr.message);
-              }
+              alert("Error al procesar imagen: " + (err.message || err));
           } finally {
               setIsProcessing(false);
           }

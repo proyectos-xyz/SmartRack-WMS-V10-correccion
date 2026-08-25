@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { Sample, Usuario } from '../types';
 import { PlusCircle, Search, Camera, Beaker, CheckCircle, XCircle, Download, FileSpreadsheet, FileText, RefreshCw, Trash, AlertTriangle, Pencil, ChevronUp, ChevronDown, ChevronLeft, ChevronRight } from './Icons';
 import { supabase } from '../supabaseClient';
-import { compressImage, generateStorageFileName } from '../utils';
+import { uploadEvidenceImage } from '../utils';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
@@ -250,42 +250,13 @@ const Samples: React.FC<SamplesProps> = ({ currentUser }) => {
         const photoUrls: string[] = [];
         for (let i = 0; i < photosToSave.length; i++) {
           const file = photosToSave[i];
-          const fileName = generateStorageFileName();
-          const filePath = `muestras/${fileName}`;
-
           try {
-            const compressedBlob = await compressImage(file, 1024, 0.6);
-            const { error: uploadError } = await supabase.storage
-              .from('evidencias')
-              .upload(filePath, compressedBlob, { contentType: 'image/jpeg' });
-
-            if (uploadError) {
-              console.error("Error uploading sample photo in background:", uploadError);
-              continue;
+            const publicUrl = await uploadEvidenceImage(file, 'muestras');
+            if (publicUrl) {
+              photoUrls.push(publicUrl);
             }
-
-            const { data: { publicUrl } } = supabase.storage
-              .from('evidencias')
-              .getPublicUrl(filePath);
-
-            photoUrls.push(publicUrl);
-          } catch (compressErr) {
-            console.error("Error compressing image:", compressErr);
-            // Fallback to original
-            const { error: uploadError } = await supabase.storage
-              .from('evidencias')
-              .upload(filePath, file, { contentType: 'image/jpeg' });
-
-            if (uploadError) {
-              console.error("Error uploading sample photo in background:", uploadError);
-              continue;
-            }
-
-            const { data: { publicUrl } } = supabase.storage
-              .from('evidencias')
-              .getPublicUrl(filePath);
-
-            photoUrls.push(publicUrl);
+          } catch (err) {
+            console.error("Error uploading sample photo:", err);
           }
         }
 
@@ -444,23 +415,14 @@ const Samples: React.FC<SamplesProps> = ({ currentUser }) => {
       if (editPhotos.length > 0) {
         for (let i = 0; i < editPhotos.length; i++) {
           const file = editPhotos[i];
-          const fileName = generateStorageFileName();
-          const filePath = `muestras/${fileName}`;
-
-          const { error: uploadError } = await supabase.storage
-            .from('evidencias')
-            .upload(filePath, file, { contentType: 'image/jpeg' });
-
-          if (uploadError) {
-            console.error("Error uploading edit photo:", uploadError);
-            continue;
+          try {
+            const publicUrl = await uploadEvidenceImage(file, 'muestras');
+            if (publicUrl) {
+              finalPhotoUrls.push(publicUrl);
+            }
+          } catch (err) {
+            console.error("Error uploading edit photo:", err);
           }
-
-          const { data: { publicUrl } } = supabase.storage
-            .from('evidencias')
-            .getPublicUrl(filePath);
-          
-          finalPhotoUrls.push(publicUrl);
         }
       }
 

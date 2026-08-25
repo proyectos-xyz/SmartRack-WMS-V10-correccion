@@ -16,7 +16,7 @@ import {
     Pencil
 } from './Icons';
 import { supabase } from '../supabaseClient';
-import { compressImage, generateStorageFileName } from '../utils';
+import { uploadEvidenceImage } from '../utils';
 import * as XLSX from 'xlsx-js-style';
 import ExcelJS from 'exceljs';
 import SignatureCanvas from 'react-signature-canvas';
@@ -271,56 +271,21 @@ const MermaReports: React.FC<MermaReportsProps> = ({ currentUser, onBack }) => {
 
     const handleUploadSignedReport = async (reportId: string, file: File) => {
         try {
-            const fileName = generateStorageFileName();
-            const filePath = `ReportesFirmados/${fileName}`;
+            const publicUrl = await uploadEvidenceImage(file, 'ReportesFirmados');
+            if (!publicUrl) throw new Error("No se pudo obtener la URL de la imagen");
 
-            try {
-                const compressedBlob = await compressImage(file, 1024, 0.6);
-                const { error: uploadError } = await supabase.storage
-                    .from('evidencias')
-                    .upload(filePath, compressedBlob, { contentType: 'image/jpeg' });
+            const { error: updateError } = await supabase
+                .from('mermas_reportes')
+                .update({ foto_firmada: publicUrl })
+                .eq('id', reportId);
 
-                if (uploadError) throw uploadError;
+            if (updateError) throw updateError;
 
-                const { data: { publicUrl } } = supabase.storage
-                    .from('evidencias')
-                    .getPublicUrl(filePath);
-
-                const { error: updateError } = await supabase
-                    .from('mermas_reportes')
-                    .update({ foto_firmada: publicUrl })
-                    .eq('id', reportId);
-
-                if (updateError) throw updateError;
-
-                fetchData();
-                alert("Reporte firmado subido correctamente");
-            } catch (compressErr) {
-                console.error("Error compressing signed report:", compressErr);
-                // Fallback to original
-                const { error: uploadError } = await supabase.storage
-                    .from('evidencias')
-                    .upload(filePath, file);
-
-                if (uploadError) throw uploadError;
-
-                const { data: { publicUrl } } = supabase.storage
-                    .from('evidencias')
-                    .getPublicUrl(filePath);
-
-                const { error: updateError } = await supabase
-                    .from('mermas_reportes')
-                    .update({ foto_firmada: publicUrl })
-                    .eq('id', reportId);
-
-                if (updateError) throw updateError;
-
-                fetchData();
-                alert("Reporte firmado subido correctamente");
-            }
-        } catch (err) {
+            fetchData();
+            alert("Reporte firmado subido correctamente");
+        } catch (err: any) {
             console.error("Error uploading signed report:", err);
-            alert("Error al subir el reporte firmado");
+            alert("Error al subir el reporte firmado: " + (err.message || err));
         }
     };
 
@@ -525,63 +490,19 @@ const MermaReports: React.FC<MermaReportsProps> = ({ currentUser, onBack }) => {
         try {
             const signatureDataUrl = signatureRef.current.toDataURL();
             
-            // Convert base64 to Blob for upload
-            const res = await fetch(signatureDataUrl);
-            const blob = await res.blob();
-            const file = new File([blob], `signature_${currentReportId}.png`, { type: "image/png" });
+            const publicUrl = await uploadEvidenceImage(signatureDataUrl, 'firmas_digitales');
+            if (!publicUrl) throw new Error("No se pudo obtener URL de firma");
 
-            const fileName = generateStorageFileName();
-            const filePath = `firmas_digitales/${fileName}`;
+            // Save URL to Database
+            const { error } = await supabase
+                .from('mermas_reportes')
+                .update({ 
+                    firma_digital: publicUrl,
+                    responsable_firma: responsable
+                })
+                .eq('id', currentReportId);
 
-            // 1. Upload to Storage with compression
-            try {
-                const compressedBlob = await compressImage(file, 800, 0.6);
-                const { error: uploadError } = await supabase.storage
-                    .from('evidencias')
-                    .upload(filePath, compressedBlob, { contentType: 'image/jpeg' });
-
-                if (uploadError) throw uploadError;
-
-                // 2. Get Public URL
-                const { data: { publicUrl } } = supabase.storage
-                    .from('evidencias')
-                    .getPublicUrl(filePath);
-                
-                // 3. Save URL to Database
-                const { error } = await supabase
-                    .from('mermas_reportes')
-                    .update({ 
-                        firma_digital: publicUrl,
-                        responsable_firma: responsable
-                    })
-                    .eq('id', currentReportId);
-
-                if (error) throw error;
-            } catch (compressErr) {
-                console.error("Error compressing signature:", compressErr);
-                // Fallback to original
-                const { error: uploadError } = await supabase.storage
-                    .from('evidencias')
-                    .upload(filePath, file);
-
-                if (uploadError) throw uploadError;
-
-                // 2. Get Public URL
-                const { data: { publicUrl } } = supabase.storage
-                    .from('evidencias')
-                    .getPublicUrl(filePath);
-                
-                // 3. Save URL to Database
-                const { error } = await supabase
-                    .from('mermas_reportes')
-                    .update({ 
-                        firma_digital: publicUrl,
-                        responsable_firma: responsable
-                    })
-                    .eq('id', currentReportId);
-
-                if (error) throw error;
-            }
+            if (error) throw error;
 
             setIsSignatureModalOpen(false);
             fetchData();
