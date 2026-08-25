@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { InventoryItem, Product, ZoneType, StocktakeRecord, Usuario, SystemStock } from '../types';
 import { BarChart as RechartsBarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LineChart, Line, Legend } from 'recharts';
 import { Search, AlertTriangle, Camera, CheckCircle, Check, ClipboardList, PlusCircle, History, FileSpreadsheet, XCircle, Scan, ChevronLeft, ChevronRight, FileText, Calculator, Bell, Delete, RefreshCw, User, Upload, Download, BarChart3, X, Clock } from './Icons';
+import { Trash2, Lock } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { getPeruDayRangeISO, uploadEvidenceImage } from '../utils';
 import jsPDF from 'jspdf';
@@ -177,6 +178,15 @@ const InventoryList: React.FC<InventoryListProps> = ({
   // Stats Modal Filters
   const [statsInterval, setStatsInterval] = useState<5 | 30>(30);
   const [statsUserFilter, setStatsUserFilter] = useState<string>('TODOS');
+
+  // Zero Count & Audit States
+  const [selectedCountIds, setSelectedCountIds] = useState<string[]>([]);
+  const [showZeroConfirmModal, setShowZeroConfirmModal] = useState(false);
+  const [isProcessingZero, setIsProcessingZero] = useState(false);
+  const [showZeroHistoryModal, setShowZeroHistoryModal] = useState(false);
+  const [zeroAuditLogs, setZeroAuditLogs] = useState<any[]>([]);
+  const [isLoadingZeroLogs, setIsLoadingZeroLogs] = useState(false);
+  const [zeroHistorySearch, setZeroHistorySearch] = useState('');
 
   // References for Focus Management (Rapid Scanning)
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -2269,6 +2279,149 @@ const InventoryList: React.FC<InventoryListProps> = ({
     return filteredTodayCounts.slice(start, start + itemsPerPage);
   }, [filteredTodayCounts, currentPage]);
 
+  // --- ZERO COUNT & AUDIT LOGIC ---
+  // Check if current search term is an ICO code (starts with ICO, contains ICO, or matches catalog code/SKU)
+  const isIcoSearchActive = useMemo(() => {
+    const raw = searchTerm.trim();
+    if (!raw) return false;
+    const term = raw.toLowerCase();
+    
+    // Check direct ICO prefix or containment
+    if (term.startsWith('ico') || term.includes('ico')) return true;
+    
+    // Check if it matches an actual product code / SKU in catalog
+    const inCatalog = catalog.some(p => 
+      (p.codigo && p.codigo.trim().toLowerCase() === term) || 
+      (p.sku && p.sku.trim().toLowerCase() === term)
+    );
+    if (inCatalog) return true;
+
+    // Check if matches todayCounts code
+    const inCounts = todayCounts.some(c => c.codigo && c.codigo.trim().toLowerCase() === term);
+    return inCounts;
+  }, [searchTerm, catalog, todayCounts]);
+
+  const selectedCounts = useMemo(() => {
+    return todayCounts.filter(c => selectedCountIds.includes(c.id));
+  }, [todayCounts, selectedCountIds]);
+
+  const selectedTotalQty = useMemo(() => {
+    return selectedCounts.reduce((acc, c) => acc + (Number(c.cantidad) || 0), 0);
+  }, [selectedCounts]);
+
+  const toggleSelectCount = (id: string) => {
+    setSelectedCountIds(prev => 
+      prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
+    );
+  };
+
+  const toggleSelectAllFiltered = () => {
+    const filteredIds = filteredTodayCounts.map(c => c.id);
+    const allSelected = filteredIds.length > 0 && filteredIds.every(id => selectedCountIds.includes(id));
+    
+    if (allSelected) {
+      setSelectedCountIds(prev => prev.filter(id => !filteredIds.includes(id)));
+    } else {
+      setSelectedCountIds(prev => Array.from(new Set([...prev, ...filteredIds])));
+    }
+  };
+
+  const handleExecuteSetToZero = async () => {
+    if (selectedCountIds.length === 0) return;
+    setIsProcessingZero(true);
+    try {
+      const operario = currentUser?.nombre || currentUser?.username || 'SISTEMA';
+      const nowIso = new Date().toISOString();
+
+      const itemsToZero = todayCounts.filter(c => selectedCountIds.includes(c.id));
+
+      // 1. Insert audit logs in auditoria_escaneos
+      const auditEntries = itemsToZero.map(item => ({
+        usuario: operario,
+        placa: item.codigo,
+        documento: item.id,
+        ean_escaneado: item.codigo,
+        ean_esperado: 'PUESTO_EN_CERO',
+        descripcion_producto: `${item.nombre} | Venc: ${item.fecha_vencimiento || 'S/F'} | Cantidad anterior: ${item.cantidad}`,
+        tipo_evento: 'INVENTARIO_PUESTO_EN_CERO',
+        modulo: 'INVENTARIO',
+        sede_id: currentUser?.sede_id || null,
+        fecha: nowIso
+      }));
+
+      try {
+        await supabase.from('auditoria_escaneos').insert(auditEntries);
+      } catch (auditErr) {
+        console.warn("No se pudo registrar en auditoria_escaneos:", auditErr);
+      }
+
+      // 2. Update conteo_inventario records to 0
+      for (const item of itemsToZero) {
+        const { error } = await supabase
+          .from('conteo_inventario')
+          .update({
+            cantidad: 0,
+            pallets: 0,
+            cajas: 0,
+            unidades: 0,
+            accion: `PUESTO_EN_CERO por ${operario} (Cant. anterior: ${item.cantidad})`,
+            cantidad_accion: item.cantidad,
+            fecha_accion: nowIso
+          })
+          .eq('id', item.id);
+
+        if (error) throw error;
+      }
+
+      // 3. Update local state
+      setTodayCounts(prev => prev.map(c => {
+        if (selectedCountIds.includes(c.id)) {
+          return {
+            ...c,
+            cantidad: 0,
+            pallets: 0,
+            cajas: 0,
+            unidades: 0,
+            accion: `PUESTO_EN_CERO por ${operario} (Cant. anterior: ${c.cantidad})`,
+            cantidad_accion: c.cantidad,
+            fecha_accion: nowIso
+          };
+        }
+        return c;
+      }));
+
+      setShowZeroConfirmModal(false);
+      setSelectedCountIds([]);
+      alert(`✅ Se restablecieron ${itemsToZero.length} registros a CERO (0) exitosamente y se registró en el historial de auditoría.`);
+    } catch (err: any) {
+      console.error("Error al poner en cero:", err);
+      alert("Error al poner registros en cero: " + err.message);
+    } finally {
+      setIsProcessingZero(false);
+    }
+  };
+
+  const fetchZeroAuditLogs = async () => {
+    setIsLoadingZeroLogs(true);
+    setShowZeroHistoryModal(true);
+    try {
+      const { data, error } = await supabase
+        .from('auditoria_escaneos')
+        .select('*')
+        .eq('tipo_evento', 'INVENTARIO_PUESTO_EN_CERO')
+        .eq('modulo', 'INVENTARIO')
+        .order('fecha', { ascending: false })
+        .limit(100);
+
+      if (error) throw error;
+      setZeroAuditLogs(data || []);
+    } catch (err: any) {
+      console.error("Error al cargar historial de ceros:", err);
+    } finally {
+      setIsLoadingZeroLogs(false);
+    }
+  };
+
   const recountItems = useMemo(() => {
     // 1. Consolidate theoretical stock from SYSTEM STOCK (stock_sistema table)
     const theoreticalStock: Record<string, { nombre: string, cantidad: number, categoria: string, peso: number, costo: number, zona: string }> = {};
@@ -2481,16 +2634,23 @@ const InventoryList: React.FC<InventoryListProps> = ({
             </div>
             
             {activeTab === 'LIST' && (
-                <div className="flex items-center gap-2 mb-2 ml-auto">
+                <div className="flex flex-wrap items-center gap-2 mb-2 ml-auto">
+                    <button 
+                        onClick={fetchZeroAuditLogs}
+                        className="flex items-center gap-1.5 bg-slate-800 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-slate-900 transition-colors shadow-xs cursor-pointer"
+                        title="Ver auditoría de conteos puestos en cero"
+                    >
+                        <History className="w-4 h-4 text-red-400"/> Historial de Ceros
+                    </button>
                     <button 
                         onClick={() => setShowStatsModal(true)}
-                        className="flex items-center gap-2 bg-blue-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-blue-700"
+                        className="flex items-center gap-2 bg-blue-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-blue-700 shadow-xs cursor-pointer"
                     >
                         <BarChart3 className="w-4 h-4"/> Estadísticas
                     </button>
                     <button 
                         onClick={handleExportSession}
-                        className="flex items-center gap-2 bg-green-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-green-700"
+                        className="flex items-center gap-2 bg-green-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-green-700 shadow-xs cursor-pointer"
                     >
                         <FileSpreadsheet className="w-4 h-4"/> Excel
                     </button>
@@ -2501,13 +2661,17 @@ const InventoryList: React.FC<InventoryListProps> = ({
         {/* --- VIEW: TODAY'S COUNTS LIST --- */}
         {activeTab === 'LIST' && (
             <>
-                <div className="bg-white p-4 shadow-sm border-b border-gray-200">
+                <div className="bg-white p-4 shadow-sm border-b border-gray-200 space-y-3">
                     <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
                         <div className="relative flex-1">
                             <input 
                                 type="text" 
-                                placeholder="Buscar en conteos de hoy (código, EAN, SKU, nombre)..."
-                                className="w-full pl-10 pr-10 py-3 border border-gray-300 rounded-xl shadow-sm focus:ring-2 focus:ring-blue-500 outline-none font-medium text-sm md:text-base"
+                                placeholder="Buscar en conteos de hoy (código ICO, EAN, SKU, nombre)..."
+                                className={`w-full pl-10 pr-10 py-3 border rounded-xl shadow-sm focus:ring-2 focus:ring-blue-500 outline-none font-medium text-sm md:text-base transition-colors ${
+                                    isIcoSearchActive 
+                                        ? 'border-amber-400 bg-amber-50/20 ring-1 ring-amber-300' 
+                                        : 'border-gray-300'
+                                }`}
                                 value={searchTerm}
                                 onChange={e => setSearchTerm(e.target.value)}
                             />
@@ -2516,7 +2680,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                 <button 
                                     type="button"
                                     onClick={() => setSearchTerm('')}
-                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1 rounded-full hover:bg-gray-100"
+                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1 rounded-full hover:bg-gray-100 cursor-pointer"
                                 >
                                     <X className="w-4 h-4" />
                                 </button>
@@ -2545,7 +2709,57 @@ const InventoryList: React.FC<InventoryListProps> = ({
                             </span>
                         </div>
                     </div>
-                    <p className="text-[10px] font-bold text-gray-400 uppercase mt-2">Mostrando solo conteos realizados hoy</p>
+
+                    {/* --- ACTION BAR: SELECT ALL & ZERO BUTTON (ACTIVATED VIA ICO SEARCH) --- */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 border-t border-gray-100">
+                        <div className="flex items-center gap-3 flex-wrap">
+                            <label className="flex items-center gap-2 text-xs font-bold text-gray-700 cursor-pointer select-none hover:text-blue-600">
+                                <input 
+                                    type="checkbox"
+                                    className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-gray-300 cursor-pointer"
+                                    checked={filteredTodayCounts.length > 0 && filteredTodayCounts.every(c => selectedCountIds.includes(c.id))}
+                                    onChange={toggleSelectAllFiltered}
+                                />
+                                <span>Seleccionar todo ({filteredTodayCounts.length})</span>
+                            </label>
+
+                            {selectedCountIds.length > 0 && (
+                                <span className="text-xs bg-red-100 text-red-700 font-black px-2.5 py-0.5 rounded-full border border-red-200">
+                                    {selectedCountIds.length} seleccionado(s)
+                                </span>
+                            )}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                            {isIcoSearchActive ? (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        if (selectedCountIds.length === 0) {
+                                            alert("⚠️ Por favor seleccione al menos un registro usando las casillas (checkbox) para poner en cero.");
+                                            return;
+                                        }
+                                        setShowZeroConfirmModal(true);
+                                    }}
+                                    className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs md:text-sm font-black uppercase tracking-wide transition-all shadow-md cursor-pointer ${
+                                        selectedCountIds.length > 0
+                                            ? 'bg-red-600 hover:bg-red-700 text-white shadow-red-500/30 ring-2 ring-red-400 active:scale-95 animate-pulse'
+                                            : 'bg-red-100 hover:bg-red-200 text-red-700 border border-red-300'
+                                    }`}
+                                >
+                                    <Trash2 className="w-4 h-4 shrink-0" />
+                                    <span>Poner en CERO (0) {selectedCountIds.length > 0 ? `(${selectedCountIds.length})` : ''}</span>
+                                </button>
+                            ) : (
+                                <div className="flex items-center gap-2 bg-gray-100 text-gray-400 border border-gray-200 px-3.5 py-2 rounded-xl text-xs font-bold cursor-not-allowed">
+                                    <Lock className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                                    <span>Poner en CERO (Filtre por Código ICO para activar)</span>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    <p className="text-[10px] font-bold text-gray-400 uppercase mt-1">Mostrando solo conteos realizados hoy</p>
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-2 md:p-4 space-y-2 pb-20">
@@ -2559,35 +2773,59 @@ const InventoryList: React.FC<InventoryListProps> = ({
                         paginatedTodayCounts.map(item => {
                             const expStatus = getExpirationStatus(item.fecha_vencimiento);
                             const product = catalog.find(p => p.codigo === item.codigo || p.id === item.producto_id);
+                            const isSelected = selectedCountIds.includes(item.id);
                             
                             return (
-                                <div key={item.id} className={`bg-white rounded-lg shadow-sm border p-3 flex flex-col gap-2 ${expStatus.status !== 'OK' ? 'border-red-300' : 'border-gray-200'}`}>
-                                    <div className="flex justify-between items-start">
-                                        <div>
-                                            <h3 className="font-bold text-gray-900 leading-tight text-sm md:text-base break-words">{item.nombre}</h3>
-                                            <div className="flex flex-wrap gap-2 items-center mt-1">
-                                                <span className="text-sm font-black text-blue-600 font-mono tracking-tight">EAN: {item.codigo}</span>
-                                                {product && product.sku && (
-                                                    <span className="text-[10px] bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-mono font-bold">SKU: {product.sku}</span>
-                                                )}
-                                                {product && product.marca && (
-                                                    <span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-bold">{product.marca}</span>
-                                                )}
-                                                {product && product.categoria && (
-                                                    <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded italic">{product.categoria}</span>
-                                                )}
-                                                {product && (
-                                                    <span className={`px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider ${
-                                                        product.zona_predeterminada === 'SECO' ? 'bg-amber-100 text-amber-800' :
-                                                        product.zona_predeterminada === 'REFRIGERADO' ? 'bg-blue-100 text-blue-800' :
-                                                        'bg-indigo-100 text-indigo-800'
-                                                    }`}>
-                                                        {product.zona_predeterminada}
-                                                    </span>
-                                                )}
+                                <div 
+                                    key={item.id} 
+                                    className={`rounded-xl shadow-sm border p-3 flex flex-col gap-2 transition-all ${
+                                        isSelected 
+                                            ? 'bg-red-50/70 border-red-400 ring-2 ring-red-200 shadow-md' 
+                                            : expStatus.status !== 'OK' ? 'bg-white border-red-300' : 'bg-white border-gray-200'
+                                    }`}
+                                >
+                                    <div className="flex justify-between items-start gap-3">
+                                        <div className="flex items-start gap-2.5 flex-1 min-w-0">
+                                            <div className="pt-0.5 shrink-0">
+                                                <input 
+                                                    type="checkbox"
+                                                    className="w-5 h-5 rounded text-red-600 focus:ring-red-500 border-gray-300 cursor-pointer"
+                                                    checked={isSelected}
+                                                    onChange={() => toggleSelectCount(item.id)}
+                                                    aria-label={`Seleccionar ${item.nombre}`}
+                                                />
+                                            </div>
+                                            <div className="min-w-0 flex-1">
+                                                <h3 className="font-bold text-gray-900 leading-tight text-sm md:text-base break-words">{item.nombre}</h3>
+                                                <div className="flex flex-wrap gap-2 items-center mt-1">
+                                                    <span className="text-sm font-black text-blue-600 font-mono tracking-tight">EAN: {item.codigo}</span>
+                                                    {product && product.sku && (
+                                                        <span className="text-[10px] bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-mono font-bold">SKU: {product.sku}</span>
+                                                    )}
+                                                    {product && product.marca && (
+                                                        <span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-bold">{product.marca}</span>
+                                                    )}
+                                                    {product && product.categoria && (
+                                                        <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded italic">{product.categoria}</span>
+                                                    )}
+                                                    {product && (
+                                                        <span className={`px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider ${
+                                                            product.zona_predeterminada === 'SECO' ? 'bg-amber-100 text-amber-800' :
+                                                            product.zona_predeterminada === 'REFRIGERADO' ? 'bg-blue-100 text-blue-800' :
+                                                            'bg-indigo-100 text-indigo-800'
+                                                        }`}>
+                                                            {product.zona_predeterminada}
+                                                        </span>
+                                                    )}
+                                                    {item.accion && item.accion.includes('PUESTO_EN_CERO') && (
+                                                        <span className="text-[9px] bg-red-100 text-red-800 border border-red-200 px-2 py-0.5 rounded font-black flex items-center gap-1">
+                                                            <History className="w-3 h-3 text-red-600"/> PUESTO EN CERO (Prev: {item.cantidad_accion})
+                                                        </span>
+                                                    )}
+                                                </div>
                                             </div>
                                         </div>
-                                        <div className="flex flex-col items-end gap-1">
+                                        <div className="flex flex-col items-end gap-1 shrink-0">
                                             <div className="text-[10px] text-gray-400 font-bold">{new Date(item.fecha_registro).toLocaleTimeString()}</div>
                                             {expStatus.status !== 'OK' && (
                                                 <div className={`shrink-0 px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 ${expStatus.color}`}>
@@ -2601,7 +2839,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                     <div className="grid grid-cols-2 gap-4 items-center bg-slate-50 p-2 rounded-lg">
                                         <div>
                                             <label className="text-[8px] uppercase font-bold text-gray-400 block">Cantidad Total</label>
-                                            <div className="font-black text-lg text-gray-800">
+                                            <div className={`font-black text-lg ${Number(item.cantidad) === 0 ? 'text-red-500' : 'text-gray-800'}`}>
                                                 {Number(item.cantidad).toFixed(2)}
                                             </div>
                                             {(item.pallets !== undefined || item.cajas !== undefined || item.unidades !== undefined) && (
@@ -2626,13 +2864,17 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                                     setEditQty(item.cantidad.toString());
                                                     setEditDate(item.fecha_vencimiento);
                                                 }}
-                                                className="text-[10px] font-black uppercase text-blue-600 hover:bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-100 transition-all"
+                                                className="text-[10px] font-black uppercase text-blue-600 hover:bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-100 transition-all cursor-pointer"
                                             >
                                                 Editar
                                             </button>
                                         </div>
                                         
-                                        <div className="text-[10px] text-gray-400 font-bold italic">Por: {item.usuario_registro}</div>
+                                        <div className="text-[10px] text-gray-400 font-bold italic">
+                                            {item.accion && item.accion.includes('PUESTO_EN_CERO')
+                                                ? <span className="text-red-600 font-bold">{item.accion}</span>
+                                                : `Por: ${item.usuario_registro}`}
+                                        </div>
                                     </div>
                                 </div>
                             );
@@ -4940,6 +5182,213 @@ const InventoryList: React.FC<InventoryListProps> = ({
                         className="max-w-full max-h-[90vh] rounded-xl shadow-2xl object-contain animate-in zoom-in-95 duration-200"
                         referrerPolicy="no-referrer"
                     />
+                </div>
+            </div>
+        )}
+
+        {/* RED ALERT CONFIRMATION MODAL - VA A BORRAR EL CONTEO */}
+        {showZeroConfirmModal && (
+            <div className="fixed inset-0 bg-black/75 z-[600] flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
+                <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 md:p-6 max-w-lg w-full shadow-2xl border-2 border-red-500 animate-in zoom-in-95 duration-150">
+                    
+                    {/* Header with Red Alert */}
+                    <div className="flex items-start gap-3.5 mb-4 pb-4 border-b border-red-100 dark:border-red-900/30">
+                        <div className="p-3 bg-red-100 dark:bg-red-900/40 text-red-600 rounded-2xl shrink-0">
+                            <AlertTriangle className="w-8 h-8" />
+                        </div>
+                        <div className="flex-1">
+                            <span className="text-[10px] font-black tracking-wider uppercase text-red-600 bg-red-50 dark:bg-red-950 px-2 py-0.5 rounded border border-red-200">
+                                Acción Destructiva
+                            </span>
+                            <h3 className="text-lg md:text-xl font-black text-red-600 uppercase leading-tight mt-1">
+                                ¡Va a borrar el conteo!
+                            </h3>
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                                Advertencia de restablecimiento a CERO (0.00)
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setShowZeroConfirmModal(false)}
+                            disabled={isProcessingZero}
+                            className="p-1.5 text-gray-400 hover:text-gray-600 rounded-xl hover:bg-gray-100 transition-colors cursor-pointer"
+                        >
+                            <X className="w-5 h-5" />
+                        </button>
+                    </div>
+
+                    {/* Prominent Red Alert Message required by user */}
+                    <div className="p-4 bg-red-50 dark:bg-red-950/40 border-2 border-red-300 dark:border-red-800 rounded-2xl text-red-900 dark:text-red-200 font-bold text-sm leading-relaxed mb-4 shadow-xs">
+                        ⚠️ <span className="font-black text-red-700 dark:text-red-400">Va a borrar el conteo.</span> Si da clic en aceptar, se convertirá a <span className="underline font-black text-red-800 dark:text-red-200">CERO (0)</span> la cantidad de los <span className="font-black">{selectedCountIds.length}</span> registros que se hayan seleccionado.
+                    </div>
+
+                    {/* Summary Details */}
+                    <div className="space-y-3 mb-4">
+                        <div className="grid grid-cols-2 gap-2 bg-slate-50 dark:bg-slate-800/60 p-3 rounded-2xl border border-slate-200 dark:border-slate-700 text-xs">
+                            <div>
+                                <span className="text-gray-400 text-[10px] font-black uppercase block">Registros a poner en cero</span>
+                                <span className="text-base font-black text-gray-900 dark:text-white">{selectedCountIds.length} ítems</span>
+                            </div>
+                            <div>
+                                <span className="text-gray-400 text-[10px] font-black uppercase block">Total unidades que se anulan</span>
+                                <span className="text-base font-black text-red-600">{selectedTotalQty.toFixed(2)} unidades</span>
+                            </div>
+                            <div className="col-span-2 pt-2 border-t border-slate-200 dark:border-slate-700 flex justify-between items-center">
+                                <div>
+                                    <span className="text-gray-400 text-[10px] font-black uppercase block">Operario que pondrá en cero:</span>
+                                    <span className="font-bold text-gray-800 dark:text-gray-200 uppercase">{currentUser?.nombre || currentUser?.username || 'Usuario Actual'}</span>
+                                </div>
+                                <span className="text-[10px] bg-red-100 text-red-700 px-2 py-0.5 rounded font-bold">
+                                    Quedará registrado en auditoría
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* List preview of items to be zeroed */}
+                        <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1 border border-gray-200 dark:border-slate-700 rounded-xl p-2 bg-gray-50/50">
+                            <span className="text-[10px] font-black uppercase text-gray-400 block px-1">Detalle de ítems seleccionados:</span>
+                            {selectedCounts.map((c, idx) => (
+                                <div key={c.id || idx} className="bg-white dark:bg-slate-800 p-2 rounded-lg border border-gray-200 dark:border-slate-700 flex justify-between items-center text-xs">
+                                    <div className="min-w-0 pr-2 flex-1">
+                                        <p className="font-bold text-gray-900 dark:text-white truncate">{c.nombre}</p>
+                                        <span className="text-[10px] font-mono text-gray-500">Cód: {c.codigo} | Venc: {c.fecha_vencimiento || 'S/F'}</span>
+                                    </div>
+                                    <div className="text-right shrink-0">
+                                        <span className="text-red-500 font-bold line-through mr-1.5">{Number(c.cantidad).toFixed(2)}</span>
+                                        <span className="text-green-600 font-black">➔ 0.00</span>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div className="flex gap-3 pt-2">
+                        <button
+                            type="button"
+                            onClick={() => setShowZeroConfirmModal(false)}
+                            disabled={isProcessingZero}
+                            className="flex-1 py-3 rounded-xl border border-gray-300 dark:border-slate-700 font-bold text-xs md:text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-slate-800 uppercase transition-colors cursor-pointer"
+                        >
+                            Cancelar
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleExecuteSetToZero}
+                            disabled={isProcessingZero}
+                            className="flex-1 py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs md:text-sm uppercase tracking-wider shadow-lg shadow-red-600/30 flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50"
+                        >
+                            {isProcessingZero ? (
+                                <>
+                                    <RefreshCw className="w-4 h-4 animate-spin" />
+                                    <span>Procesando...</span>
+                                </>
+                            ) : (
+                                <>
+                                    <Trash2 className="w-4 h-4" />
+                                    <span>Aceptar y Poner en CERO</span>
+                                </>
+                            )}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* AUDIT HISTORY MODAL - HISTORIAL DE QUIÉN PUSO EN CERO */}
+        {showZeroHistoryModal && (
+            <div className="fixed inset-0 bg-black/60 z-[600] flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
+                <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 md:p-6 max-w-3xl w-full shadow-2xl border border-slate-100 dark:border-slate-800 animate-in zoom-in-95 duration-150 flex flex-col max-h-[90vh]">
+                    <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-100 dark:border-slate-800">
+                        <div className="flex items-center gap-2.5">
+                            <div className="p-2.5 bg-red-100 dark:bg-red-900/30 text-red-600 rounded-xl">
+                                <History className="w-5 h-5" />
+                            </div>
+                            <div>
+                                <h3 className="text-base md:text-lg font-black text-slate-800 dark:text-white uppercase tracking-wider">
+                                    Historial de Conteos Puestos en CERO
+                                </h3>
+                                <p className="text-xs text-gray-500">Auditoría completa de operarios que restablecieron cantidades a cero</p>
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setShowZeroHistoryModal(false)}
+                            className="p-1.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                        >
+                            <X className="w-5 h-5" />
+                        </button>
+                    </div>
+
+                    {/* Search filter in history */}
+                    <div className="mb-3">
+                        <input 
+                            type="text"
+                            placeholder="Buscar en historial por código ICO, usuario o producto..."
+                            value={zeroHistorySearch}
+                            onChange={e => setZeroHistorySearch(e.target.value)}
+                            className="w-full px-3.5 py-2.5 border border-gray-300 dark:border-slate-700 rounded-xl text-xs bg-slate-50 dark:bg-slate-800 text-gray-800 dark:text-white outline-none focus:ring-2 focus:ring-red-500"
+                        />
+                    </div>
+
+                    {/* History logs list */}
+                    <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+                        {isLoadingZeroLogs ? (
+                            <div className="text-center py-10 text-gray-400">Cargando historial de ceros...</div>
+                        ) : zeroAuditLogs.length === 0 ? (
+                            <div className="text-center py-10 text-gray-400">No hay registros de ceros en la base de datos de auditoría.</div>
+                        ) : (
+                            zeroAuditLogs
+                                .filter(log => {
+                                    if (!zeroHistorySearch.trim()) return true;
+                                    const term = zeroHistorySearch.toLowerCase().trim();
+                                    return (
+                                        (log.usuario && log.usuario.toLowerCase().includes(term)) ||
+                                        (log.ean_escaneado && log.ean_escaneado.toLowerCase().includes(term)) ||
+                                        (log.placa && log.placa.toLowerCase().includes(term)) ||
+                                        (log.descripcion_producto && log.descripcion_producto.toLowerCase().includes(term))
+                                    );
+                                })
+                                .map((log, index) => (
+                                    <div key={log.id || index} className="p-3.5 bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-2.5">
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                <span className="text-xs font-black text-red-600 font-mono bg-red-50 dark:bg-red-950 px-2 py-0.5 rounded border border-red-200">
+                                                    ICO / CÓD: {log.ean_escaneado || log.placa || 'S/C'}
+                                                </span>
+                                                <span className="text-xs font-bold text-gray-800 dark:text-gray-200">
+                                                    {log.descripcion_producto || 'Sin descripción'}
+                                                </span>
+                                            </div>
+                                            <p className="text-[11px] text-gray-500 mt-1.5">
+                                                Puesto en cero por: <strong className="text-gray-800 dark:text-gray-200 uppercase font-black">{log.usuario}</strong>
+                                            </p>
+                                        </div>
+                                        <div className="text-left md:text-right shrink-0">
+                                            <span className="text-[10px] font-bold text-gray-400 block">
+                                                {log.fecha ? new Date(log.fecha).toLocaleString('es-PE') : 'Fecha no disp.'}
+                                            </span>
+                                            <span className="text-[9px] bg-red-100 text-red-800 font-black px-2 py-0.5 rounded uppercase inline-block mt-0.5">
+                                                Cantidad ➔ 0.00
+                                            </span>
+                                        </div>
+                                    </div>
+                                ))
+                        )}
+                    </div>
+
+                    <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800 flex justify-between items-center">
+                        <span className="text-xs text-gray-400">
+                            Total registros de auditoría: {zeroAuditLogs.length}
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => setShowZeroHistoryModal(false)}
+                            className="px-5 py-2 rounded-xl text-xs font-black text-white bg-slate-800 hover:bg-slate-900 uppercase shadow-sm transition-colors cursor-pointer"
+                        >
+                            Cerrar
+                        </button>
+                    </div>
                 </div>
             </div>
         )}
