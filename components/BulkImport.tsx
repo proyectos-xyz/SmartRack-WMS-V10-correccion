@@ -3,8 +3,8 @@ import React, { useState, useRef } from 'react';
 import { Product, ZoneType } from '../types';
 import { Upload, FileSpreadsheet, CheckCircle, XCircle, Download, AlertTriangle, ListChecks, Database } from './Icons';
 import { supabase } from '../supabaseClient';
-
-declare var XLSX: any;
+import { saveExcelWorkbook } from '../utils';
+import * as XLSX from 'xlsx-js-style';
 
 interface BulkImportProps {
   onUpdateCatalog: (newProducts: Product[]) => void;
@@ -38,7 +38,7 @@ const BulkImport: React.FC<BulkImportProps> = ({ onUpdateCatalog }) => {
     const ws = XLSX.utils.aoa_to_sheet([headers, ...sampleData]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Plantilla");
-    XLSX.writeFile(wb, "Plantilla_Maestro_Articulos.xlsx");
+    saveExcelWorkbook(wb, "Plantilla_Maestro_Articulos.xlsx", XLSX);
   };
 
   const findVal = (row: any, searchTerms: string[]) => {

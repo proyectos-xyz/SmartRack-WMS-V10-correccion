@@ -2,9 +2,9 @@
 import React, { useState, useEffect } from 'react';
 import * as XLSX from 'xlsx-js-style';
 import { DespachoEncabezado, DespachoItem, Product } from '../types';
-import { Upload, FileSpreadsheet, Truck, Box, CheckCircle, XCircle, Printer, Clock, Plus, Minus, Camera, X, Eye, AlertTriangle, Info, Bell, ChevronDown, ChevronLeft, ChevronRight, Pencil, Scale, Image as ImageIcon, Trash2, Save, BarChart3, MapPin } from './Icons';
+import { Upload, FileSpreadsheet, Truck, Box, CheckCircle, XCircle, Printer, Clock, Plus, Minus, Camera, X, Eye, AlertTriangle, Info, Bell, ChevronDown, ChevronLeft, ChevronRight, Pencil, Scale, Image as ImageIcon, Trash2, Save, BarChart3, MapPin, RefreshCw } from './Icons';
 import { supabase } from '../supabaseClient';
-import { uploadEvidenceImage } from '../utils';
+import { uploadEvidenceImage, saveExcelWorkbook, getBase64ImageFromUrl, formatPhotoForExcel } from '../utils';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { 
@@ -324,18 +324,21 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
 
     setIsUploading(true);
     try {
-      const newPhotos = await Promise.all(files.map(file => {
-        return new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = (evt) => resolve(evt.target?.result as string);
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-      }));
-      setPickPhotos(prev => [...prev, ...newPhotos]);
-    } catch (err) {
-      console.error(err);
-      showAlert("Error al cargar una o más fotos", "Error", "error");
+      const uploadedUrls: string[] = [];
+      for (const file of files) {
+        // Direct upload to Supabase Storage bucket 'evidencias' in folder 'despacho_provincia'
+        const publicUrl = await uploadEvidenceImage(file, 'despacho_provincia');
+        if (publicUrl && (publicUrl.startsWith('http://') || publicUrl.startsWith('https://'))) {
+          uploadedUrls.push(publicUrl);
+        } else {
+          console.warn("Retorno de upload no es URL:", publicUrl);
+          if (publicUrl) uploadedUrls.push(publicUrl);
+        }
+      }
+      setPickPhotos(prev => [...prev, ...uploadedUrls]);
+    } catch (err: any) {
+      console.error("Error al subir fotos a storage:", err);
+      showAlert(err?.message || "Error al cargar una o más fotos al Storage", "Error", "error");
     } finally {
       setIsUploading(false);
       // Reset input value to allow re-uploading same file if needed
@@ -713,9 +716,9 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
                 'tvu_val': tvuPercentage, // Helper for sorting
                 'Preparado Por': it.usuario_preparacion || '',
                 'Fecha Preparación': it.fecha_preparacion ? new Date(it.fecha_preparacion).toLocaleString() : '',
-                'Foto 1': it.fotos && it.fotos[0] ? it.fotos[0] : '',
-                'Foto 2': it.fotos && it.fotos[1] ? it.fotos[1] : '',
-                'Foto 3': it.fotos && it.fotos[2] ? it.fotos[2] : ''
+                'Foto 1': formatPhotoForExcel(it.fotos?.[0]),
+                'Foto 2': formatPhotoForExcel(it.fotos?.[1]),
+                'Foto 3': formatPhotoForExcel(it.fotos?.[2])
             };
         });
 
@@ -784,10 +787,11 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
 
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, "Resumen de Carga");
-        XLSX.writeFile(wb, `Despacho_${header.provincia}_${new Date().toISOString().split('T')[0]}.xlsx`);
-    } catch (err) {
-        console.error(err);
-        showAlert("Error al exportar excel", "Error", "error");
+        const safeProvince = (header.provincia || 'Despacho').replace(/[^a-zA-Z0-9_-]/g, '_');
+        saveExcelWorkbook(wb, `Despacho_${safeProvince}_${new Date().toISOString().split('T')[0]}.xlsx`, XLSX);
+    } catch (err: any) {
+        console.error("Error al exportar excel:", err);
+        showAlert(err?.message || "Error al exportar excel", "Error", "error");
     } finally {
         setIsProcessing(false);
     }
@@ -855,9 +859,9 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
             'tvu_val': tvuPercentage,
             'Preparado Por': it.usuario_preparacion || '',
             'Fecha Preparación': it.fecha_preparacion ? new Date(it.fecha_preparacion).toLocaleString() : '',
-            'Foto 1': it.fotos && it.fotos[0] ? it.fotos[0] : '',
-            'Foto 2': it.fotos && it.fotos[1] ? it.fotos[1] : '',
-            'Foto 3': it.fotos && it.fotos[2] ? it.fotos[2] : ''
+            'Foto 1': formatPhotoForExcel(it.fotos?.[0]),
+            'Foto 2': formatPhotoForExcel(it.fotos?.[1]),
+            'Foto 3': formatPhotoForExcel(it.fotos?.[2])
           };
         });
 
@@ -926,9 +930,9 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
 
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Reporte Histórico General");
-      XLSX.writeFile(wb, `Reporte_General_Despachos_${new Date().toISOString().split('T')[0]}.xlsx`);
+      saveExcelWorkbook(wb, `Reporte_General_Despachos_${new Date().toISOString().split('T')[0]}.xlsx`, XLSX);
     } catch (err: any) {
-      console.error(err);
+      console.error("Error al exportar reporte general:", err);
       showAlert(err.message || "Error al exportar reporte general", "Error", "error");
     } finally {
       setIsProcessing(false);
@@ -1001,7 +1005,24 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
     doc.text(`Estado: ${selectedHistoryHeader.estado}`, 14, 33);
     doc.text(`Total Items: ${selectedHistoryHeader.total_items}`, 14, 38);
 
-    const tableData = await Promise.all(historyItems.map(async (it) => {
+    // Pre-load images to Base64 for jsPDF
+    const imageBase64Map = new Map<string, string>();
+    for (const item of historyItems) {
+        if (item.fotos && item.fotos.length > 0) {
+            for (const fUrl of item.fotos) {
+                if (fUrl && !imageBase64Map.has(fUrl)) {
+                    try {
+                        const b64 = await getBase64ImageFromUrl(fUrl);
+                        if (b64) imageBase64Map.set(fUrl, b64);
+                    } catch (e) {
+                        console.warn("Error pre-cargando imagen para PDF:", e);
+                    }
+                }
+            }
+        }
+    }
+
+    const tableData = historyItems.map((it) => {
         return [
             it.numero_paleta || 'S/P',
             it.codigo,
@@ -1015,7 +1036,7 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
             '', // Foto 2 placeholder
             ''  // Foto 3 placeholder
         ];
-    }));
+    });
 
     autoTable(doc, {
         startY: 45,
@@ -1036,10 +1057,14 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
                 const item = historyItems[itemIndex];
                 
                 if (item.fotos && item.fotos[photoIndex]) {
-                    try {
-                        doc.addImage(item.fotos[photoIndex], 'JPEG', data.cell.x + 2, data.cell.y + 2, 21, 16);
-                    } catch (e) {
-                        console.error("Error adding image to PDF", e);
+                    const rawUrlOrB64 = item.fotos[photoIndex];
+                    const imgToDraw = imageBase64Map.get(rawUrlOrB64) || (rawUrlOrB64.startsWith('data:image') ? rawUrlOrB64 : null);
+                    if (imgToDraw) {
+                        try {
+                            doc.addImage(imgToDraw, 'JPEG', data.cell.x + 2, data.cell.y + 2, 21, 16);
+                        } catch (e) {
+                            console.error("Error adding image to PDF", e);
+                        }
                     }
                 }
             }
@@ -1060,7 +1085,7 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
     const ws = XLSX.utils.aoa_to_sheet(sampleData);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Plantilla Despachos");
-    XLSX.writeFile(wb, "Plantilla_Ejemplo_Despachos.xlsx");
+    saveExcelWorkbook(wb, "Plantilla_Ejemplo_Despachos.xlsx", XLSX);
   };
 
   const handleImportExcel = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1354,20 +1379,21 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
       // 3. Background Processing
       (async () => {
           try {
-              // Subir fotos al Storage de forma segura con auto-creación de bucket y fallback
+              // Asegurar que todas las fotos sean URLs del Storage y no cadenas base64
               const photoUrls: string[] = [];
               
               for (let i = 0; i < photosToUpload.length; i++) {
                   const photoItem = photosToUpload[i];
-                  try {
-                      const uploadedUrl = await uploadEvidenceImage(photoItem, 'picking');
-                      if (uploadedUrl) {
-                          photoUrls.push(uploadedUrl);
-                      }
-                  } catch (imgErr) {
-                      console.warn("No se pudo procesar imagen, usando dato original:", imgErr);
-                      if (typeof photoItem === 'string' && photoItem.length > 0) {
-                          photoUrls.push(photoItem);
+                  if (typeof photoItem === 'string' && (photoItem.startsWith('http://') || photoItem.startsWith('https://'))) {
+                      photoUrls.push(photoItem);
+                  } else if (photoItem) {
+                      try {
+                          const uploadedUrl = await uploadEvidenceImage(photoItem, 'despacho_provincia');
+                          if (uploadedUrl && (uploadedUrl.startsWith('http://') || uploadedUrl.startsWith('https://'))) {
+                              photoUrls.push(uploadedUrl);
+                          }
+                      } catch (imgErr) {
+                          console.warn("Error al subir foto a storage en background:", imgErr);
                       }
                   }
               }
@@ -1553,10 +1579,10 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
                                                     </button>
                                                     <button 
                                                         onClick={(e) => handleDownloadExcel(e, h)}
-                                                        className="p-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-400 hover:text-[#009ED6] hover:shadow-md transition-all"
+                                                        className="p-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 hover:shadow-md transition-all cursor-pointer"
                                                         title="Descargar Excel de Carga"
                                                     >
-                                                        <Printer className="w-3.5 h-3.5"/>
+                                                        <FileSpreadsheet className="w-3.5 h-3.5"/>
                                                     </button>
                                                     {(user?.rol === 'ADMIN' || user?.rol === 'ASISTENTE') && (
                                                         <button 
@@ -1642,6 +1668,16 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
                                         <h2 className="text-3xl font-black text-slate-800 dark:text-white uppercase tracking-tighter">{headers.find(h => h.id === selectedHeaderId)?.provincia}</h2>
                                         <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Operación de Carga Activa</p>
                                     </div>
+                                    {headers.find(h => h.id === selectedHeaderId) && (
+                                        <button 
+                                            onClick={(e) => handleDownloadExcel(e, headers.find(h => h.id === selectedHeaderId)!)}
+                                            className="p-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl shadow-lg flex items-center gap-2 text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer hover:scale-105 active:scale-95"
+                                            title="Descargar Excel de Carga"
+                                        >
+                                            <FileSpreadsheet className="w-5 h-5"/>
+                                            <span className="hidden md:inline">Descargar Excel de Carga</span>
+                                        </button>
+                                    )}
                                     {headers.find(h => h.id === selectedHeaderId)?.has_tvu_warning && (
                                         <button 
                                             onClick={() => setShowTvuHighlights(!showTvuHighlights)}
@@ -1985,10 +2021,10 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
                                                 </button>
                                                 <button 
                                                     onClick={(e) => handleDownloadExcel(e, h)}
-                                                    className="p-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-400 hover:text-emerald-600 hover:shadow-md transition-all"
-                                                    title="Descargar Excel"
+                                                    className="p-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 hover:shadow-md transition-all cursor-pointer"
+                                                    title="Descargar Excel de Carga"
                                                 >
-                                                    <Printer className="w-3.5 h-3.5"/>
+                                                    <FileSpreadsheet className="w-3.5 h-3.5"/>
                                                 </button>
                                                 <button 
                                                     onClick={(e) => { e.stopPropagation(); setHeaderToDelete(h); setShowDeleteHistoryConfirm(true); }}
@@ -2440,9 +2476,18 @@ const DespachoProvincia: React.FC<DespachoProvinciaProps> = ({ catalog, user }) 
                                 </div>
                                 
                                 <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
-                                    <label className="w-16 h-16 bg-slate-100 dark:bg-slate-800 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl flex flex-col items-center justify-center cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-700 transition-all flex-shrink-0">
-                                        <Camera className="w-6 h-6 text-[#009ED6] mb-0.5" />
-                                        <span className="text-[7px] font-bold text-slate-500 uppercase">Subir</span>
+                                    <label className={`w-16 h-16 bg-slate-100 dark:bg-slate-800 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl flex flex-col items-center justify-center cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-700 transition-all flex-shrink-0 ${isUploading ? 'opacity-70 cursor-wait' : ''}`}>
+                                        {isUploading ? (
+                                            <>
+                                                <RefreshCw className="w-5 h-5 text-[#009ED6] animate-spin mb-0.5" />
+                                                <span className="text-[7px] font-bold text-[#009ED6] uppercase">Subiendo</span>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <Camera className="w-6 h-6 text-[#009ED6] mb-0.5" />
+                                                <span className="text-[7px] font-bold text-slate-500 uppercase">Subir</span>
+                                            </>
+                                        )}
                                         <input 
                                             type="file" 
                                             accept="image/*" 

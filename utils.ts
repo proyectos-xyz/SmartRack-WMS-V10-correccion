@@ -308,10 +308,10 @@ export const uploadEvidenceImage = async (
       return pubData.publicUrl;
     }
 
-    // If bucket not found, attempt to create it and retry
-    const errorMsg = uploadError.message?.toLowerCase() || '';
-    if (errorMsg.includes('bucket not found') || (uploadError as any).statusCode === '404' || (uploadError as any).error === 'Bucket not found') {
-      console.warn("[Storage] Bucket 'evidencias' no encontrado. Intentando crearlo automáticamente...");
+    // If bucket not found or initial upload failed, attempt to create it and retry
+    const errorMsg = uploadError?.message?.toLowerCase() || '';
+    if (errorMsg.includes('bucket not found') || (uploadError as any)?.statusCode === '404' || (uploadError as any)?.error === 'Bucket not found' || errorMsg.includes('row-level security') || errorMsg.includes('policy')) {
+      console.warn("[Storage] Verificando o creando bucket 'evidencias' automáticamente...");
       const created = await ensureStorageBucket('evidencias');
       if (created) {
         const { error: retryError } = await supabase.storage
@@ -347,6 +347,96 @@ export const uploadEvidenceImage = async (
     reader.onerror = () => resolve('');
     reader.readAsDataURL(blob);
   });
+};
+
+/**
+ * Converts any image URL (e.g. from Supabase Storage) to Base64 for PDF rendering or offline usage.
+ */
+export const getBase64ImageFromUrl = async (url: string): Promise<string> => {
+  if (!url) return '';
+  if (url.startsWith('data:image')) return url;
+  try {
+    const res = await fetch(url, { mode: 'cors' });
+    const blob = await res.blob();
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string || '');
+      reader.onerror = () => resolve('');
+      reader.readAsDataURL(blob);
+    });
+  } catch (e) {
+    console.warn("Error al convertir URL de imagen a Base64:", e);
+    return '';
+  }
+};
+
+/**
+ * Formats a photo URL or Base64 string safely for inclusion in an Excel cell.
+ * Prevents exceeding the 32,767 character limit of Microsoft Excel XLSX cells.
+ */
+export const formatPhotoForExcel = (photoUrl?: string): string => {
+  if (!photoUrl) return '';
+  if (photoUrl.startsWith('http://') || photoUrl.startsWith('https://')) {
+    return photoUrl;
+  }
+  if (photoUrl.startsWith('data:image') || photoUrl.length > 500) {
+    return '[Evidencia Base64 Guardada]';
+  }
+  return photoUrl.slice(0, 32700);
+};
+
+/**
+ * Safely downloads an XLSX / xlsx-js-style workbook in browser environment using Blobs.
+ * Sanitizes all worksheet cells to ensure they never exceed the Excel maximum 32,767 character limit.
+ */
+export const saveExcelWorkbook = (wb: any, fileName: string, xlsxLib: any): void => {
+  try {
+    // Sanitize all cells across all sheets to guarantee no string cell violates the 32,767 character ceiling
+    if (wb && wb.Sheets && wb.SheetNames) {
+      for (const sheetName of wb.SheetNames) {
+        const sheet = wb.Sheets[sheetName];
+        if (!sheet) continue;
+        for (const cellKey in sheet) {
+          if (cellKey.startsWith('!')) continue;
+          const cell = sheet[cellKey];
+          if (cell) {
+            if (typeof cell.v === 'string' && cell.v.length > 32700) {
+              if (cell.v.startsWith('data:image')) {
+                cell.v = '[Imagen Base64]';
+              } else {
+                cell.v = cell.v.substring(0, 32700);
+              }
+            }
+            if (typeof cell.w === 'string' && cell.w.length > 32700) {
+              if (cell.w.startsWith('data:image')) {
+                cell.w = '[Imagen Base64]';
+              } else {
+                cell.w = cell.w.substring(0, 32700);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const excelBuffer = xlsxLib.write(wb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([excelBuffer], { 
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=UTF-8' 
+    });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName.endsWith('.xlsx') ? fileName : `${fileName}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    }, 300);
+  } catch (err: any) {
+    console.error("Error al exportar libro Excel:", err);
+    throw new Error(err?.message || "Error al exportar archivo Excel");
+  }
 };
 
 

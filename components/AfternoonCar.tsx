@@ -12,7 +12,7 @@ import {
 } from './Icons';
 import AfternoonMonitor from './AfternoonMonitor';
 import { motion, AnimatePresence } from 'motion/react';
-import { uploadEvidenceImage } from '../utils';
+import { uploadEvidenceImage, saveExcelWorkbook } from '../utils';
 
 const EyeOffIcon = ({ className }: { className?: string }) => (
     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
@@ -500,7 +500,7 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
             const ws = XLSX.utils.json_to_sheet(excelData);
             const wb = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(wb, ws, `Plate_${plate}`);
-            XLSX.writeFile(wb, `Reporte_Placa_${plate}_${new Date().toISOString().split('T')[0]}.xlsx`);
+            saveExcelWorkbook(wb, `Reporte_Placa_${plate}_${new Date().toISOString().split('T')[0]}.xlsx`, XLSX);
             
             setToast({ show: true, message: 'Excel generado exitosamente', type: 'success' });
         } catch (err) {
@@ -641,9 +641,8 @@ const AfternoonCar: React.FC<AfternoonCarProps> = ({ catalog, user, initialViewM
         
         const ws = XLSX.utils.aoa_to_sheet([headers, ...data]);
         const wb = XLSX.utils.book_new();
-        XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, "CarroTarde");
-        XLSX.writeFile(wb, "Plantilla_Picking_Piking.xlsx");
+        saveExcelWorkbook(wb, "Plantilla_Picking_Piking.xlsx", XLSX);
     };
 
     const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {

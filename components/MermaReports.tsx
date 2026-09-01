@@ -16,7 +16,7 @@ import {
     Pencil
 } from './Icons';
 import { supabase } from '../supabaseClient';
-import { uploadEvidenceImage } from '../utils';
+import { uploadEvidenceImage, saveExcelWorkbook } from '../utils';
 import * as XLSX from 'xlsx-js-style';
 import ExcelJS from 'exceljs';
 import SignatureCanvas from 'react-signature-canvas';
@@ -193,7 +193,7 @@ const MermaReports: React.FC<MermaReportsProps> = ({ currentUser, onBack }) => {
         })));
         const workbook = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(workbook, worksheet, "Mermas");
-        XLSX.writeFile(workbook, fileName);
+        saveExcelWorkbook(workbook, fileName, XLSX);
     };
 
     const handleProcessMermas = async () => {
@@ -257,7 +257,7 @@ const MermaReports: React.FC<MermaReportsProps> = ({ currentUser, onBack }) => {
             })));
             const workbook = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(workbook, worksheet, "Mermas");
-            XLSX.writeFile(workbook, `${reportNumber}.xlsx`);
+            saveExcelWorkbook(workbook, `${reportNumber}.xlsx`, XLSX);
 
             // 4. Refresh
             setSelectedIds(new Set());
@@ -883,7 +883,7 @@ const MermaReports: React.FC<MermaReportsProps> = ({ currentUser, onBack }) => {
                                     })));
                                     const workbook = XLSX.utils.book_new();
                                     XLSX.utils.book_append_sheet(workbook, worksheet, "Todos los Items");
-                                    XLSX.writeFile(workbook, `Mermas_Todos_los_Items_${new Date().toISOString().split('T')[0]}.xlsx`);
+                                    saveExcelWorkbook(workbook, `Mermas_Todos_los_Items_${new Date().toISOString().split('T')[0]}.xlsx`, XLSX);
                                 }}
                                 className="bg-green-600 hover:bg-green-700 text-white px-6 py-4 rounded-2xl text-xs font-black uppercase tracking-widest flex items-center gap-2 transition-all shadow-lg shadow-green-600/20 whitespace-nowrap"
                             >
@@ -1030,7 +1030,7 @@ const MermaReports: React.FC<MermaReportsProps> = ({ currentUser, onBack }) => {
                                         })));
                                         const workbook = XLSX.utils.book_new();
                                         XLSX.utils.book_append_sheet(workbook, worksheet, "Mermas");
-                                        XLSX.writeFile(workbook, `${selectedReportNumber || 'Reporte'}.xlsx`);
+                                        saveExcelWorkbook(workbook, `${selectedReportNumber || 'Reporte'}.xlsx`, XLSX);
                                     }}
                                     className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest flex items-center gap-2 transition-all shadow-lg shadow-green-600/20"
                                 >

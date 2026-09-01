@@ -3,9 +3,8 @@ import React, { useState, useMemo } from 'react';
 import { Product, ZoneType } from '../types';
 import { Upload, Database, Search, FileSpreadsheet, CheckCircle, XCircle, AlertTriangle, Clock, Camera, Download, ChevronLeft, ChevronRight, Plus, Trash, Scale } from './Icons';
 import { supabase } from '../supabaseClient';
-import { uploadEvidenceImage } from '../utils';
-
-declare var XLSX: any;
+import { uploadEvidenceImage, saveExcelWorkbook, formatPhotoForExcel } from '../utils';
+import * as XLSX from 'xlsx-js-style';
 
 interface ArticleMasterProps {
   catalog: Product[];
@@ -139,13 +138,21 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
     e.preventDefault();
     if (!editingProduct) return;
     
+    if (!editingProduct.codigo?.trim() || !editingProduct.nombre?.trim()) {
+        alert("El Código Maestro y el Nombre del producto son obligatorios.");
+        return;
+    }
+
     setIsProcessing(true);
     const productToSave = { 
       ...editingProduct,
+      codigo: editingProduct.codigo.trim().toUpperCase(),
       es_seco: editingProduct.zona_predeterminada === 'SECO',
       es_refrigerado: editingProduct.zona_predeterminada === 'REFRIGERADO',
       es_congelado: editingProduct.zona_predeterminada === 'CONGELADO',
-      es_peso: editingProduct.requiere_pesaje,
+      es_peso: !!editingProduct.es_peso,
+      tiene_detraccion: !!editingProduct.tiene_detraccion,
+      requiere_pesaje: !!editingProduct.requiere_pesaje,
     } as Product;
 
     try {
@@ -420,18 +427,40 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Plantilla");
     
-    XLSX.writeFile(wb, "Plantilla_Maestro_Articulos.xlsx");
+    saveExcelWorkbook(wb, "Plantilla_Maestro_Articulos.xlsx", XLSX);
   };
 
   const handleDownloadDatabase = async () => {
     setIsProcessing(true);
     try {
-        const { data: dbProducts, error } = await supabase
-            .from('productos')
-            .select('*');
+        let allDbProducts: any[] = [];
+        let from = 0;
+        const pageSize = 1000;
+        let hasMore = true;
 
-        if (error) throw error;
-        if (!dbProducts || dbProducts.length === 0) {
+        while (hasMore) {
+            const to = from + pageSize - 1;
+            const { data: pageData, error } = await supabase
+                .from('productos')
+                .select('*')
+                .order('codigo', { ascending: true })
+                .range(from, to);
+
+            if (error) throw error;
+
+            if (pageData && pageData.length > 0) {
+                allDbProducts = allDbProducts.concat(pageData);
+                if (pageData.length < pageSize) {
+                    hasMore = false;
+                } else {
+                    from += pageSize;
+                }
+            } else {
+                hasMore = false;
+            }
+        }
+
+        if (allDbProducts.length === 0) {
             alert("No hay artículos en la base de datos para descargar");
             return;
         }
@@ -447,11 +476,11 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
           'nivel_3', 'nivel_4', 'categoria', 'tvm_dias', 'zona_predeterminada', 'requiere_pesaje', 
           'cajas_por_palet', 'usa_control_tara', 'peso_tara_caja_std', 'peso_tara_pallet_std', 
           'ean_bulto', 'unidades_por_caja', 'vida_util_dias', 'unidad_medida_sap', 'tiene_detraccion', 
-          'camara_texto', 'peso_unitario', 'foto_uno', 'foto_dos', 'multiplo', 'costo'
+          'camara_texto', 'peso_unitario', 'foto_uno', 'foto_dos', 'multiplo', 'costo', 'tvu_promesa', 'ventas_semanal', 'venta_media'
         ];
 
         // Gather all existing columns from the data rows
-        dbProducts.forEach(row => {
+        allDbProducts.forEach(row => {
             Object.keys(row).forEach(key => {
                 allKeys.add(key);
             });
@@ -466,11 +495,14 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
         });
 
         // Construct the row data dynamically from headers
-        const data = dbProducts.map(row => {
+        const data = allDbProducts.map(row => {
             return headers.map(header => {
                 const val = row[header];
                 if (val === null || val === undefined) return '';
                 if (typeof val === 'boolean') return val ? 'Y' : 'N';
+                if (typeof val === 'string' && (header === 'foto_uno' || header === 'foto_dos')) {
+                    return formatPhotoForExcel(val);
+                }
                 return val;
             });
         });
@@ -479,7 +511,7 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, "Maestro_Articulos");
         
-        XLSX.writeFile(wb, `Maestro_Articulos_Full_${new Date().getTime()}.xlsx`);
+        saveExcelWorkbook(wb, `Maestro_Articulos_Full_${allDbProducts.length}_items_${new Date().toISOString().slice(0,10)}.xlsx`, XLSX);
     } catch (err: any) {
         alert("Error al descargar la base de datos completa: " + err.message);
     } finally {
@@ -1151,8 +1183,11 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
                                 <input className="w-full p-4 bg-slate-50 dark:bg-slate-800 dark:text-white rounded-2xl font-bold uppercase text-xs border-none outline-none focus:ring-2 focus:ring-indigo-500" value={newProduct.marca || ''} onChange={e => setNewProduct({...newProduct, marca: e.target.value})} />
                             </div>
                             <div className="space-y-1">
-                                <label className="text-[10px] font-black text-slate-400 uppercase ml-1">U. Venta</label>
-                                <input className="w-full p-4 bg-slate-50 dark:bg-slate-800 dark:text-white rounded-2xl font-black uppercase text-xs border-none outline-none focus:ring-2 focus:ring-indigo-500" value={newProduct.unidad_venta || ''} onChange={e => setNewProduct({...newProduct, unidad_venta: e.target.value})} />
+                                <label className="text-[10px] font-black text-[#009ED6] uppercase ml-1 flex items-center justify-between">
+                                    <span>U.M. LPN / Venta *</span>
+                                    <span className="text-[8px] bg-sky-100 dark:bg-sky-900/60 text-[#009ED6] px-1.5 py-0.5 rounded">En LPN</span>
+                                </label>
+                                <input required className="w-full p-4 bg-sky-50/50 dark:bg-slate-800 dark:text-white rounded-2xl font-black uppercase text-xs border border-sky-200 dark:border-sky-800 outline-none focus:ring-2 focus:ring-[#009ED6]" value={newProduct.unidad_venta || ''} onChange={e => setNewProduct({...newProduct, unidad_venta: e.target.value.toUpperCase()})} placeholder="Ej: NIU, UND, KGM, PK, BX" />
                             </div>
                             <div className="space-y-1">
                                 <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Unidades x Caja</label>
@@ -1402,11 +1437,12 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
 
                             <div className="grid grid-cols-2 md:grid-cols-5 gap-2.5">
                                 <div className="space-y-1">
-                                    <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase ml-0.5">Código Maestro</label>
+                                    <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase ml-0.5">Código Maestro *</label>
                                     <input 
-                                        readOnly 
-                                        className="w-full px-2.5 py-1.5 bg-slate-100 dark:bg-slate-800 dark:text-slate-500 rounded-lg font-mono text-xs border border-transparent cursor-not-allowed" 
+                                        required
+                                        className="w-full px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg font-mono font-bold text-xs outline-none focus:ring-1 focus:ring-[#009ED6]" 
                                         value={editingProduct.codigo} 
+                                        onChange={e => setEditingProduct({...editingProduct, codigo: e.target.value.toUpperCase()})}
                                     />
                                 </div>
                                 <div className="space-y-1">
@@ -1447,15 +1483,23 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
 
                         {/* SECCIÓN 2: CONTROL LOGÍSTICO, EQUIVALENCIAS Y EMBLAJE */}
                         <div className="bg-slate-50/50 dark:bg-slate-800/20 border border-slate-100 dark:border-slate-800/80 p-3 rounded-xl space-y-2.5">
-                            <h3 className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest border-b border-slate-100 dark:border-slate-800 pb-1">Unidades, Embalaje y Factor</h3>
+                            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-1">
+                                <h3 className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest">Unidades de Medida, Embalaje y Factores</h3>
+                                <span className="text-[8px] font-extrabold uppercase bg-sky-50 dark:bg-sky-950/50 text-[#009ED6] px-2 py-0.5 rounded-md border border-sky-100 dark:border-sky-900">U.M. LPN & Operaciones</span>
+                            </div>
                             
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
                                 <div className="space-y-1">
-                                    <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase ml-0.5">Unidad Venta</label>
+                                    <label className="text-[9px] font-black text-[#009ED6] dark:text-sky-400 uppercase ml-0.5 flex items-center justify-between">
+                                        <span>U.M. LPN / Venta *</span>
+                                        <span className="text-[7.5px] font-bold text-sky-600 dark:text-sky-300 bg-sky-100 dark:bg-sky-900/60 px-1 rounded">Ver en LPN</span>
+                                    </label>
                                     <input 
-                                        className="w-full px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg font-black uppercase text-xs outline-none focus:ring-1 focus:ring-[#009ED6]" 
+                                        required
+                                        className="w-full px-2.5 py-1.5 bg-sky-50/40 dark:bg-sky-950/30 border border-[#009ED6]/40 dark:border-sky-700/60 rounded-lg font-black uppercase text-xs outline-none focus:ring-2 focus:ring-[#009ED6] text-[#007ba8] dark:text-sky-200" 
                                         value={editingProduct.unidad_venta || ''} 
-                                        onChange={e => setEditingProduct({...editingProduct, unidad_venta: e.target.value})} 
+                                        onChange={e => setEditingProduct({...editingProduct, unidad_venta: e.target.value.toUpperCase()})} 
+                                        placeholder="Ej: NIU, UND, KGM, PK, BX"
                                     />
                                 </div>
                                 <div className="space-y-1">
@@ -1490,6 +1534,24 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
 
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
                                 <div className="space-y-1">
+                                    <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase ml-0.5">U.M. SAP</label>
+                                    <input 
+                                        className="w-full px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg font-bold uppercase text-xs outline-none focus:ring-1 focus:ring-[#009ED6]" 
+                                        value={editingProduct.unidad_medida_sap || ''} 
+                                        onChange={e => setEditingProduct({...editingProduct, unidad_medida_sap: e.target.value.toUpperCase()})} 
+                                        placeholder="Ej: BX, UN, KG"
+                                    />
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase ml-0.5">U.M. Compra</label>
+                                    <input 
+                                        className="w-full px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg font-black uppercase text-xs outline-none focus:ring-1 focus:ring-[#009ED6]" 
+                                        value={editingProduct.unidad_compra || ''} 
+                                        onChange={e => setEditingProduct({...editingProduct, unidad_compra: e.target.value.toUpperCase()})} 
+                                        placeholder="Ej: BX, CJ, PAL"
+                                    />
+                                </div>
+                                <div className="space-y-1">
                                     <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase ml-0.5">Factor Inventario</label>
                                     <input 
                                         type="number" 
@@ -1500,14 +1562,6 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
                                     />
                                 </div>
                                 <div className="space-y-1">
-                                    <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase ml-0.5">U. Compra</label>
-                                    <input 
-                                        className="w-full px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg font-black uppercase text-xs outline-none focus:ring-1 focus:ring-[#009ED6]" 
-                                        value={editingProduct.unidad_compra || ''} 
-                                        onChange={e => setEditingProduct({...editingProduct, unidad_compra: e.target.value})} 
-                                    />
-                                </div>
-                                <div className="space-y-1">
                                     <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase ml-0.5">Factor Unidad</label>
                                     <input 
                                         type="number" 
@@ -1515,14 +1569,6 @@ const ArticleMaster: React.FC<ArticleMasterProps> = ({ catalog, onUpdateCatalog,
                                         className="w-full px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg font-black text-xs outline-none focus:ring-1 focus:ring-[#009ED6]" 
                                         value={editingProduct.factor_unidad} 
                                         onChange={e => setEditingProduct({...editingProduct, factor_unidad: parseFloat(e.target.value) || 1})} 
-                                    />
-                                </div>
-                                <div className="space-y-1">
-                                    <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase ml-0.5">U.M. SAP</label>
-                                    <input 
-                                        className="w-full px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg font-bold uppercase text-xs outline-none focus:ring-1 focus:ring-[#009ED6]" 
-                                        value={editingProduct.unidad_medida_sap || ''} 
-                                        onChange={e => setEditingProduct({...editingProduct, unidad_medida_sap: e.target.value})} 
                                     />
                                 </div>
                             </div>
