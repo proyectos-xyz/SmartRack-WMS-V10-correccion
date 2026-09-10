@@ -86,7 +86,7 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
   const [isClientDropdownOpen, setIsClientDropdownOpen] = useState(false);
   const clientDropdownRef = useRef<HTMLDivElement>(null);
 
-  // Cliente creation modal states (ASISTENTE only)
+  // Cliente creation modal states
   const [isClientModalOpen, setIsClientModalOpen] = useState(false);
   const [newClientNombre, setNewClientNombre] = useState('');
   const [newClientDocumento, setNewClientDocumento] = useState('');
@@ -149,10 +149,6 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
 
   const handleQuickCreateCliente = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (currentUser?.rol !== 'ASISTENTE') {
-      alert('Solo los usuarios con rol de ASISTENTE pueden crear clientes.');
-      return;
-    }
 
     if (!newClientNombre.trim()) {
       alert('Por favor ingrese el nombre del cliente.');
@@ -876,16 +872,19 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
             <div className="space-y-1 relative" ref={clientDropdownRef}>
               <div className="flex justify-between items-center ml-1">
                 <label className="text-[10px] font-black text-slate-400 uppercase block">Cliente / Destinatario *</label>
-                {currentUser?.rol === 'ASISTENTE' && (
-                  <button
-                    type="button"
-                    onClick={() => setIsClientModalOpen(true)}
-                    className="flex items-center gap-1 text-[10px] font-black uppercase text-[#009ED6] hover:text-[#0089ba] tracking-wide cursor-pointer transition-all hover:scale-105 active:scale-95"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    Registrar Cliente
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (clientSearchTerm.trim() && !selectedCliente) {
+                      setNewClientNombre(clientSearchTerm.trim());
+                    }
+                    setIsClientModalOpen(true);
+                  }}
+                  className="flex items-center gap-1 text-[10px] font-black uppercase text-[#009ED6] hover:text-[#0089ba] tracking-wide cursor-pointer transition-all hover:scale-105 active:scale-95"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Registrar Cliente
+                </button>
               </div>
               <div className="relative">
                 <input
@@ -942,7 +941,19 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
               )}
               {isClientDropdownOpen && clientSearchTerm.trim() !== '' && filteredClientes.length === 0 && (
                 <div className="absolute left-0 right-0 mt-2 bg-white dark:bg-slate-800 border border-zinc-100 dark:border-slate-700 rounded-2xl shadow-xl p-4 text-center text-xs text-slate-400 font-bold z-50">
-                  No se encontraron clientes con "{clientSearchTerm}".
+                  <p className="mb-2">No se encontraron clientes con "{clientSearchTerm}".</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewClientNombre(clientSearchTerm.trim());
+                      setIsClientDropdownOpen(false);
+                      setIsClientModalOpen(true);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#009ED6] text-white text-[10px] font-black uppercase rounded-lg hover:bg-[#0089ba] cursor-pointer shadow-sm transition-all"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Registrar "{clientSearchTerm.trim()}"
+                  </button>
                 </div>
               )}
             </div>
@@ -1743,7 +1754,7 @@ export const Cortes: React.FC<CortesProps> = ({ catalog, currentUser }) => {
           <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl border border-slate-100 dark:border-slate-800 animate-in fade-in zoom-in duration-200">
             <div className="flex justify-between items-start mb-6">
               <div>
-                <span className="text-[10px] font-black text-[#009ED6] uppercase tracking-widest">ASISTENTE PRIVILEGES</span>
+                <span className="text-[10px] font-black text-[#009ED6] uppercase tracking-widest">REGISTRO RÁPIDO DE CLIENTE</span>
                 <h2 className="text-lg font-black text-slate-800 dark:text-white uppercase mt-0.5">Crear Nuevo Cliente</h2>
               </div>
               <button 
