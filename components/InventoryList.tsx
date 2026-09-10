@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { InventoryItem, Product, ZoneType, StocktakeRecord, Usuario, SystemStock } from '../types';
 import { BarChart as RechartsBarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LineChart, Line, Legend } from 'recharts';
 import { Search, AlertTriangle, Camera, CheckCircle, Check, ClipboardList, PlusCircle, History, FileSpreadsheet, XCircle, Scan, ChevronLeft, ChevronRight, FileText, Calculator, Bell, Delete, RefreshCw, User, Upload, Download, BarChart3, X, Clock } from './Icons';
-import { Trash2, Lock } from 'lucide-react';
+import { Trash2, Lock, Printer } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { getPeruDayRangeISO, uploadEvidenceImage } from '../utils';
 import jsPDF from 'jspdf';
@@ -92,6 +92,28 @@ const InventoryList: React.FC<InventoryListProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'LIST' | 'COUNT' | 'RECOUNT'>('COUNT');
   const [recountSubTab, setRecountSubTab] = useState<'DIFERENCIAS' | 'CRUCES'>('DIFERENCIAS');
+  const [recountDiffFilter, setRecountDiffFilter] = useState<'CRITICAS' | 'TODAS'>('CRITICAS');
+  const [recountSearchQuery, setRecountSearchQuery] = useState<string>('');
+  const [recountModalItem, setRecountModalItem] = useState<{
+    codigo: string;
+    nombre: string;
+    theoretical: number;
+    counted: number;
+    diff: number;
+    percentage: number;
+    movimiento: number;
+    zona: string;
+    categoria: string;
+    costo: number;
+    peso: number;
+  } | null>(null);
+  const [recountInputQty, setRecountInputQty] = useState<string>('');
+  const [recountInputPallets, setRecountInputPallets] = useState<string>('');
+  const [recountInputBoxes, setRecountInputBoxes] = useState<string>('');
+  const [recountInputUnits, setRecountInputUnits] = useState<string>('');
+  const [recountInputExpiry, setRecountInputExpiry] = useState<string>('');
+  const [recountInputObs, setRecountInputObs] = useState<string>('');
+  const [isSavingRecount, setIsSavingRecount] = useState<boolean>(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   
@@ -152,7 +174,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
   const [isDownloading, setIsDownloading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadSuccess, setUploadSuccess] = useState(false);
-  const [uploadStats, setUploadStats] = useState<{ productsCount: number; totalUnits: number; totalCost: number } | null>(null);
+  const [uploadStats, setUploadStats] = useState<{ productsCount: number; totalUnits: number; totalCost: number; totalMovement?: number } | null>(null);
 
   // Custom Report Modal State
   const [showReportProductModal, setShowReportProductModal] = useState(false);
@@ -250,7 +272,15 @@ const InventoryList: React.FC<InventoryListProps> = ({
     year: string;
   }
 
+  interface ExpiryLastCount {
+    qty: number;
+    dateFormatted: string;
+    dateRaw: string;
+  }
+
   const [recentExpiries, setRecentExpiries] = useState<RecentExpiryOption[]>([]);
+  const [lastCountsByExpiry, setLastCountsByExpiry] = useState<Record<string, ExpiryLastCount>>({});
+  const [incongruenceConfirmed, setIncongruenceConfirmed] = useState(false);
 
   // Real-time calculation of uploaded system stock and total counted today for countProduct
   const productSystemStock = useMemo(() => {
@@ -262,6 +292,17 @@ const InventoryList: React.FC<InventoryListProps> = ({
       return c === targetCode || (targetSku !== '' && c === targetSku);
     });
     return found ? found.cantidad : null;
+  }, [countProduct, systemStock]);
+
+  const productSystemMovement = useMemo(() => {
+    if (!countProduct || !systemStock || systemStock.length === 0) return null;
+    const targetCode = (countProduct.codigo || '').trim().toLowerCase();
+    const targetSku = (countProduct.sku || '').trim().toLowerCase();
+    const found = systemStock.find(s => {
+      const c = (s.codigo || '').trim().toLowerCase();
+      return c === targetCode || (targetSku !== '' && c === targetSku);
+    });
+    return (found && found.movimiento !== undefined && found.movimiento !== null) ? found.movimiento : null;
   }, [countProduct, systemStock]);
 
   const productTotalCountedToday = useMemo(() => {
@@ -408,6 +449,45 @@ const InventoryList: React.FC<InventoryListProps> = ({
     };
   }, [countProduct, countDate, receptionExpiries, isLoadingReceptionExpiries]);
 
+  // Real-time validation of Count Incongruence (if quantity increases vs previous count for this expiration date)
+  const countIncongruenceWarning = useMemo(() => {
+    if (!countProduct || !countDate) return null;
+    if (['ROTO', 'REMAR', 'DESTRUCCION', 'CORTE', 'POR_REVISAR', 'VENTA_PERSONAL'].includes(countDate)) return null;
+
+    const p = parseFloat(countPallets) || 0;
+    const b = parseFloat(countBoxes) || 0;
+    const u = parseFloat(countQty) || 0;
+    const cpp = countProduct.cajas_por_palet || 0;
+    const upc = countProduct.unidades_por_caja || 1;
+    const currentTotal = (cpp > 0 || upc > 1) ? ((p * cpp * upc) + (b * upc) + u) : u;
+
+    if (currentTotal <= 0) return null;
+
+    const key = countDate.trim();
+    const prev = lastCountsByExpiry[key];
+    if (!prev) return null;
+
+    if (currentTotal > prev.qty) {
+      const diff = currentTotal - prev.qty;
+      let expDisplay = key;
+      try {
+        const [y, m, d] = key.split('-');
+        expDisplay = `${d}/${m}/${y}`;
+      } catch {}
+
+      return {
+        previousQty: prev.qty,
+        previousDate: prev.dateFormatted,
+        currentQty: currentTotal,
+        diff,
+        expiryDisplay: expDisplay,
+        um: countProduct.unidad_venta || 'UND'
+      };
+    }
+
+    return null;
+  }, [countProduct, countDate, countPallets, countBoxes, countQty, lastCountsByExpiry]);
+
   // Validation for Edit Count Modal
   const editingProductObj = useMemo(() => {
     if (!editingCount) return null;
@@ -477,6 +557,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
         if (error || !data || !isMounted) return;
 
         const groupedMap = new Map<string, { displayDate: string; cantidad: number; parsedDate: Date }>();
+        const dailyCountsPerExpiry = new Map<string, Map<string, number>>();
         const um = countProduct.unidad_venta || 'UND';
 
         data.forEach((r: any) => {
@@ -491,6 +572,25 @@ const InventoryList: React.FC<InventoryListProps> = ({
 
           const currentQty = Number(r.cantidad) || 0;
 
+          // Track registration date in Peru time
+          let regDayKey = '';
+          try {
+            regDayKey = new Intl.DateTimeFormat('en-CA', {
+              timeZone: 'America/Lima',
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit'
+            }).format(new Date(r.fecha_registro));
+          } catch {
+            regDayKey = (r.fecha_registro || '').slice(0, 10);
+          }
+
+          if (!dailyCountsPerExpiry.has(key)) {
+            dailyCountsPerExpiry.set(key, new Map<string, number>());
+          }
+          const dayMap = dailyCountsPerExpiry.get(key)!;
+          dayMap.set(regDayKey, (dayMap.get(regDayKey) || 0) + currentQty);
+
           if (groupedMap.has(key)) {
             const existing = groupedMap.get(key)!;
             existing.cantidad += currentQty;
@@ -500,6 +600,21 @@ const InventoryList: React.FC<InventoryListProps> = ({
               cantidad: currentQty,
               parsedDate: parsed
             });
+          }
+        });
+
+        const lastCountsMap: Record<string, ExpiryLastCount> = {};
+        dailyCountsPerExpiry.forEach((dayMap, expKey) => {
+          const sortedDays = Array.from(dayMap.keys()).sort((a, b) => b.localeCompare(a));
+          if (sortedDays.length > 0) {
+            const latestDay = sortedDays[0];
+            const qty = dayMap.get(latestDay) || 0;
+            const [y, m, d] = latestDay.split('-');
+            lastCountsMap[expKey] = {
+              qty: Number(qty.toFixed(2)),
+              dateFormatted: `${d}/${m}/${y}`,
+              dateRaw: latestDay
+            };
           }
         });
 
@@ -514,6 +629,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
 
         if (isMounted) {
           setRecentExpiries(list);
+          setLastCountsByExpiry(lastCountsMap);
         }
       } catch (err) {
         console.error("Error fetching recent expiries:", err);
@@ -597,7 +713,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
         while (hasMore) {
             let sysQuery = supabase
                 .from('stock_sistema')
-                .select('codigo, cantidad, costo')
+                .select('*')
                 .range(from, from + PAGE_SIZE - 1);
 
             if (currentUser?.sede_id) {
@@ -1242,6 +1358,12 @@ const InventoryList: React.FC<InventoryListProps> = ({
           return;
       }
 
+      // Validar si hay aumento anómalo e incongruencia en el conteo para el mismo vencimiento
+      if (countIncongruenceWarning && !incongruenceConfirmed) {
+          alert(`⛔ ALERTA DE INCONGRUENCIA EN CONTEO:\n\nEl último conteo registrado para el vencimiento ${countIncongruenceWarning.expiryDisplay} fue de ${countIncongruenceWarning.previousQty.toFixed(2)} ${countIncongruenceWarning.um} (${countIncongruenceWarning.previousDate}) y ahora está intentando registrar ${countIncongruenceWarning.currentQty.toFixed(2)} ${countIncongruenceWarning.um} (+${countIncongruenceWarning.diff.toFixed(2)}).\n\nLo natural y esperado es que el stock se mantenga o vaya disminuyendo.\n\nSi ya verificó físicamente y el aumento es real, marque la casilla de confirmación en el recuadro rojo para continuar.`);
+          return;
+      }
+
       // Capture current form state for background processing
       const productToSave = { ...countProduct };
       addRecentProduct(productToSave);
@@ -1268,6 +1390,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
       setCountPhotos([]);
       setExpiryWarning(null);
       setCountProduct(null);
+      setIncongruenceConfirmed(false);
       
       setSuccessMsg(`Conteo registrado correctamente`);
       setTimeout(() => setSuccessMsg(null), 2000);
@@ -1721,7 +1844,8 @@ const InventoryList: React.FC<InventoryListProps> = ({
             ];
 
             const movHeaders = [
-                'movimiento', 'movimientos', 'mov', 'mov_dia', 'movement', 'movs', 'mov_sistema'
+                'movimiento', 'movimientos', 'mov', 'mov_dia', 'movement', 'movs', 'mov_sistema',
+                'movimiento del día', 'movimiento del dia', 'mov_del_dia', 'movimiento_dia', 'mov del dia', 'mov del día'
             ];
 
             data.forEach(row => {
@@ -1770,7 +1894,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
             const consolidatedList = Array.from(consolidatedMap.values());
 
             if (consolidatedList.length === 0) {
-                throw new Error("No se encontraron registros válidos en el archivo. Verifique que las columnas contengan 'codigo', 'stock del día' y 'costo'.");
+                throw new Error("No se encontraron registros válidos en el archivo. Verifique que las columnas contengan 'codigo', 'stock del día', 'costo' y 'movimiento'.");
             }
 
             consolidatedList.forEach(item => {
@@ -1820,7 +1944,8 @@ const InventoryList: React.FC<InventoryListProps> = ({
             setUploadStats({
                 productsCount: consolidatedList.length,
                 totalUnits: totalUnitsCount,
-                totalCost: totalCostVal
+                totalCost: totalCostVal,
+                totalMovement: consolidatedList.reduce((sum, item) => sum + (item.movimiento || 0), 0)
             });
             setUploadSuccess(true);
             
@@ -1838,8 +1963,8 @@ const InventoryList: React.FC<InventoryListProps> = ({
 
   const handleDownloadStockTemplate = () => {
     const template = [
-        { 'codigo': 'PROD001', 'stock del día': 100, 'costo': 15.50 },
-        { 'codigo': 'PROD002', 'stock del día': 50, 'costo': 22.00 }
+        { 'codigo': 'PROD001', 'stock del día': 100, 'costo': 15.50, 'movimiento': -5 },
+        { 'codigo': 'PROD002', 'stock del día': 50, 'costo': 22.00, 'movimiento': 10 }
     ];
     const ws = XLSX.utils.json_to_sheet(template);
     const wb = XLSX.utils.book_new();
@@ -2424,7 +2549,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
 
   const recountItems = useMemo(() => {
     // 1. Consolidate theoretical stock from SYSTEM STOCK (stock_sistema table)
-    const theoreticalStock: Record<string, { nombre: string, cantidad: number, categoria: string, peso: number, costo: number, zona: string }> = {};
+    const theoreticalStock: Record<string, { nombre: string, cantidad: number, categoria: string, peso: number, costo: number, zona: string, movimiento: number }> = {};
     systemStock.forEach(item => {
       if (!theoreticalStock[item.codigo]) {
         const product = catalog.find(p => p.codigo === item.codigo);
@@ -2434,10 +2559,14 @@ const InventoryList: React.FC<InventoryListProps> = ({
             categoria: product?.categoria || 'GENERAL',
             peso: product?.peso_unitario || 0,
             costo: item.costo || 0,
-            zona: product?.zona_predeterminada || 'SECO'
+            zona: product?.zona_predeterminada || 'SECO',
+            movimiento: 0
         };
       }
       theoreticalStock[item.codigo].cantidad += item.cantidad;
+      if (item.movimiento !== undefined && item.movimiento !== null) {
+        theoreticalStock[item.codigo].movimiento += Number(item.movimiento);
+      }
     });
 
     // 2. Consolidate today's counts
@@ -2450,20 +2579,22 @@ const InventoryList: React.FC<InventoryListProps> = ({
     });
 
     // 3. Compare and filter differences
-    const results: { codigo: string, nombre: string, theoretical: number, counted: number, diff: number, percentage: number, categoria: string, peso: number, costo: number, zona: string }[] = [];
+    const results: { codigo: string, nombre: string, theoretical: number, counted: number, diff: number, percentage: number, categoria: string, peso: number, costo: number, zona: string, movimiento: number }[] = [];
     
     const allCodes = new Set([...Object.keys(countedStock), ...Object.keys(theoreticalStock)]);
 
     allCodes.forEach(codigo => {
       const counted = countedStock[codigo] || 0;
       const theoretical = theoreticalStock[codigo]?.cantidad || 0;
+      const movimiento = theoreticalStock[codigo]?.movimiento || 0;
       const product = catalog.find(p => p.codigo === codigo);
       const info = theoreticalStock[codigo] || { 
           nombre: todayCounts.find(c => c.codigo === codigo)?.nombre || product?.nombre || 'Desconocido',
           categoria: product?.categoria || 'GENERAL',
           peso: product?.peso_unitario || 0,
           costo: 0,
-          zona: product?.zona_predeterminada || 'SECO'
+          zona: product?.zona_predeterminada || 'SECO',
+          movimiento: 0
       };
       
       const diff = counted - theoretical;
@@ -2477,6 +2608,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
           theoretical, 
           counted, 
           diff, 
+          movimiento,
           percentage: percentage * 100,
           categoria: info.categoria,
           peso: info.peso,
@@ -2490,7 +2622,27 @@ const InventoryList: React.FC<InventoryListProps> = ({
         ? results 
         : results.filter(i => i.zona === recountZoneFilter);
 
-    return filteredResults.sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+    // Zone ordering: SECO -> REFRIGERADO -> CONGELADO
+    const zoneOrder: Record<string, number> = {
+      'SECO': 1,
+      'REFRIGERADO': 2,
+      'CONGELADO': 3
+    };
+
+    return filteredResults.sort((a, b) => {
+      // 1. If showing all zones, order by camera first
+      if (recountZoneFilter === 'TODOS') {
+        const orderA = zoneOrder[a.zona] || 99;
+        const orderB = zoneOrder[b.zona] || 99;
+        if (orderA !== orderB) return orderA - orderB;
+      }
+      // 2. Order by difference magnitude descending: e.g. 200, -150, 100, -100
+      const diffMag = Math.abs(b.diff) - Math.abs(a.diff);
+      if (Math.abs(diffMag) > 0.0001) return diffMag;
+
+      // 3. Positive before negative when magnitude is identical
+      return b.diff - a.diff;
+    });
   }, [systemStock, todayCounts, catalog, recountZoneFilter]);
 
   const crossOverItems = useMemo(() => {
@@ -2577,7 +2729,263 @@ const InventoryList: React.FC<InventoryListProps> = ({
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Cruces Detectados");
-    XLSX.writeFile(wb, `cruces_inventario_${new Date().toISOString().split('T')[0]}.xlsx`);
+    const peruDateCross = new Intl.DateTimeFormat('es-PE', {
+        timeZone: 'America/Lima',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    }).format(new Date()).replace(/\//g, '-');
+    XLSX.writeFile(wb, `cruces_inventario_${peruDateCross}.xlsx`);
+  };
+
+  // Helper date format in America/Lima
+  const getPeruFormattedDate = () => {
+    return new Intl.DateTimeFormat('es-PE', {
+        timeZone: 'America/Lima',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    }).format(new Date()).replace(/\//g, '-');
+  };
+
+  // Filtered recount items based on user criteria (Critical vs All, and search text)
+  const displayedRecountItems = useMemo(() => {
+    return recountItems.filter(item => {
+      // Filter critical differences (>=10% or >=5 units discrepancy)
+      if (recountDiffFilter === 'CRITICAS') {
+        const isCritical = Math.abs(item.percentage) >= 10 || Math.abs(item.diff) >= 5;
+        if (!isCritical) return false;
+      }
+      // Search query
+      if (recountSearchQuery.trim()) {
+        const q = recountSearchQuery.toLowerCase().trim();
+        return item.codigo.toLowerCase().includes(q) || item.nombre.toLowerCase().includes(q);
+      }
+      return true;
+    });
+  }, [recountItems, recountDiffFilter, recountSearchQuery]);
+
+  const criticalCount = useMemo(() => {
+    return recountItems.filter(i => Math.abs(i.percentage) >= 10 || Math.abs(i.diff) >= 5).length;
+  }, [recountItems]);
+
+  const deficitCount = useMemo(() => {
+    return recountItems.filter(i => i.diff < 0).length;
+  }, [recountItems]);
+
+  const surplusCount = useMemo(() => {
+    return recountItems.filter(i => i.diff > 0).length;
+  }, [recountItems]);
+
+  const withMovementCount = useMemo(() => {
+    return recountItems.filter(i => i.movimiento !== 0).length;
+  }, [recountItems]);
+
+  const handleOpenRecountModal = (item: typeof recountItems[0]) => {
+    setRecountModalItem(item);
+    setRecountInputQty(item.counted !== undefined ? String(item.counted) : '0');
+    setRecountInputPallets('');
+    setRecountInputBoxes('');
+    setRecountInputUnits(item.counted !== undefined ? String(item.counted) : '0');
+    setRecountInputExpiry('');
+    setRecountInputObs('');
+  };
+
+  const handleRecountBreakdownChange = (pals: string, bxs: string, unts: string) => {
+    setRecountInputPallets(pals);
+    setRecountInputBoxes(bxs);
+    setRecountInputUnits(unts);
+
+    if (!recountModalItem) return;
+    const prod = catalog.find(p => p.codigo === recountModalItem.codigo);
+    const unPerBox = prod?.unidades_por_caja || 1;
+    const boxPerPal = prod?.cajas_por_palet || 0;
+
+    const pVal = parseFloat(pals) || 0;
+    const bVal = parseFloat(bxs) || 0;
+    const uVal = parseFloat(unts) || 0;
+
+    let total = uVal;
+    if (unPerBox > 1) {
+        total += bVal * unPerBox;
+        if (boxPerPal > 0) {
+            total += pVal * boxPerPal * unPerBox;
+        }
+    } else {
+        total += bVal;
+    }
+
+    setRecountInputQty(total > 0 ? String(total) : (pals || bxs || unts ? '0' : ''));
+  };
+
+  const handleSaveRecount = async () => {
+    if (!recountModalItem) return;
+    const newQty = parseFloat(recountInputQty);
+    if (isNaN(newQty) || newQty < 0) {
+        alert("Por favor ingrese una cantidad física válida (0 o mayor).");
+        return;
+    }
+
+    setIsSavingRecount(true);
+    try {
+        const existingCounts = todayCounts.filter(c => c.codigo === recountModalItem.codigo);
+
+        if (existingCounts.length === 1) {
+            const existingFirst = existingCounts[0] as any;
+            const { error } = await supabase
+                .from('conteo_inventario')
+                .update({
+                    cantidad: newQty,
+                    fecha_vencimiento: recountInputExpiry || existingFirst.fecha_vencimiento || 'N/A',
+                    observaciones: recountInputObs 
+                        ? `[RECONTEO AUDITADO] ${recountInputObs}` 
+                        : (existingFirst.observaciones ? `${existingFirst.observaciones} [RECONTEO]` : '[RECONTEO FÍSICO]')
+                })
+                .eq('id', existingFirst.id);
+
+            if (error) throw error;
+        } else if (existingCounts.length > 1) {
+            const sortedCounts = [...existingCounts].sort((a, b) => new Date(b.fecha_registro || 0).getTime() - new Date(a.fecha_registro || 0).getTime());
+            const [primary, ...older] = sortedCounts;
+
+            const { error: primaryError } = await supabase
+                .from('conteo_inventario')
+                .update({
+                    cantidad: newQty,
+                    fecha_vencimiento: recountInputExpiry || primary.fecha_vencimiento || 'N/A',
+                    observaciones: recountInputObs ? `[RECONTEO CONSOLIDADO] ${recountInputObs}` : '[RECONTEO AUDITADO TOTAL]'
+                })
+                .eq('id', primary.id);
+
+            if (primaryError) throw primaryError;
+
+            for (const oldRec of older) {
+                await supabase
+                    .from('conteo_inventario')
+                    .update({
+                        cantidad: 0,
+                        observaciones: `[AJUSTADO A 0 POR RECONTEO GENERAL]`
+                    })
+                    .eq('id', oldRec.id);
+            }
+        } else {
+            const prod = catalog.find(p => p.codigo === recountModalItem.codigo);
+            await onSaveStocktake({
+                producto_id: prod?.id || recountModalItem.codigo,
+                codigo: recountModalItem.codigo,
+                nombre: recountModalItem.nombre,
+                cantidad: newQty,
+                pallets: parseFloat(recountInputPallets) || 0,
+                cajas: parseFloat(recountInputBoxes) || 0,
+                unidades: parseFloat(recountInputUnits) || newQty,
+                fecha_vencimiento: recountInputExpiry || 'N/A',
+                usuario_registro: currentUser ? currentUser.nombre : 'AUDITOR RECONTEO',
+                fecha_registro: new Date().toISOString(),
+                zona: recountModalItem.zona,
+                sede_id: currentUser?.sede_id
+            });
+        }
+
+        // Refresh counts from Supabase to immediately recalculate difference in real time!
+        await fetchTodayCounts();
+
+        alert(`✅ Reconteo guardado con éxito para ${recountModalItem.nombre}.\nNueva cantidad física registrada: ${newQty.toFixed(2)} unidades.`);
+        setRecountModalItem(null);
+    } catch (err: any) {
+        console.error("Error saving recount:", err);
+        alert("Error al actualizar el reconteo: " + (err.message || err));
+    } finally {
+        setIsSavingRecount(false);
+    }
+  };
+
+  const handleDownloadRecountsExcel = () => {
+    if (recountItems.length === 0) {
+      alert("No hay diferencias registradas para descargar.");
+      return;
+    }
+
+    const zoneOrder: Record<string, number> = {
+      'SECO': 1,
+      'REFRIGERADO': 2,
+      'CONGELADO': 3
+    };
+
+    // Sort by Camera (Zone), then by difference magnitude descending (e.g. 200, -150, 100, -100)
+    const sortedForExport = [...displayedRecountItems].sort((a, b) => {
+      const orderA = zoneOrder[a.zona] || 99;
+      const orderB = zoneOrder[b.zona] || 99;
+      if (orderA !== orderB) return orderA - orderB;
+
+      const magA = Math.abs(a.diff);
+      const magB = Math.abs(b.diff);
+      if (Math.abs(magB - magA) > 0.0001) {
+        return magB - magA;
+      }
+      return b.diff - a.diff;
+    });
+
+    if (sortedForExport.length === 0) {
+      alert("No hay elementos que coincidan con los filtros seleccionados para descargar.");
+      return;
+    }
+
+    const rows = sortedForExport.map((item, index) => {
+      const estado = item.diff < 0 
+        ? `FALTANTE CRÍTICO (${item.percentage.toFixed(1)}%)` 
+        : `SOBRANTE CRÍTICO (+${item.percentage.toFixed(1)}%)`;
+
+      let detalleMovimiento = 'Sin salidas ni ingresos hoy';
+      if (item.movimiento < 0) {
+        detalleMovimiento = `Salida / Venta registrada: ${item.movimiento} un. (Debe haber físico en almacén)`;
+      } else if (item.movimiento > 0) {
+        detalleMovimiento = `Ingreso registrado: +${item.movimiento} un.`;
+      }
+
+      return {
+        'N°': index + 1,
+        'CÁMARA / ZONA': item.zona,
+        'CÓDIGO': item.codigo,
+        'DESCRIPCIÓN DEL PRODUCTO': item.nombre,
+        'CATEGORÍA': item.categoria,
+        'STOCK SISTEMA (TEÓRICO)': Number(item.theoretical.toFixed(2)),
+        'FÍSICO (CONTEO HOY)': Number(item.counted.toFixed(2)),
+        'DIFERENCIA': Number(item.diff.toFixed(2)),
+        '% DIFERENCIA': `${item.percentage.toFixed(1)}%`,
+        'MOVIMIENTO HOY': Number(item.movimiento.toFixed(2)),
+        'DETALLE MOVIMIENTO (VALIDACIÓN AUXILIAR)': detalleMovimiento,
+        'ESTADO DE AUDITORÍA': estado,
+        'NUEVO RECONTEO FÍSICO (LLENAR A MANO)': '',
+        'FECHA DE VENCIMIENTO': '',
+        'FIRMA / OBSERVACIONES': ''
+      };
+    });
+
+    const ws = XLSX.utils.json_to_sheet(rows);
+
+    // Set column widths for clean printing
+    ws['!cols'] = [
+      { wch: 5 },   // N°
+      { wch: 15 },  // Cámara
+      { wch: 14 },  // Código
+      { wch: 40 },  // Descripción
+      { wch: 18 },  // Categoría
+      { wch: 14 },  // Stock Sistema
+      { wch: 14 },  // Físico Conteo
+      { wch: 14 },  // Diferencia
+      { wch: 12 },  // % Diferencia
+      { wch: 14 },  // Movimiento
+      { wch: 38 },  // Detalle Movimiento
+      { wch: 22 },  // Estado
+      { wch: 22 },  // Nuevo Reconteo
+      { wch: 18 },  // Vencimiento
+      { wch: 26 },  // Firma / Obs
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Reconteo Diferencias");
+    const peruDate = getPeruFormattedDate();
+    XLSX.writeFile(wb, `Planilla_Reconteo_Diferencias_${peruDate}.xlsx`);
   };
 
   const getZoneStats = (type: ZoneType) => {
@@ -2947,101 +3355,262 @@ const InventoryList: React.FC<InventoryListProps> = ({
                     </button>
                 </div>
 
-                {/* Sub-Tabs for Recount */}
-                <div className="flex flex-col md:flex-row gap-4 items-start md:items-center">
-                    <div className="flex bg-gray-100 p-1 rounded-xl w-full md:w-max">
-                        <button 
-                            onClick={() => setRecountSubTab('DIFERENCIAS')}
-                            className={`flex-1 md:w-40 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex items-center justify-center gap-2 ${recountSubTab === 'DIFERENCIAS' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-400'}`}
-                        >
-                            <AlertTriangle className="w-3 h-3" />
-                            Diferencias ({recountItems.filter(i => Math.abs(i.percentage) > 10).length})
-                        </button>
-                        <button 
-                            onClick={() => setRecountSubTab('CRUCES')}
-                            className={`flex-1 md:w-40 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex items-center justify-center gap-2 ${recountSubTab === 'CRUCES' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-400'}`}
-                        >
-                            <RefreshCw className="w-3 h-3" />
-                            Cruces ({crossOverItems.length})
-                        </button>
+                {/* Sub-Tabs for Recount and Controls */}
+                <div className="space-y-3">
+                    <div className="flex flex-col lg:flex-row gap-3 items-stretch lg:items-center justify-between">
+                        {/* Subtabs */}
+                        <div className="flex bg-gray-100 p-1 rounded-xl w-full lg:w-max shrink-0">
+                            <button 
+                                onClick={() => setRecountSubTab('DIFERENCIAS')}
+                                className={`flex-1 lg:w-48 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex items-center justify-center gap-2 ${recountSubTab === 'DIFERENCIAS' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-400'}`}
+                            >
+                                <AlertTriangle className="w-3.5 h-3.5" />
+                                Reconteos y Diferencias ({displayedRecountItems.length})
+                            </button>
+                            <button 
+                                onClick={() => setRecountSubTab('CRUCES')}
+                                className={`flex-1 lg:w-40 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex items-center justify-center gap-2 ${recountSubTab === 'CRUCES' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-400'}`}
+                            >
+                                <RefreshCw className="w-3.5 h-3.5" />
+                                Cruces ({crossOverItems.length})
+                            </button>
+                        </div>
+
+                        {/* Excel Export Button */}
+                        {recountSubTab === 'DIFERENCIAS' && (
+                            <button 
+                                onClick={handleDownloadRecountsExcel}
+                                className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-xs font-black shadow-md flex items-center justify-center gap-2 transition-all shrink-0 active:scale-95 cursor-pointer"
+                                title="Descargar planilla de reconteo en Excel ordenada para imprimir"
+                            >
+                                <Printer className="w-4 h-4" />
+                                <span>DESCARGAR EXCEL (PARA IMPRIMIR)</span>
+                            </button>
+                        )}
                     </div>
 
-                    {/* Zone Filters */}
-                    <div className="flex bg-gray-100 p-1 rounded-xl w-full md:w-max">
-                        {['TODOS', 'SECO', 'REFRIGERADO', 'CONGELADO'].map(zone => (
-                            <button
-                                key={zone}
-                                onClick={() => setRecountZoneFilter(zone)}
-                                className={`flex-1 px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${recountZoneFilter === zone ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-400'}`}
-                            >
-                                {zone}
-                            </button>
-                        ))}
-                    </div>
+                    {/* Zone & Critical Filters Bar */}
+                    {recountSubTab === 'DIFERENCIAS' && (
+                        <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between bg-gray-50 p-2.5 rounded-2xl border border-gray-200">
+                            {/* Camera / Zone Filters */}
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-[10px] font-black uppercase text-gray-400 mr-1">Cámaras:</span>
+                                {['TODOS', 'SECO', 'REFRIGERADO', 'CONGELADO'].map(zone => (
+                                    <button
+                                        key={zone}
+                                        onClick={() => setRecountZoneFilter(zone)}
+                                        className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${
+                                            recountZoneFilter === zone 
+                                                ? 'bg-blue-600 text-white shadow-sm' 
+                                                : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
+                                        }`}
+                                    >
+                                        {zone === 'SECO' ? '☀️ SECO' : zone === 'REFRIGERADO' ? '❄️ REFRIGERADO' : zone === 'CONGELADO' ? '🧊 CONGELADO' : 'TODAS'}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* Critical vs All toggle & Search */}
+                            <div className="flex items-center gap-2 flex-wrap md:flex-nowrap">
+                                <div className="flex bg-white p-0.5 rounded-lg border border-gray-200 shrink-0">
+                                    <button
+                                        onClick={() => setRecountDiffFilter('CRITICAS')}
+                                        className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase transition-all ${
+                                            recountDiffFilter === 'CRITICAS' ? 'bg-amber-100 text-amber-900 shadow-xs' : 'text-gray-400'
+                                        }`}
+                                    >
+                                        Críticas (|Diff|≥5 o ≥10%)
+                                    </button>
+                                    <button
+                                        onClick={() => setRecountDiffFilter('TODAS')}
+                                        className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase transition-all ${
+                                            recountDiffFilter === 'TODAS' ? 'bg-blue-100 text-blue-900 shadow-xs' : 'text-gray-400'
+                                        }`}
+                                    >
+                                        Todas ({recountItems.length})
+                                    </button>
+                                </div>
+
+                                <div className="relative flex-1 min-w-[200px]">
+                                    <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+                                    <input 
+                                        type="text"
+                                        placeholder="Buscar SKU o nombre..."
+                                        value={recountSearchQuery}
+                                        onChange={e => setRecountSearchQuery(e.target.value)}
+                                        className="w-full pl-8 pr-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-medium outline-none focus:border-blue-500"
+                                    />
+                                    {recountSearchQuery && (
+                                        <button onClick={() => setRecountSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                                            <X className="w-3 h-3" />
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
 
                 {recountSubTab === 'DIFERENCIAS' ? (
                     <>
-                        <div className="bg-amber-50 p-4 rounded-xl border border-amber-200">
-                            <div className="flex items-center gap-3 text-amber-600 mb-1">
-                                <AlertTriangle className="w-5 h-5" />
-                                <h3 className="font-black uppercase text-xs tracking-tight">Diferencias Críticas (+/- 10%)</h3>
+                        {/* Informative Guidance Banner */}
+                        <div className="bg-gradient-to-r from-amber-50 to-orange-50 p-4 rounded-2xl border border-amber-200/80 shadow-xs">
+                            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-2">
+                                <div className="flex items-center gap-2.5 text-amber-800">
+                                    <div className="p-1.5 bg-amber-200/60 rounded-lg">
+                                        <AlertTriangle className="w-4 h-4 text-amber-700" />
+                                    </div>
+                                    <div>
+                                        <h3 className="font-black uppercase text-xs tracking-tight text-amber-900">
+                                            Planilla de Reconteos Físicos de Inventario
+                                        </h3>
+                                        <p className="text-[11px] text-amber-800 font-medium leading-tight">
+                                            Ordenado por Cámaras y de mayor a menor magnitud de diferencia (|Diff|: ej. 200, -150, 100, -100).
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="text-[10px] font-bold bg-white/80 border border-amber-200 text-amber-800 px-2 py-0.5 rounded-md">
+                                        Total: <strong>{displayedRecountItems.length}</strong>
+                                    </span>
+                                    <span className="text-[10px] font-bold bg-amber-100 border border-amber-300 text-amber-900 px-2 py-0.5 rounded-md">
+                                        Críticas: <strong>{criticalCount}</strong>
+                                    </span>
+                                    <span className="text-[10px] font-bold bg-red-100 border border-red-200 text-red-800 px-2 py-0.5 rounded-md">
+                                        Faltantes: <strong>{deficitCount}</strong>
+                                    </span>
+                                    <span className="text-[10px] font-bold bg-emerald-100 border border-emerald-200 text-emerald-800 px-2 py-0.5 rounded-md">
+                                        Sobrantes: <strong>{surplusCount}</strong>
+                                    </span>
+                                    <span className="text-[10px] font-bold bg-indigo-100 border border-indigo-200 text-indigo-800 px-2 py-0.5 rounded-md">
+                                        Con Movimiento: <strong>{withMovementCount}</strong>
+                                    </span>
+                                </div>
                             </div>
-                            <p className="text-[10px] text-amber-700 font-medium">Productos con variaciones significativas que requieren revisión inmediata.</p>
+
+                            <p className="text-[11px] text-amber-800/90 leading-relaxed">
+                                📌 <strong>Instrucción para el Auxiliar:</strong> Al costado de cada registro se muestra la columna <strong>MOVIMIENTO</strong> con las salidas o ingresos del día. Si solo se vendió o ingresó esa cantidad, se confirma que la mercadería debe encontrarse en el almacén. Puede actualizar el reconteo directamente haciendo clic en <strong>ACTUALIZAR RECONTEO</strong>.
+                            </p>
                         </div>
 
-                        {recountItems.filter(i => Math.abs(i.percentage) > 10).length === 0 ? (
+                        {displayedRecountItems.length === 0 ? (
                             <div className="text-center py-20 bg-white rounded-2xl border border-gray-100">
                                 <CheckCircle className="w-12 h-12 text-green-500 mx-auto mb-4 opacity-20" />
-                                <p className="text-gray-400 font-bold">No hay diferencias críticas detectadas hoy.</p>
+                                <p className="text-gray-400 font-bold">No hay diferencias registradas con los filtros seleccionados.</p>
                             </div>
                         ) : (
-                            <div className="grid grid-cols-1 gap-3">
-                                {recountItems.filter(i => Math.abs(i.percentage) > 10).map(item => (
-                                    <div key={item.codigo} className="bg-white rounded-2xl shadow-sm border border-gray-200 p-4 hover:border-blue-300 transition-all group">
-                                        <div className="flex justify-between items-start mb-3">
-                                            <div className="flex-1">
-                                                <h3 className="font-black text-gray-900 group-hover:text-blue-600 transition-colors leading-tight">{item.nombre}</h3>
-                                                <div className="text-xs font-bold text-gray-400 font-mono mt-1">{item.codigo}</div>
-                                            </div>
-                                            <div className={`px-3 py-1 rounded-full text-xs font-black shrink-0 ${item.percentage > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                                                {item.percentage > 0 ? '+' : ''}{item.percentage.toFixed(1)}%
-                                            </div>
-                                        </div>
+                            <div className="grid grid-cols-1 gap-3.5">
+                                {displayedRecountItems.map((item, idx) => {
+                                    const isDeficit = item.diff < 0;
+                                    return (
+                                        <div key={item.codigo} className="bg-white rounded-2xl shadow-sm border border-gray-200 p-4 hover:border-blue-300 transition-all group">
+                                            {/* Item Header */}
+                                            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 mb-3">
+                                                <div className="flex-1">
+                                                    <div className="flex items-center gap-2 flex-wrap mb-1">
+                                                        <span className="text-[10px] font-mono font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded">
+                                                            #{idx + 1} | SKU: {item.codigo}
+                                                        </span>
+                                                        <span className={`text-[10px] font-black px-2 py-0.5 rounded uppercase ${
+                                                            item.zona === 'CONGELADO' ? 'bg-blue-100 text-blue-800' :
+                                                            item.zona === 'REFRIGERADO' ? 'bg-emerald-100 text-emerald-800' :
+                                                            'bg-amber-100 text-amber-800'
+                                                        }`}>
+                                                            {item.zona === 'SECO' ? '☀️ SECO' : item.zona === 'REFRIGERADO' ? '❄️ REFRIGERADO' : '🧊 CONGELADO'}
+                                                        </span>
+                                                        <span className="text-[10px] font-bold text-gray-400 uppercase">
+                                                            {item.categoria}
+                                                        </span>
+                                                    </div>
+                                                    <h3 className="font-black text-gray-900 group-hover:text-blue-600 transition-colors leading-tight text-sm md:text-base">
+                                                        {item.nombre}
+                                                    </h3>
+                                                </div>
 
-                                        <div className="grid grid-cols-3 gap-2">
-                                            <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
-                                                <span className="text-[8px] font-black uppercase text-gray-400 block mb-1">Teórico</span>
-                                                <span className="text-sm font-black text-gray-700">{item.theoretical.toFixed(2)}</span>
+                                                <div className={`px-3 py-1.5 rounded-full text-xs font-black shrink-0 border ${
+                                                    isDeficit 
+                                                        ? 'bg-red-50 text-red-700 border-red-200' 
+                                                        : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                                }`}>
+                                                    {isDeficit ? 'FALTANTE CRÍTICO: ' : 'SOBRANTE CRÍTICO: '}
+                                                    {item.diff > 0 ? '+' : ''}{item.diff.toFixed(2)} ({item.diff > 0 ? '+' : ''}{item.percentage.toFixed(1)}%)
+                                                </div>
                                             </div>
-                                            <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
-                                                <span className="text-[8px] font-black uppercase text-gray-400 block mb-1">Físico</span>
-                                                <span className="text-sm font-black text-gray-700">{item.counted.toFixed(2)}</span>
-                                            </div>
-                                            <div className={`p-3 rounded-xl border ${Math.abs(item.diff) > 0 ? 'bg-amber-50 border-amber-100' : 'bg-slate-50 border-slate-100'}`}>
-                                                <span className="text-[8px] font-black uppercase text-gray-400 block mb-1">Diferencia</span>
-                                                <span className={`text-sm font-black ${item.diff > 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                                    {item.diff > 0 ? '+' : ''}{item.diff.toFixed(2)}
-                                                </span>
-                                            </div>
-                                        </div>
 
-                                        <div className="mt-4 flex justify-end">
-                                            <button 
-                                                onClick={() => {
-                                                    setCountSearch(item.codigo);
-                                                    setActiveTab('COUNT');
-                                                    const prod = catalog.find(p => p.codigo === item.codigo);
-                                                    if (prod) setCountProduct(prod);
-                                                }}
-                                                className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-xl text-xs font-black hover:bg-blue-700 transition-all shadow-lg shadow-blue-600/20 active:scale-95"
-                                            >
-                                                <RefreshCw className="w-4 h-4" />
-                                                RECONTAR AHORA
-                                            </button>
+                                            {/* 4 Metric Columns: Teórico, Físico, Diferencia, MOVIMIENTO */}
+                                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+                                                <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                                                    <span className="text-[9px] font-black uppercase text-gray-400 block mb-0.5">Stock Sistema</span>
+                                                    <span className="text-sm md:text-base font-black text-gray-800">{item.theoretical.toFixed(2)}</span>
+                                                </div>
+                                                <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                                                    <span className="text-[9px] font-black uppercase text-gray-400 block mb-0.5">Físico Conteo</span>
+                                                    <span className="text-sm md:text-base font-black text-gray-800">{item.counted.toFixed(2)}</span>
+                                                </div>
+                                                <div className={`p-3 rounded-xl border ${isDeficit ? 'bg-red-50/60 border-red-200' : 'bg-emerald-50/60 border-emerald-200'}`}>
+                                                    <span className="text-[9px] font-black uppercase text-gray-400 block mb-0.5">Diferencia</span>
+                                                    <span className={`text-sm md:text-base font-black ${isDeficit ? 'text-red-600' : 'text-emerald-600'}`}>
+                                                        {item.diff > 0 ? '+' : ''}{item.diff.toFixed(2)}
+                                                    </span>
+                                                </div>
+                                                <div className={`p-3 rounded-xl border ${
+                                                    item.movimiento !== 0 ? 'bg-indigo-50/70 border-indigo-200' : 'bg-slate-50 border-slate-200'
+                                                }`}>
+                                                    <div className="flex items-center justify-between">
+                                                        <span className="text-[9px] font-black uppercase text-indigo-700 block mb-0.5">MOVIMIENTO</span>
+                                                        <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded ${
+                                                            item.movimiento < 0 ? 'bg-rose-100 text-rose-700' : item.movimiento > 0 ? 'bg-teal-100 text-teal-700' : 'bg-gray-100 text-gray-500'
+                                                        }`}>
+                                                            {item.movimiento < 0 ? 'Salida / Venta' : item.movimiento > 0 ? 'Ingreso' : 'Sin mov.'}
+                                                        </span>
+                                                    </div>
+                                                    <span className={`text-sm md:text-base font-black ${item.movimiento !== 0 ? 'text-indigo-800' : 'text-gray-500'}`}>
+                                                        {item.movimiento > 0 ? `+${item.movimiento.toFixed(2)}` : item.movimiento.toFixed(2)}
+                                                    </span>
+                                                </div>
+                                            </div>
+
+                                            {/* Auxiliary Movement Validation Note */}
+                                            <div className="mt-3 p-2.5 rounded-xl border text-xs flex items-start gap-2 bg-blue-50/70 border-blue-200 text-blue-900">
+                                                <span className="text-sm">ℹ️</span>
+                                                <div className="leading-snug">
+                                                    <strong>Movimiento registrado hoy: {item.movimiento > 0 ? `+${item.movimiento.toFixed(2)}` : item.movimiento.toFixed(2)} unid.</strong>{' '}
+                                                    {item.movimiento < 0 ? (
+                                                        <span>(Solo se registraron ventas/salidas por {Math.abs(item.movimiento)} unid. Por lo tanto, el saldo de <strong>{item.theoretical.toFixed(2)} unidades</strong> debe estar físicamente en el almacén).</span>
+                                                    ) : item.movimiento > 0 ? (
+                                                        <span>(Se registró un ingreso de mercadería de +{item.movimiento} unid. hoy en el sistema).</span>
+                                                    ) : (
+                                                        <span>(Sin salidas ni ingresos hoy. Debe encontrarse la totalidad del stock físico en almacén).</span>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            {/* Action Buttons */}
+                                            <div className="mt-3.5 flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+                                                <button 
+                                                    onClick={() => {
+                                                        setCountSearch(item.codigo);
+                                                        setActiveTab('COUNT');
+                                                        const prod = catalog.find(p => p.codigo === item.codigo);
+                                                        if (prod) setCountProduct(prod);
+                                                    }}
+                                                    className="flex items-center gap-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 px-3.5 py-2 rounded-xl text-xs font-bold transition-all"
+                                                >
+                                                    <Scan className="w-3.5 h-3.5" />
+                                                    Escanear / Formulario
+                                                </button>
+                                                <button 
+                                                    onClick={() => handleOpenRecountModal(item)}
+                                                    className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl text-xs font-black transition-all shadow-md shadow-blue-600/20 active:scale-95 cursor-pointer"
+                                                >
+                                                    <RefreshCw className="w-4 h-4" />
+                                                    ACTUALIZAR RECONTEO
+                                                </button>
+                                            </div>
                                         </div>
-                                    </div>
-                                ))}
+                                    );
+                                })}
                             </div>
                         )}
                     </>
@@ -3292,8 +3861,8 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                             )}
                                         </div>
 
-                                        {/* Metrics Row: Stock SAP | Conteo | DIF */}
-                                        <div className="mt-2.5 grid grid-cols-3 gap-1.5 md:gap-2 text-center">
+                                        {/* Metrics Row: Stock SAP | Conteo | DIF | Movimiento */}
+                                        <div className={`mt-2.5 grid ${productSystemMovement !== null ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'} gap-1.5 md:gap-2 text-center`}>
                                             {/* Stock SAP */}
                                             <div className="bg-black/25 backdrop-blur-xs p-1.5 md:p-2 rounded-lg border border-white/15 flex flex-col justify-center">
                                                 <span className="text-[9px] md:text-[10px] font-black text-blue-200 uppercase tracking-wider leading-none">Stock SAP</span>
@@ -3335,6 +3904,17 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                                     )}
                                                 </div>
                                             </div>
+
+                                            {/* Movimiento */}
+                                            {productSystemMovement !== null && (
+                                                <div className="bg-sky-950/40 backdrop-blur-xs p-1.5 md:p-2 rounded-lg border border-sky-400/30 flex flex-col justify-center">
+                                                    <span className="text-[9px] md:text-[10px] font-black text-sky-300 uppercase tracking-wider leading-none">Movimiento</span>
+                                                    <div className="font-mono font-black text-xs md:text-sm text-sky-200 mt-1 leading-none truncate">
+                                                        {Number(productSystemMovement).toLocaleString()}
+                                                        <span className="text-[9px] md:text-[10px] font-sans font-normal text-sky-200 ml-0.5">{countProduct.unidad_venta || 'UND'}</span>
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
                                 ) : (
@@ -3552,9 +4132,18 @@ const InventoryList: React.FC<InventoryListProps> = ({
 
                                         {/* Total Calculation Display */}
                                         {countProduct && (
-                                            <div className="bg-blue-50 border border-blue-100 p-3 rounded-xl flex justify-between items-center">
-                                                <span className="text-[10px] font-black text-blue-400 uppercase">Total Calculado:</span>
-                                                <span className="text-xl font-black text-blue-700">
+                                            <div className={`p-3 rounded-xl flex justify-between items-center transition-all ${
+                                                countIncongruenceWarning 
+                                                    ? 'bg-red-50 border-2 border-red-400 text-red-700 shadow-sm' 
+                                                    : 'bg-blue-50 border border-blue-100 text-blue-700'
+                                            }`}>
+                                                <span className={`text-[10px] font-black uppercase flex items-center gap-1 ${
+                                                    countIncongruenceWarning ? 'text-red-600' : 'text-blue-400'
+                                                }`}>
+                                                    {countIncongruenceWarning && <AlertTriangle className="w-3.5 h-3.5 text-red-600 shrink-0" />}
+                                                    Total Calculado {countIncongruenceWarning ? '(⚠️ AUMENTO ANÓMALO)' : ''}:
+                                                </span>
+                                                <span className={`text-xl font-black ${countIncongruenceWarning ? 'text-red-700' : 'text-blue-700'}`}>
                                                     {(() => {
                                                         const p = parseFloat(countPallets) || 0;
                                                         const b = parseFloat(countBoxes) || 0;
@@ -3768,6 +4357,42 @@ const InventoryList: React.FC<InventoryListProps> = ({
                                         )}
                                     </div>
                                 </div>
+
+                                {/* ALERTA DE INCONGRUENCIA DE CONTEO (AUMENTO ANÓMALO) */}
+                                {countIncongruenceWarning && (
+                                    <div className="bg-red-50 border-2 border-red-500 text-red-950 p-3.5 md:p-4 rounded-2xl text-xs md:text-sm shadow-md flex items-start gap-3 animate-in fade-in duration-200">
+                                        <div className="p-2 bg-red-100 text-red-700 rounded-xl shrink-0 mt-0.5">
+                                            <AlertTriangle className="w-6 h-6 text-red-600 animate-pulse" />
+                                        </div>
+                                        <div className="space-y-1.5 flex-1">
+                                            <div className="flex items-center justify-between flex-wrap gap-1">
+                                                <p className="font-black uppercase text-red-800 tracking-wide text-xs flex items-center gap-1.5">
+                                                    <span>⚠️ ALERTA DE INCONGRUENCIA EN CONTEO</span>
+                                                </p>
+                                                <span className="text-[10px] font-black uppercase px-2.5 py-0.5 bg-red-600 text-white rounded-full shadow-sm">
+                                                    Aumento: +{countIncongruenceWarning.diff.toFixed(2)} {countIncongruenceWarning.um}
+                                                </span>
+                                            </div>
+                                            <p className="font-medium text-red-900 text-[11px] md:text-xs leading-relaxed">
+                                                El último conteo registrado para el vencimiento <strong>{countIncongruenceWarning.expiryDisplay}</strong> fue de <strong>{countIncongruenceWarning.previousQty.toFixed(2)} {countIncongruenceWarning.um}</strong> ({countIncongruenceWarning.previousDate}), y ahora está ingresando <strong>{countIncongruenceWarning.currentQty.toFixed(2)} {countIncongruenceWarning.um}</strong>.
+                                            </p>
+                                            <div className="p-2 bg-red-100/90 rounded-xl border border-red-200 text-red-900 text-[11px] leading-snug">
+                                                ⛔ <strong>Incongruencia detectada:</strong> Lo natural y esperado es que el stock se mantenga o vaya disminuyendo con el paso de los días. Verifique físicamente el conteo antes de registrar.
+                                            </div>
+                                            <label className="flex items-center gap-2 cursor-pointer pt-1.5 mt-1 border-t border-red-200">
+                                                <input 
+                                                    type="checkbox" 
+                                                    checked={incongruenceConfirmed} 
+                                                    onChange={e => setIncongruenceConfirmed(e.target.checked)}
+                                                    className="w-4 h-4 rounded text-red-600 focus:ring-red-500 cursor-pointer"
+                                                />
+                                                <span className="text-[11px] md:text-xs font-black text-red-950 select-none">
+                                                    He verificado físicamente y confirmo que la cantidad aumentó a {countIncongruenceWarning.currentQty.toFixed(2)} {countIncongruenceWarning.um}
+                                                </span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                )}
 
                                 {/* FLOATING SUBMIT BUTTON (Fixed at bottom on mobile, Sticky on desktop) */}
                                 <div className="fixed bottom-0 left-0 right-0 p-4 bg-white/90 backdrop-blur-md border-t border-gray-100 z-40 md:sticky md:bottom-0 md:p-0 md:pt-4 md:pb-2 md:bg-white/80 md:border-0 flex flex-col gap-2">
@@ -4224,7 +4849,7 @@ const InventoryList: React.FC<InventoryListProps> = ({
                         )}
                         <div className="pt-4 flex gap-3">
                             <button 
-                                type="button"
+                                type="button" 
                                 onClick={() => setEditingCount(null)}
                                 className="flex-1 py-3 bg-gray-100 text-gray-500 font-bold rounded-xl hover:bg-gray-200 transition-all cursor-pointer"
                             >
@@ -4243,6 +4868,212 @@ const InventoryList: React.FC<InventoryListProps> = ({
                             </button>
                         </div>
                     </form>
+                </div>
+            </div>
+        )}
+
+        {/* --- MODAL: RECONTEO FÍSICO DIRECTO --- */}
+        {recountModalItem && (
+            <div className="fixed inset-0 z-[150] bg-black/60 backdrop-blur-sm flex justify-center items-center p-4">
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-fade-in border border-gray-200">
+                    <div className="p-5 border-b flex justify-between items-center bg-blue-50/80">
+                        <div className="flex items-center gap-3">
+                            <div className="p-2 bg-blue-600 text-white rounded-xl shadow-md">
+                                <RefreshCw className="w-5 h-5" />
+                            </div>
+                            <div>
+                                <h3 className="font-black text-gray-900 text-base">Actualizar Reconteo Físico</h3>
+                                <p className="text-xs text-blue-700 font-medium">Auditoría y corrección directa de conteo</p>
+                            </div>
+                        </div>
+                        <button 
+                            onClick={() => setRecountModalItem(null)} 
+                            className="text-gray-400 hover:text-red-500 transition-colors p-1"
+                        >
+                            <XCircle className="w-6 h-6"/>
+                        </button>
+                    </div>
+
+                    <div className="p-5 space-y-4 max-h-[80vh] overflow-y-auto">
+                        {/* Item Details */}
+                        <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200">
+                            <div className="flex items-center justify-between gap-2 mb-1">
+                                <span className="text-[10px] font-mono font-bold bg-white text-slate-700 px-2 py-0.5 rounded border border-slate-200">
+                                    SKU: {recountModalItem.codigo}
+                                </span>
+                                <span className={`text-[10px] font-black px-2 py-0.5 rounded uppercase ${
+                                    recountModalItem.zona === 'CONGELADO' ? 'bg-blue-100 text-blue-800' :
+                                    recountModalItem.zona === 'REFRIGERADO' ? 'bg-emerald-100 text-emerald-800' :
+                                    'bg-amber-100 text-amber-800'
+                                }`}>
+                                    Cámara: {recountModalItem.zona}
+                                </span>
+                            </div>
+                            <h4 className="font-black text-gray-900 text-sm leading-snug">
+                                {recountModalItem.nombre}
+                            </h4>
+                        </div>
+
+                        {/* Current Comparison & Movement Reference */}
+                        <div className="grid grid-cols-3 gap-2 text-center">
+                            <div className="bg-gray-50 p-2.5 rounded-xl border border-gray-200">
+                                <span className="text-[9px] font-black uppercase text-gray-400 block mb-0.5">Stock Teórico</span>
+                                <span className="text-sm font-black text-gray-800">{recountModalItem.theoretical.toFixed(2)}</span>
+                            </div>
+                            <div className="bg-gray-50 p-2.5 rounded-xl border border-gray-200">
+                                <span className="text-[9px] font-black uppercase text-gray-400 block mb-0.5">Conteo Anterior</span>
+                                <span className="text-sm font-black text-gray-800">{recountModalItem.counted.toFixed(2)}</span>
+                            </div>
+                            <div className="bg-indigo-50 p-2.5 rounded-xl border border-indigo-200">
+                                <span className="text-[9px] font-black uppercase text-indigo-700 block mb-0.5">MOVIMIENTO HOY</span>
+                                <span className="text-sm font-black text-indigo-900">
+                                    {recountModalItem.movimiento > 0 ? `+${recountModalItem.movimiento.toFixed(2)}` : recountModalItem.movimiento.toFixed(2)}
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* Movement contextual explanation for auxiliary */}
+                        <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-xl text-xs text-blue-900">
+                            <strong>Validación de Movimiento:</strong>{' '}
+                            {recountModalItem.movimiento < 0 ? (
+                                <span>Solo se registraron salidas/ventas de {Math.abs(recountModalItem.movimiento)} un. en el sistema hoy. La diferencia debe buscarse en la cámara física.</span>
+                            ) : recountModalItem.movimiento > 0 ? (
+                                <span>Se registró un ingreso de +{recountModalItem.movimiento} un. Asegúrese de incluir o verificar los pallets recibidos.</span>
+                            ) : (
+                                <span>No hubo movimiento de ventas ni compras hoy. El conteo físico debería igualar al stock del sistema.</span>
+                            )}
+                        </div>
+
+                        {/* Optional Pallets / Boxes / Units breakdown helper */}
+                        <div className="space-y-1.5">
+                            <label className="text-[10px] font-black uppercase text-gray-400 tracking-wider block">
+                                Desglose por Embalaje (Opcional - Calcula Unidades Automáticamente)
+                            </label>
+                            <div className="grid grid-cols-3 gap-2">
+                                <div>
+                                    <span className="text-[10px] font-bold text-gray-500 block mb-1">Pallets</span>
+                                    <input 
+                                        type="number"
+                                        min="0"
+                                        step="1"
+                                        placeholder="0"
+                                        value={recountInputPallets}
+                                        onChange={e => handleRecountBreakdownChange(e.target.value, recountInputBoxes, recountInputUnits)}
+                                        className="w-full p-2 bg-gray-50 border border-gray-200 rounded-lg text-xs font-bold text-center outline-none focus:border-blue-500"
+                                    />
+                                </div>
+                                <div>
+                                    <span className="text-[10px] font-bold text-gray-500 block mb-1">Cajas</span>
+                                    <input 
+                                        type="number"
+                                        min="0"
+                                        step="1"
+                                        placeholder="0"
+                                        value={recountInputBoxes}
+                                        onChange={e => handleRecountBreakdownChange(recountInputPallets, e.target.value, recountInputUnits)}
+                                        className="w-full p-2 bg-gray-50 border border-gray-200 rounded-lg text-xs font-bold text-center outline-none focus:border-blue-500"
+                                    />
+                                </div>
+                                <div>
+                                    <span className="text-[10px] font-bold text-gray-500 block mb-1">Unidades Sueltas</span>
+                                    <input 
+                                        type="number"
+                                        min="0"
+                                        step="0.01"
+                                        placeholder="0"
+                                        value={recountInputUnits}
+                                        onChange={e => handleRecountBreakdownChange(recountInputPallets, recountInputBoxes, e.target.value)}
+                                        className="w-full p-2 bg-gray-50 border border-gray-200 rounded-lg text-xs font-bold text-center outline-none focus:border-blue-500"
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Direct Final Count input */}
+                        <div>
+                            <div className="flex justify-between items-center mb-1">
+                                <label className="text-xs font-black uppercase text-gray-700 tracking-wider">
+                                    Total Unidades Físicas Recontadas *
+                                </label>
+                                {recountInputQty && !isNaN(parseFloat(recountInputQty)) && (
+                                    <span className={`text-xs font-black ${
+                                        parseFloat(recountInputQty) - recountModalItem.theoretical === 0 
+                                            ? 'text-green-600' 
+                                            : parseFloat(recountInputQty) - recountModalItem.theoretical < 0 ? 'text-red-600' : 'text-emerald-600'
+                                    }`}>
+                                        Nueva Dif: {(parseFloat(recountInputQty) - recountModalItem.theoretical) > 0 ? '+' : ''}
+                                        {(parseFloat(recountInputQty) - recountModalItem.theoretical).toFixed(2)}
+                                    </span>
+                                )}
+                            </div>
+                            <input 
+                                type="number" 
+                                step="0.01"
+                                min="0"
+                                required
+                                placeholder="0.00"
+                                className="w-full p-3 bg-white border-2 border-blue-500 rounded-xl font-black text-lg text-blue-900 outline-none focus:ring-2 focus:ring-blue-200"
+                                value={recountInputQty}
+                                onChange={e => setRecountInputQty(e.target.value)}
+                            />
+                        </div>
+
+                        {/* Expiry date & Observations */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                                <label className="text-[10px] font-black uppercase text-gray-400 tracking-wider block mb-1">
+                                    Fecha de Vencimiento (Opcional)
+                                </label>
+                                <input 
+                                    type="date"
+                                    value={recountInputExpiry}
+                                    onChange={e => setRecountInputExpiry(e.target.value)}
+                                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold outline-none focus:border-blue-500"
+                                />
+                            </div>
+                            <div>
+                                <label className="text-[10px] font-black uppercase text-gray-400 tracking-wider block mb-1">
+                                    Nota de Reconteo / Auditoría
+                                </label>
+                                <input 
+                                    type="text"
+                                    placeholder="Ej: Verificado en palet superior"
+                                    value={recountInputObs}
+                                    onChange={e => setRecountInputObs(e.target.value)}
+                                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold outline-none focus:border-blue-500"
+                                />
+                            </div>
+                        </div>
+
+                        {/* Action buttons */}
+                        <div className="flex gap-3 pt-3 border-t border-gray-100">
+                            <button 
+                                type="button" 
+                                onClick={() => setRecountModalItem(null)}
+                                className="flex-1 py-2.5 font-bold text-gray-500 hover:bg-gray-100 rounded-xl transition-all text-xs cursor-pointer"
+                            >
+                                Cancelar
+                            </button>
+                            <button 
+                                type="button" 
+                                onClick={handleSaveRecount}
+                                disabled={isSavingRecount || !recountInputQty}
+                                className="flex-1 py-2.5 font-black text-xs rounded-xl shadow-lg bg-blue-600 text-white hover:bg-blue-700 shadow-blue-200 transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                            >
+                                {isSavingRecount ? (
+                                    <>
+                                        <RefreshCw className="w-4 h-4 animate-spin" />
+                                        <span>Guardando Reconteo...</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <CheckCircle className="w-4 h-4" />
+                                        <span>GUARDAR RECONTEO</span>
+                                    </>
+                                )}
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
         )}

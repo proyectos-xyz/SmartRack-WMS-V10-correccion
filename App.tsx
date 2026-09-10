@@ -15,6 +15,7 @@ import UserManagement from './components/UserManagement';
 import BranchManagement from './components/BranchManagement';
 import BulkImport from './components/BulkImport';
 import CountHistory from './components/CountHistory';
+import EriHistory from './components/EriHistory';
 import Monitor from './components/Monitor';
 import Conciliation from './components/Conciliation';
 import DifferenceHistoryView from './components/DifferenceHistory';
@@ -1700,6 +1701,7 @@ const App: React.FC = () => {
         { view: ViewState.CONCILIATION, icon: <Scale className="w-5 h-5" />, label: "Conciliación" },
         { view: ViewState.DIFFERENCE_HISTORY, icon: <HistoryIcon className="w-5 h-5" />, label: "Historial Diferencias" },
         { view: ViewState.COUNT_HISTORY, icon: <HistoryIcon className="w-5 h-5" />, label: "Historial Conteos" },
+        { view: ViewState.ERI_HISTORY, icon: <CheckCircle className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />, label: "Historial ERI" },
         { view: ViewState.MERMAS, icon: <Trash2 className="w-5 h-5" />, label: "Mermas" },
         { view: ViewState.SAMPLES, icon: <Beaker className="w-5 h-5" />, label: "Muestras" },
         { view: ViewState.ROTULADO, icon: <Tag className="w-5 h-5" />, label: "Rotulado" },
@@ -2196,7 +2198,8 @@ const App: React.FC = () => {
                     {view === ViewState.EXPIRATIONS && <Expirations catalog={catalog} currentUser={currentUser} />}
                     {view === ViewState.MONITOR && <Monitor />}
                     {view === ViewState.METRICS && <Metrics />}
-                    {view === ViewState.COUNT_HISTORY && <CountHistory />}
+                    {view === ViewState.COUNT_HISTORY && <CountHistory catalog={catalog} />}
+                    {view === ViewState.ERI_HISTORY && <EriHistory catalog={catalog} />}
                     {view === ViewState.CONCILIATION && <Conciliation catalog={catalog} currentUser={currentUser} />}
                     {view === ViewState.DIFFERENCE_HISTORY && <DifferenceHistoryView />}
                     {view === ViewState.SAMPLES && <Samples currentUser={currentUser} />}

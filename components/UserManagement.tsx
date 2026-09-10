@@ -392,6 +392,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ currentUser, onUpdateCu
                 { key: ViewState.LAYOUT, label: 'Mapa Almacén' },
                 { key: ViewState.CONCILIATION, label: 'Conciliación' },
                 { key: ViewState.COUNT_HISTORY, label: 'Historial Conteos' },
+                { key: ViewState.ERI_HISTORY, label: 'Historial ERI' },
                 { key: ViewState.MERMAS, label: 'Mermas' },
                 { key: ViewState.SAMPLES, label: 'Muestras' },
                 { key: ViewState.ROTULADO, label: 'Rotulado' },
