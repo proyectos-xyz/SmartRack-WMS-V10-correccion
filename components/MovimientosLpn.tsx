@@ -29,7 +29,7 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
-import { InventoryItem, Product, Usuario, Rack, RackLocation, Zone } from '../types';
+import { InventoryItem, Product, Usuario, Rack, RackLocation, Zone, ZoneType } from '../types';
 import { supabase } from '../supabaseClient';
 import { InventoryMapExplorer } from './InventoryMapExplorer';
 
@@ -123,7 +123,7 @@ function formatLocalPeruTime(dateStrOrTs: string | number | undefined | null): s
 
 export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
   inventory,
-  catalog: _catalog,
+  catalog = [],
   racks,
   zones = [],
   currentUser,
@@ -141,6 +141,12 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
   const [soundEnabled] = useState(true);
   const [visibleCount, setVisibleCount] = useState(30);
 
+  // ❄️ CÁMARA FILTER STATE ('TODOS' | 'SECO' | 'REFRIGERADO' | 'CONGELADO')
+  const [selectedChamber, setSelectedChamber] = useState<'TODOS' | 'SECO' | 'REFRIGERADO' | 'CONGELADO'>('TODOS');
+
+  // ⚡ ASÍNCRONO OPTIMISTA: Almacena cambios en caliente (0 ms) antes de que la BD termine
+  const [optimisticOverrides, setOptimisticOverrides] = useState<Map<string, Partial<InventoryItem>>>(new Map());
+
   // 🛒 MULTI-SCAN BATCH QUEUE (Floating Bag)
   const [batchQueue, setBatchQueue] = useState<InventoryItem[]>([]);
   const [isBatchModalOpen, setIsBatchModalOpen] = useState(false);
@@ -153,6 +159,7 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
   const [selectedLevel, setSelectedLevel] = useState<number | null>(null);
   const [selectedPosition, setSelectedPosition] = useState<number | null>(null);
   const [manualLocationText, setManualLocationText] = useState('');
+  const [showDetailedLocation, setShowDetailedLocation] = useState(false);
 
   // Toast notification
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
@@ -194,17 +201,97 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
     }
   }, [recentMoves]);
 
+  // Merge server inventory with optimistic local changes for 0 ms UI feedback
+  const effectiveInventory = useMemo(() => {
+    if (optimisticOverrides.size === 0) return inventory;
+    return inventory.map(item => {
+      const override = optimisticOverrides.get(item.lpn);
+      return override ? { ...item, ...override } : item;
+    });
+  }, [inventory, optimisticOverrides]);
+
+  // Clean up optimistic overrides once server inventory has acknowledged them
+  useEffect(() => {
+    if (optimisticOverrides.size === 0) return;
+    setOptimisticOverrides(prev => {
+      let changed = false;
+      const next = new Map(prev);
+      for (const [lpn, override] of prev.entries()) {
+        const item = inventory.find(i => i.lpn === lpn);
+        if (!item) continue;
+        if (override.tipo === 'PICKING' && (item.tipo === 'PICKING' || (item as any).estado_lpn === 'PICKING')) {
+          next.delete(lpn);
+          changed = true;
+        } else if (override.location && item.location && item.location.rackId === override.location.rackId && item.location.level === override.location.level && item.location.position === override.location.position) {
+          next.delete(lpn);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [inventory]);
+
+  // Catalog index for chamber determination
+  const catalogMap = useMemo(() => {
+    const map = new Map<string, Product>();
+    if (catalog && Array.isArray(catalog)) {
+      for (const p of catalog) {
+        if (p.codigo) map.set(p.codigo.trim().toUpperCase(), p);
+        if (p.id) map.set(p.id.trim().toUpperCase(), p);
+        if (p.sku) map.set(p.sku.trim().toUpperCase(), p);
+      }
+    }
+    return map;
+  }, [catalog]);
+
+  // Determine chamber for an inventory pallet
+  const getItemChamber = (item: InventoryItem): ZoneType => {
+    // 1. If currently located in rack, infer from aisle
+    if (item.location?.aisle) {
+      const a = item.location.aisle.trim().toUpperCase();
+      if (a === 'A' || a === 'B') return 'SECO';
+      if (a === 'C' || a === 'D') return 'REFRIGERADO';
+      if (a === 'E' || a === 'F' || a === 'G') return 'CONGELADO';
+    }
+
+    // 2. Look up product in catalog
+    const pCode = item.productCode?.trim().toUpperCase() || (item as any).producto_id?.trim().toUpperCase() || item.sku?.trim().toUpperCase();
+    const prod = pCode ? catalogMap.get(pCode) : null;
+    if (prod) {
+      if (prod.es_congelado) return 'CONGELADO';
+      if (prod.es_refrigerado) return 'REFRIGERADO';
+      if (prod.es_seco) return 'SECO';
+      if (prod.zona_predeterminada) return prod.zona_predeterminada;
+      if (prod.camara_texto) {
+        const txt = prod.camara_texto.toUpperCase();
+        if (txt.includes('CONGEL')) return 'CONGELADO';
+        if (txt.includes('REFRIG')) return 'REFRIGERADO';
+        if (txt.includes('SECO')) return 'SECO';
+      }
+    }
+
+    // 3. Keyword heuristic on product name
+    const nameUpper = (item.productName || '').toUpperCase();
+    if (nameUpper.includes('CONGEL') || nameUpper.includes('HELAD') || nameUpper.includes('PULPA') || nameUpper.includes('HIELO')) {
+      return 'CONGELADO';
+    }
+    if (nameUpper.includes('REFRIG') || nameUpper.includes('LACTEO') || nameUpper.includes('QUESO') || nameUpper.includes('MANTEQUILLA') || nameUpper.includes('YOGURT') || nameUpper.includes('FIAMBRE') || nameUpper.includes('JAMON')) {
+      return 'REFRIGERADO';
+    }
+
+    return 'SECO';
+  };
+
   // Helper to determine real computed status of LPN
   const getLpnState = (item: InventoryItem): 'PENDIENTE' | 'RESERVA' | 'PICKING' => {
-    if (item.estado_lpn === 'PICKING') return 'PICKING';
-    if (item.location || item.locationId || item.estado_lpn === 'UBICADO' || item.estado_lpn === 'GENERADO' || item.estado_lpn === 'RESERVA') {
+    if (item.estado_lpn === 'PICKING' || (item as any).tipo === 'PICKING' || (item.motivo_ultima_ubicacion && item.motivo_ultima_ubicacion.toLowerCase().includes('picking'))) return 'PICKING';
+    if (item.location || item.locationId) {
       return 'RESERVA';
     }
     return 'PENDIENTE';
   };
 
-  // 🔥 HIGH-PERFORMANCE SINGLE-PASS MEMOIZATION:
-  // Pre-computes exact maps and suffix lookup index for 4/5-digit fast PDA matching
+  // 🔥 HIGH-PERFORMANCE SINGLE-PASS MEMOIZATION (con effectiveInventory para actualización optimista instantánea)
   const { lpnMap, suffixMap, activeList, pendientesList, reservasInRackList, pickingList } = useMemo(() => {
     const map = new Map<string, InventoryItem>();
     const sufMap = new Map<string, InventoryItem[]>();
@@ -213,8 +300,8 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
     const res: InventoryItem[] = [];
     const pick: InventoryItem[] = [];
 
-    for (let i = 0; i < inventory.length; i++) {
-      const item = inventory[i];
+    for (let i = 0; i < effectiveInventory.length; i++) {
+      const item = effectiveInventory[i];
       if (!item.lpn || item.estado_lpn === 'ELIMINADO') continue;
 
       act.push(item);
@@ -232,9 +319,9 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
         }
       }
 
-      const state = item.estado_lpn === 'PICKING'
+      const state = (item.estado_lpn === 'PICKING' || (item as any).tipo === 'PICKING' || (item.motivo_ultima_ubicacion && item.motivo_ultima_ubicacion.toLowerCase().includes('picking')))
         ? 'PICKING'
-        : (item.location || item.locationId || item.estado_lpn === 'UBICADO' || item.estado_lpn === 'GENERADO' || item.estado_lpn === 'RESERVA')
+        : (item.location || item.locationId)
           ? 'RESERVA'
           : 'PENDIENTE';
 
@@ -251,7 +338,48 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
       reservasInRackList: res,
       pickingList: pick
     };
-  }, [inventory]);
+  }, [effectiveInventory]);
+
+  // Real-time counts by chamber for the active list (Pendientes / En Rack / Picking)
+  const chamberCounts = useMemo(() => {
+    let baseList = pendientesList;
+    if (activeTab === 'RACKS') baseList = reservasInRackList;
+    else if (activeTab === 'PICKING') baseList = pickingList;
+
+    let seco = 0;
+    let refrigerado = 0;
+    let congelado = 0;
+
+    for (const item of baseList) {
+      const ch = getItemChamber(item);
+      if (ch === 'SECO') seco++;
+      else if (ch === 'REFRIGERADO') refrigerado++;
+      else if (ch === 'CONGELADO') congelado++;
+    }
+
+    return {
+      total: baseList.length,
+      seco,
+      refrigerado,
+      congelado
+    };
+  }, [activeTab, pendientesList, reservasInRackList, pickingList, catalogMap]);
+
+  // Lists filtered by chamber
+  const filteredPendientesList = useMemo(() => {
+    if (selectedChamber === 'TODOS') return pendientesList;
+    return pendientesList.filter(item => getItemChamber(item) === selectedChamber);
+  }, [pendientesList, selectedChamber, catalogMap]);
+
+  const filteredReservasList = useMemo(() => {
+    if (selectedChamber === 'TODOS') return reservasInRackList;
+    return reservasInRackList.filter(item => getItemChamber(item) === selectedChamber);
+  }, [reservasInRackList, selectedChamber, catalogMap]);
+
+  const filteredPickingList = useMemo(() => {
+    if (selectedChamber === 'TODOS') return pickingList;
+    return pickingList.filter(item => getItemChamber(item) === selectedChamber);
+  }, [pickingList, selectedChamber, catalogMap]);
 
   // Find LPN by scanned string, full code or 4-5 trailing digits
   const findLpnCandidate = (rawCode: string): InventoryItem | null => {
@@ -360,7 +488,8 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
         .from('paletas_lpn')
         .update({
           estado: 'ACTIVO',
-          estado_lpn: 'PICKING',
+          estado_lpn: 'GENERADO',
+          tipo: 'PICKING',
           ubicacion_id: null,
           usuario_ultima_ubicacion: operatorName,
           fecha_ultima_ubicacion: nowIso,
@@ -406,7 +535,7 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
       setSelectedBatchLpns(prev => prev.filter(l => l !== lpnCode));
 
       await onRefresh();
-      setSelectedLpn(prev => prev && prev.lpn === lpnCode ? { ...prev, estado_lpn: 'PICKING', location: null, locationId: undefined } : null);
+      setSelectedLpn(prev => prev && prev.lpn === lpnCode ? { ...prev, estado_lpn: 'GENERADO', tipo: 'PICKING', motivo_ultima_ubicacion: reason, location: null, locationId: undefined } : null);
       showToast(`LPN ${lpnCode} pasado a PICKING`, "success");
     } catch (err: any) {
       console.error("Error bajando LPN a picking:", err);
@@ -457,6 +586,7 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
         .update({
           estado: 'ACTIVO',
           estado_lpn: 'GENERADO',
+          tipo: 'RECEPCION',
           usuario_ultima_ubicacion: operatorName,
           fecha_ultima_ubicacion: nowIso
         })
@@ -497,6 +627,206 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
       showToast(`LPN ${lpnCode} ubicado en ${targetLocation.aisle}-R${targetLocation.rackId}-N${targetLocation.level}-P${targetLocation.position}`, "success");
     } catch (err: any) {
       console.error("Error al almacenar en rack:", err);
+      showToast(`Error: ${err?.message || 'Fallo desconocido'}`, "error");
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // ⚡ RACKEO RÁPIDO CON BOTONES (A, B, C, D, E)
+  const handleFastRackSelect = async (rackLetter: string) => {
+    if (!selectedLpn) {
+      showToast("Seleccione un LPN primero", "error");
+      return;
+    }
+
+    setIsProcessing(true);
+    const lpnCode = selectedLpn.lpn;
+    const currentState = getLpnState(selectedLpn);
+    const oldLocation = selectedLpn.location;
+    const oldLocationId = selectedLpn.locationId || oldLocation?.id;
+    const operatorName = currentUser?.nombre || currentUser?.username || 'OPERADOR';
+    const nowIso = new Date().toISOString();
+
+    try {
+      // Buscar rack por letra de pasillo (A, B, C, D, E...)
+      const letterUpper = rackLetter.toUpperCase();
+      const matchingRacks = racks.filter(r => r.aisle?.toUpperCase() === letterUpper);
+      const selectedRack = matchingRacks.find(r => r.slots.some(s => s.status === 'empty')) 
+        || matchingRacks[0] 
+        || racks.find(r => r.aisle?.toUpperCase().includes(letterUpper)) 
+        || racks[0];
+
+      if (!selectedRack) {
+        showToast(`Rack ${letterUpper} no configurado en esta sede`, "error");
+        setIsProcessing(false);
+        return;
+      }
+
+      // Encontrar primer slot libre o el primero disponible
+      const targetSlot = selectedRack.slots.find(s => s.status === 'empty') || selectedRack.slots[0];
+      const targetLevel = targetSlot ? targetSlot.location.level : 1;
+      const targetPosition = targetSlot ? targetSlot.location.position : 1;
+
+      const targetLocation: RackLocation = {
+        aisle: selectedRack.aisle,
+        rackId: selectedRack.id,
+        level: targetLevel,
+        position: targetPosition
+      };
+
+      // 1. Liberar ubicación anterior si existía
+      if (oldLocationId) {
+        await supabase
+          .from('ubicaciones')
+          .update({ estado: 'VACIO' })
+          .eq('id', oldLocationId);
+      }
+
+      // 2. Marcar nuevo slot como ocupado
+      if (targetSlot?.dbId) {
+        await supabase
+          .from('ubicaciones')
+          .update({ estado: 'OCUPADO' })
+          .eq('id', targetSlot.dbId);
+      }
+
+      // 3. Actualizar paleta en la base de datos
+      const { error: lpnErr } = await supabase
+        .from('paletas_lpn')
+        .update({
+          estado: 'ACTIVO',
+          estado_lpn: 'GENERADO',
+          tipo: 'RECEPCION',
+          ubicacion_id: targetSlot?.dbId || null,
+          usuario_ultima_ubicacion: operatorName,
+          fecha_ultima_ubicacion: nowIso,
+          motivo_ultima_ubicacion: `Rackeo a Rack ${letterUpper}`
+        })
+        .eq('lpn', lpnCode);
+
+      if (lpnErr) throw lpnErr;
+
+      // 4. Actualizar estado local a través de onAssignLocation
+      onAssignLocation(lpnCode, targetLocation, currentState === 'PENDIENTE' ? `Rackeo inicial a Rack ${letterUpper}` : `Reubicación a Rack ${letterUpper}`);
+
+      // 5. Registrar movimiento de auditoría
+      await supabase.from('lpn_movimientos').insert([{
+        lpn: lpnCode,
+        ubicacion_id: targetSlot?.dbId || null,
+        tipo_movimiento: currentState === 'PENDIENTE' ? 'UBICACION' : 'REUBICACION',
+        usuario: operatorName,
+        motivo: `Rackeo rápido a Rack ${letterUpper}`,
+        cantidad_afectada: selectedLpn.quantity || selectedLpn.unidades || selectedLpn.cajas || 1,
+        fecha: nowIso,
+        sede_id: currentUser?.sede_id
+      }]);
+
+      const newMove: MovementLog = {
+        lpn: lpnCode,
+        tipo: currentState === 'PENDIENTE' ? 'UBICACION' : 'REUBICACION',
+        origen: oldLocation ? `RACK ${oldLocation.aisle}-R${oldLocation.rackId}-N${oldLocation.level}-P${oldLocation.position}` : (currentState === 'PICKING' ? 'Zona Picking' : 'Playa Recepción'),
+        destino: `RACK ${selectedRack.aisle} (N${targetLevel}-P${targetPosition})`,
+        usuario: operatorName,
+        fecha: nowIso,
+        timestamp: Date.now(),
+        productName: selectedLpn.productName,
+        productCode: selectedLpn.productCode,
+        quantity: selectedLpn.quantity,
+        cajas: selectedLpn.cajas,
+        unidades: selectedLpn.unidades,
+        previousState: currentState,
+        previousLocationId: oldLocationId || null,
+        previousLocation: oldLocation || null
+      };
+
+      setRecentMoves(prev => [newMove, ...prev]);
+
+      setIsRackModalOpen(false);
+      setSelectedRackId(null);
+      setSelectedLevel(null);
+      setSelectedPosition(null);
+      setManualLocationText('');
+      setShowDetailedLocation(false);
+
+      // Remover de cola si estaba
+      setBatchQueue(prev => prev.filter(b => b.lpn !== lpnCode));
+      setSelectedBatchLpns(prev => prev.filter(l => l !== lpnCode));
+
+      await onRefresh();
+      setSelectedLpn(null);
+      showToast(`LPN ${lpnCode} rackeado en RACK ${letterUpper} con éxito`, "success");
+    } catch (err: any) {
+      console.error("Error al almacenar en rack:", err);
+      showToast(`Error: ${err?.message || 'Fallo desconocido'}`, "error");
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // ⚡ RACKEO RÁPIDO MASIVO CON BOTONES (A, B, C, D, E)
+  const handleFastBatchRackSelect = async (rackLetter: string) => {
+    if (selectedBatchLpns.length === 0) return;
+
+    setIsProcessing(true);
+    const operatorName = currentUser?.nombre || currentUser?.username || 'OPERADOR';
+    const nowIso = new Date().toISOString();
+    const letterUpper = rackLetter.toUpperCase();
+
+    try {
+      const matchingRacks = racks.filter(r => r.aisle?.toUpperCase() === letterUpper);
+      const selectedRack = matchingRacks.find(r => r.slots.some(s => s.status === 'empty')) 
+        || matchingRacks[0] 
+        || racks.find(r => r.aisle?.toUpperCase().includes(letterUpper)) 
+        || racks[0];
+
+      if (!selectedRack) {
+        showToast(`Rack ${letterUpper} no configurado`, "error");
+        setIsProcessing(false);
+        return;
+      }
+
+      const emptySlots = selectedRack.slots.filter(s => s.status === 'empty');
+      const targetItems = inventory.filter(i => selectedBatchLpns.includes(i.lpn));
+
+      for (let i = 0; i < targetItems.length; i++) {
+        const item = targetItems[i];
+        const slot = emptySlots[i] || selectedRack.slots[0];
+        const targetLocation: RackLocation = {
+          aisle: selectedRack.aisle,
+          rackId: selectedRack.id,
+          level: slot.location.level,
+          position: slot.location.position
+        };
+
+        if (slot.dbId) {
+          await supabase.from('ubicaciones').update({ estado: 'OCUPADO' }).eq('id', slot.dbId);
+        }
+
+        await supabase
+          .from('paletas_lpn')
+          .update({
+            estado: 'ACTIVO',
+            estado_lpn: 'GENERADO',
+            tipo: 'RECEPCION',
+            ubicacion_id: slot.dbId || null,
+            usuario_ultima_ubicacion: operatorName,
+            fecha_ultima_ubicacion: nowIso,
+            motivo_ultima_ubicacion: `Rackeo masivo a Rack ${letterUpper}`
+          })
+          .eq('lpn', item.lpn);
+
+        onAssignLocation(item.lpn, targetLocation, `Rackeo masivo a Rack ${letterUpper}`);
+      }
+
+      setIsBatchRackModalOpen(false);
+      setBatchQueue(prev => prev.filter(b => !selectedBatchLpns.includes(b.lpn)));
+      setSelectedBatchLpns([]);
+
+      await onRefresh();
+      showToast(`${targetItems.length} pallets rackeados en RACK ${letterUpper}`, "success");
+    } catch (err: any) {
+      console.error("Error en rackeo masivo:", err);
       showToast(`Error: ${err?.message || 'Fallo desconocido'}`, "error");
     } finally {
       setIsProcessing(false);
@@ -619,7 +949,8 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
         .from('paletas_lpn')
         .update({
           estado: 'ACTIVO',
-          estado_lpn: 'PICKING',
+          estado_lpn: 'GENERADO',
+          tipo: 'PICKING',
           ubicacion_id: null,
           usuario_ultima_ubicacion: operatorName,
           fecha_ultima_ubicacion: nowIso,
@@ -1307,24 +1638,48 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
                 <div className="pt-1">
                   {/* CASE 1: PENDIENTE */}
                   {getLpnState(selectedLpn) === 'PENDIENTE' && (
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        onClick={() => setIsRackModalOpen(true)}
-                        disabled={isProcessing}
-                        className="py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-2xs active:scale-95 transition-all"
-                      >
-                        <ArrowUpToLine className="w-4 h-4" />
-                        <span>RACKEAR</span>
-                      </button>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                          Rackeo Rápido Directo:
+                        </span>
+                        <span className="text-[10px] text-indigo-600 font-bold bg-indigo-50 px-1.5 py-0.5 rounded">1-Tap</span>
+                      </div>
 
-                      <button
-                        onClick={() => handleBajarAPicking(selectedLpn, 'Pase directo a Picking')}
-                        disabled={isProcessing}
-                        className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-2xs active:scale-95 transition-all"
-                      >
-                        <ArrowDownToLine className="w-4 h-4" />
-                        <span>A PICKING</span>
-                      </button>
+                      <div className="grid grid-cols-5 gap-1.5">
+                        {['A', 'B', 'C', 'D', 'E'].map(letter => (
+                          <button
+                            key={letter}
+                            onClick={() => handleFastRackSelect(letter)}
+                            disabled={isProcessing}
+                            className="py-2.5 px-1 rounded-xl bg-indigo-50 border border-indigo-200 hover:bg-indigo-600 hover:border-indigo-600 hover:text-white text-indigo-900 font-black text-xs flex flex-col items-center justify-center transition-all active:scale-90 shadow-2xs"
+                            title={`Rackeo directo a Rack ${letter}`}
+                          >
+                            <span className="text-sm font-mono leading-none">{letter}</span>
+                            <span className="text-[9px] opacity-75 mt-0.5">Rack</span>
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 pt-1">
+                        <button
+                          onClick={() => setIsRackModalOpen(true)}
+                          disabled={isProcessing}
+                          className="py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-2xs active:scale-95 transition-all"
+                        >
+                          <Building2 className="w-3.5 h-3.5" />
+                          <span>MÁS OPCIONES</span>
+                        </button>
+
+                        <button
+                          onClick={() => handleBajarAPicking(selectedLpn, 'Pase directo a Picking')}
+                          disabled={isProcessing}
+                          className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-2xs active:scale-95 transition-all"
+                        >
+                          <ArrowDownToLine className="w-3.5 h-3.5" />
+                          <span>A PICKING</span>
+                        </button>
+                      </div>
                     </div>
                   )}
 
@@ -1524,16 +1879,29 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
                           )}
 
                           {state === 'PENDIENTE' && (
-                            <button
-                              onClick={() => {
-                                setSelectedLpn(item);
-                                setActiveTab('SCANNER');
-                                setIsRackModalOpen(true);
-                              }}
-                              className="px-2 py-1 bg-indigo-600 text-white rounded-lg font-bold text-[10px] shadow-2xs"
-                            >
-                              Rackear
-                            </button>
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => {
+                                  setSelectedLpn(item);
+                                  setActiveTab('SCANNER');
+                                  setIsRackModalOpen(true);
+                                }}
+                                className="px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold text-[10px] shadow-2xs flex items-center gap-0.5"
+                                title="Subir / Asignar en Rack"
+                              >
+                                <ArrowUpToLine className="w-3 h-3" />
+                                <span>Rackear</span>
+                              </button>
+                              <button
+                                onClick={() => handleBajarAPicking(item, 'Pase directo a Picking')}
+                                disabled={isProcessing}
+                                className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-[10px] shadow-2xs flex items-center gap-0.5"
+                                title="Pasar directamente a Picking"
+                              >
+                                <ArrowDownToLine className="w-3 h-3" />
+                                <span>A Picking</span>
+                              </button>
+                            </div>
                           )}
                         </div>
                       </div>
@@ -1852,104 +2220,161 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
               </div>
             )}
 
-            {/* Manual Code Input */}
-            <div className="space-y-1">
-              <label className="text-[10px] font-black uppercase text-slate-500 tracking-wider block">
-                Escanear / Digitar Ubicación:
+            {/* ⚡ BOTONES RÁPIDOS DE RACK (A, B, C, D, E) */}
+            <div className="space-y-2 pt-1">
+              <label className="text-[11px] font-black uppercase text-slate-700 tracking-wider flex items-center justify-between">
+                <span>Seleccionar Rack de Destino:</span>
+                <span className="text-[10px] text-indigo-600 font-bold bg-indigo-50 px-2 py-0.5 rounded-md">1-Tap Rápido</span>
               </label>
-              <div className="flex items-center gap-1.5">
-                <input
-                  type="text"
-                  placeholder="Ej: A-01-N2-P1"
-                  value={manualLocationText}
-                  onChange={e => setManualLocationText(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter' && manualLocationText.trim()) {
-                      e.preventDefault();
-                      parseAndApplyManualLocation(manualLocationText.trim());
-                    }
-                  }}
-                  className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold text-xs text-slate-900 outline-none focus:border-indigo-500"
-                />
-                <button
-                  onClick={() => parseAndApplyManualLocation(manualLocationText.trim())}
-                  disabled={!manualLocationText.trim() || isProcessing}
-                  className="px-3 py-2 bg-slate-900 text-white rounded-xl font-bold text-xs shrink-0"
-                >
-                  Asignar
-                </button>
+
+              <div className="grid grid-cols-5 gap-1.5 sm:gap-2">
+                {['A', 'B', 'C', 'D', 'E'].map(letter => {
+                  const matchingRack = racks.find(r => r.aisle?.toUpperCase() === letter);
+                  const emptyCount = matchingRack ? matchingRack.slots.filter(s => s.status === 'empty').length : 0;
+                  return (
+                    <button
+                      key={letter}
+                      onClick={() => handleFastRackSelect(letter)}
+                      disabled={isProcessing}
+                      className="group flex flex-col items-center justify-center py-3.5 px-1 rounded-2xl border-2 border-indigo-200 bg-indigo-50/70 hover:bg-indigo-600 hover:border-indigo-600 text-indigo-950 hover:text-white transition-all active:scale-90 shadow-2xs hover:shadow-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1 disabled:opacity-50"
+                    >
+                      <span className="text-xl sm:text-2xl font-black font-mono leading-none group-hover:scale-110 transition-transform">
+                        {letter}
+                      </span>
+                      <span className="text-[10px] font-black mt-1 uppercase tracking-wide group-hover:text-indigo-100">
+                        Rack
+                      </span>
+                      <span className="text-[9px] font-bold text-indigo-600 group-hover:text-indigo-200 mt-0.5">
+                        {emptyCount} lib
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
+              <p className="text-[10px] text-slate-500 text-center font-medium">
+                Toque la letra del rack para ubicar el pallet en el sistema de forma inmediata.
+              </p>
             </div>
 
-            {/* Visual Selector Dropdowns */}
-            <div className="space-y-2 pt-1 border-t border-slate-100">
-              <div>
-                <label className="text-[10px] font-bold text-slate-500 block mb-0.5">Rack:</label>
-                <select
-                  value={selectedRackId || ''}
-                  onChange={e => {
-                    const val = Number(e.target.value);
-                    setSelectedRackId(val || null);
-                    setSelectedLevel(1);
-                    setSelectedPosition(1);
-                  }}
-                  className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 outline-none focus:border-indigo-500"
-                >
-                  <option value="">-- Seleccionar Rack --</option>
-                  {racks.map(r => (
-                    <option key={r.id} value={r.id}>
-                      Pasillo {r.aisle} - Rack {r.id} ({r.levels}x{r.positionsPerLevel})
-                    </option>
-                  ))}
-                </select>
-              </div>
+            {/* Opciones opcionales / avanzadas (Manual) */}
+            <div className="pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setShowDetailedLocation(!showDetailedLocation)}
+                className="w-full text-[11px] font-bold text-slate-500 hover:text-indigo-600 flex items-center justify-center gap-1 py-1 transition-colors"
+              >
+                <span>{showDetailedLocation ? '▲ Ocultar especificación de nivel/posición' : '▼ Especificar nivel y posición (opcional)'}</span>
+              </button>
 
-              {selectedRackId && (
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-[10px] font-bold text-slate-500 block mb-0.5">Nivel:</label>
-                    <select
-                      value={selectedLevel || 1}
-                      onChange={e => setSelectedLevel(Number(e.target.value))}
-                      className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 outline-none focus:border-indigo-500"
-                    >
-                      {Array.from({ length: racks.find(r => r.id === selectedRackId)?.levels || 4 }, (_, i) => i + 1).map(lvl => (
-                        <option key={lvl} value={lvl}>Nivel {lvl}</option>
-                      ))}
-                    </select>
+              {showDetailedLocation && (
+                <div className="space-y-3 pt-2">
+                  {/* Manual Code Input */}
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase text-slate-500 tracking-wider block">
+                      Escanear / Digitar Código:
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        placeholder="Ej: A-01-N2-P1"
+                        value={manualLocationText}
+                        onChange={e => setManualLocationText(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' && manualLocationText.trim()) {
+                            e.preventDefault();
+                            parseAndApplyManualLocation(manualLocationText.trim());
+                          }
+                        }}
+                        className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold text-xs text-slate-900 outline-none focus:border-indigo-500"
+                      />
+                      <button
+                        onClick={() => parseAndApplyManualLocation(manualLocationText.trim())}
+                        disabled={!manualLocationText.trim() || isProcessing}
+                        className="px-3 py-2 bg-slate-900 text-white rounded-xl font-bold text-xs shrink-0"
+                      >
+                        Asignar
+                      </button>
+                    </div>
                   </div>
 
-                  <div>
-                    <label className="text-[10px] font-bold text-slate-500 block mb-0.5">Posición:</label>
-                    <select
-                      value={selectedPosition || 1}
-                      onChange={e => setSelectedPosition(Number(e.target.value))}
-                      className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 outline-none focus:border-indigo-500"
+                  {/* Visual Selector Dropdowns */}
+                  <div className="space-y-2 pt-1 border-t border-slate-100">
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-500 block mb-0.5">Rack:</label>
+                      <select
+                        value={selectedRackId || ''}
+                        onChange={e => {
+                          const val = Number(e.target.value);
+                          setSelectedRackId(val || null);
+                          setSelectedLevel(1);
+                          setSelectedPosition(1);
+                        }}
+                        className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 outline-none focus:border-indigo-500"
+                      >
+                        <option value="">-- Seleccionar Rack --</option>
+                        {racks.map(r => (
+                          <option key={r.id} value={r.id}>
+                            Pasillo {r.aisle} - Rack {r.id} ({r.levels}x{r.positionsPerLevel})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {selectedRackId && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-500 block mb-0.5">Nivel:</label>
+                          <select
+                            value={selectedLevel || 1}
+                            onChange={e => setSelectedLevel(Number(e.target.value))}
+                            className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 outline-none focus:border-indigo-500"
+                          >
+                            {Array.from({ length: racks.find(r => r.id === selectedRackId)?.levels || 4 }, (_, i) => i + 1).map(lvl => (
+                              <option key={lvl} value={lvl}>Nivel {lvl}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-500 block mb-0.5">Posición:</label>
+                          <select
+                            value={selectedPosition || 1}
+                            onChange={e => setSelectedPosition(Number(e.target.value))}
+                            className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 outline-none focus:border-indigo-500"
+                          >
+                            {Array.from({ length: racks.find(r => r.id === selectedRackId)?.positionsPerLevel || 3 }, (_, i) => i + 1).map(pos => (
+                              <option key={pos} value={pos}>Posición {pos}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-end gap-1.5 pt-2 border-t border-slate-100">
+                    <button
+                      onClick={handleConfirmRackAssignment}
+                      disabled={isProcessing || !selectedRackId}
+                      className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl font-black text-xs shadow-2xs flex items-center justify-center gap-1"
                     >
-                      {Array.from({ length: racks.find(r => r.id === selectedRackId)?.positionsPerLevel || 3 }, (_, i) => i + 1).map(pos => (
-                        <option key={pos} value={pos}>Posición {pos}</option>
-                      ))}
-                    </select>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Confirmar Nivel y Posición</span>
+                    </button>
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Modal Buttons */}
-            <div className="flex items-center justify-end gap-1.5 pt-2 border-t border-slate-100">
+            {/* Modal Cancel Button */}
+            <div className="flex items-center justify-end pt-2 border-t border-slate-100">
               <button
-                onClick={() => setIsRackModalOpen(false)}
-                className="px-3 py-1.5 rounded-xl text-slate-600 font-bold text-xs"
+                onClick={() => {
+                  setIsRackModalOpen(false);
+                  setShowDetailedLocation(false);
+                }}
+                className="w-full py-2 rounded-xl text-slate-600 bg-slate-100 hover:bg-slate-200 font-bold text-xs text-center transition-colors"
               >
-                Cancelar
-              </button>
-              <button
-                onClick={handleConfirmRackAssignment}
-                disabled={isProcessing || !selectedRackId}
-                className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl font-black text-xs shadow-2xs flex items-center gap-1"
-              >
-                <Check className="w-3.5 h-3.5" />
-                <span>Confirmar</span>
+                Cerrar
               </button>
             </div>
           </div>
@@ -1978,75 +2403,131 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
               <span className="text-[11px] text-indigo-700">Se asignarán los {selectedBatchLpns.length} pallets a la posición seleccionada</span>
             </div>
 
-            {/* Visual Selector Dropdowns */}
-            <div className="space-y-2">
-              <div>
-                <label className="text-[10px] font-bold text-slate-500 block mb-0.5">Rack:</label>
-                <select
-                  value={selectedRackId || ''}
-                  onChange={e => {
-                    const val = Number(e.target.value);
-                    setSelectedRackId(val || null);
-                    setSelectedLevel(1);
-                    setSelectedPosition(1);
-                  }}
-                  className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 outline-none focus:border-indigo-500"
-                >
-                  <option value="">-- Seleccionar Rack --</option>
-                  {racks.map(r => (
-                    <option key={r.id} value={r.id}>
-                      Pasillo {r.aisle} - Rack {r.id} ({r.levels}x{r.positionsPerLevel})
-                    </option>
-                  ))}
-                </select>
-              </div>
+            {/* ⚡ BOTONES RÁPIDOS DE RACK MASIVO (A, B, C, D, E) */}
+            <div className="space-y-2 pt-1">
+              <label className="text-[11px] font-black uppercase text-slate-700 tracking-wider flex items-center justify-between">
+                <span>Seleccionar Rack de Destino:</span>
+                <span className="text-[10px] text-indigo-600 font-bold bg-indigo-50 px-2 py-0.5 rounded-md">1-Tap Masivo</span>
+              </label>
 
-              {selectedRackId && (
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-[10px] font-bold text-slate-500 block mb-0.5">Nivel:</label>
-                    <select
-                      value={selectedLevel || 1}
-                      onChange={e => setSelectedLevel(Number(e.target.value))}
-                      className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 outline-none focus:border-indigo-500"
+              <div className="grid grid-cols-5 gap-1.5 sm:gap-2">
+                {['A', 'B', 'C', 'D', 'E'].map(letter => {
+                  const matchingRack = racks.find(r => r.aisle?.toUpperCase() === letter);
+                  const emptyCount = matchingRack ? matchingRack.slots.filter(s => s.status === 'empty').length : 0;
+                  return (
+                    <button
+                      key={letter}
+                      onClick={() => handleFastBatchRackSelect(letter)}
+                      disabled={isProcessing}
+                      className="group flex flex-col items-center justify-center py-3 px-1 rounded-2xl border-2 border-indigo-200 bg-indigo-50/70 hover:bg-indigo-600 hover:border-indigo-600 text-indigo-950 hover:text-white transition-all active:scale-90 shadow-2xs hover:shadow-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1 disabled:opacity-50"
                     >
-                      {Array.from({ length: racks.find(r => r.id === selectedRackId)?.levels || 4 }, (_, i) => i + 1).map(lvl => (
-                        <option key={lvl} value={lvl}>Nivel {lvl}</option>
-                      ))}
-                    </select>
+                      <span className="text-xl sm:text-2xl font-black font-mono leading-none group-hover:scale-110 transition-transform">
+                        {letter}
+                      </span>
+                      <span className="text-[10px] font-black mt-1 uppercase tracking-wide group-hover:text-indigo-100">
+                        Rack
+                      </span>
+                      <span className="text-[9px] font-bold text-indigo-600 group-hover:text-indigo-200 mt-0.5">
+                        {emptyCount} lib
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-[10px] text-slate-500 text-center font-medium">
+                Toque el rack deseado para asignar los {selectedBatchLpns.length} pallets de inmediato.
+              </p>
+            </div>
+
+            {/* Opciones opcionales / avanzadas (Manual) */}
+            <div className="pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setShowDetailedLocation(!showDetailedLocation)}
+                className="w-full text-[11px] font-bold text-slate-500 hover:text-indigo-600 flex items-center justify-center gap-1 py-1 transition-colors"
+              >
+                <span>{showDetailedLocation ? '▲ Ocultar especificación de nivel/posición' : '▼ Especificar nivel y posición (opcional)'}</span>
+              </button>
+
+              {showDetailedLocation && (
+                <div className="space-y-3 pt-2">
+                  <div className="space-y-2">
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-500 block mb-0.5">Rack:</label>
+                      <select
+                        value={selectedRackId || ''}
+                        onChange={e => {
+                          const val = Number(e.target.value);
+                          setSelectedRackId(val || null);
+                          setSelectedLevel(1);
+                          setSelectedPosition(1);
+                        }}
+                        className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 outline-none focus:border-indigo-500"
+                      >
+                        <option value="">-- Seleccionar Rack --</option>
+                        {racks.map(r => (
+                          <option key={r.id} value={r.id}>
+                            Pasillo {r.aisle} - Rack {r.id} ({r.levels}x{r.positionsPerLevel})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {selectedRackId && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-500 block mb-0.5">Nivel:</label>
+                          <select
+                            value={selectedLevel || 1}
+                            onChange={e => setSelectedLevel(Number(e.target.value))}
+                            className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 outline-none focus:border-indigo-500"
+                          >
+                            {Array.from({ length: racks.find(r => r.id === selectedRackId)?.levels || 4 }, (_, i) => i + 1).map(lvl => (
+                              <option key={lvl} value={lvl}>Nivel {lvl}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-500 block mb-0.5">Posición:</label>
+                          <select
+                            value={selectedPosition || 1}
+                            onChange={e => setSelectedPosition(Number(e.target.value))}
+                            className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 outline-none focus:border-indigo-500"
+                          >
+                            {Array.from({ length: racks.find(r => r.id === selectedRackId)?.positionsPerLevel || 3 }, (_, i) => i + 1).map(pos => (
+                              <option key={pos} value={pos}>Posición {pos}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
-                  <div>
-                    <label className="text-[10px] font-bold text-slate-500 block mb-0.5">Posición:</label>
-                    <select
-                      value={selectedPosition || 1}
-                      onChange={e => setSelectedPosition(Number(e.target.value))}
-                      className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 outline-none focus:border-indigo-500"
+                  <div className="flex items-center justify-end gap-1.5 pt-2 border-t border-slate-100">
+                    <button
+                      onClick={handleConfirmBatchRackAssignment}
+                      disabled={isProcessing || !selectedRackId}
+                      className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl font-black text-xs shadow-2xs flex items-center justify-center gap-1"
                     >
-                      {Array.from({ length: racks.find(r => r.id === selectedRackId)?.positionsPerLevel || 3 }, (_, i) => i + 1).map(pos => (
-                        <option key={pos} value={pos}>Posición {pos}</option>
-                      ))}
-                    </select>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Guardar Masivo</span>
+                    </button>
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Modal Buttons */}
-            <div className="flex items-center justify-end gap-1.5 pt-2 border-t border-slate-100">
+            {/* Modal Cancel Button */}
+            <div className="flex items-center justify-end pt-2 border-t border-slate-100">
               <button
-                onClick={() => setIsBatchRackModalOpen(false)}
-                className="px-3 py-1.5 rounded-xl text-slate-600 font-bold text-xs"
+                onClick={() => {
+                  setIsBatchRackModalOpen(false);
+                  setShowDetailedLocation(false);
+                }}
+                className="w-full py-2 rounded-xl text-slate-600 bg-slate-100 hover:bg-slate-200 font-bold text-xs text-center transition-colors"
               >
-                Cancelar
-              </button>
-              <button
-                onClick={handleConfirmBatchRackAssignment}
-                disabled={isProcessing || !selectedRackId}
-                className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl font-black text-xs shadow-2xs flex items-center gap-1"
-              >
-                <Check className="w-3.5 h-3.5" />
-                <span>Guardar Masivo</span>
+                Cerrar
               </button>
             </div>
           </div>

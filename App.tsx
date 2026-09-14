@@ -656,7 +656,7 @@ const App: React.FC = () => {
           to = 999;
           hasMore = true;
           // Only columns needed for the inventory list
-          const invColumns = 'lpn, producto_id, cantidad_total, fecha_vencimiento_critica, fecha_recepcion, recibido_por, es_mixto, ubicacion_id, generado, estado_lpn, tipo, ubicaciones(id, nivel, posicion, estantes(id, pasillo))';
+          const invColumns = 'lpn, producto_id, cantidad_total, fecha_vencimiento_critica, fecha_recepcion, recibido_por, es_mixto, ubicacion_id, generado, estado_lpn, tipo, motivo_ultima_ubicacion, usuario_ultima_ubicacion, fecha_ultima_ubicacion, ubicaciones(id, nivel, posicion, estantes(id, pasillo))';
 
           while (hasMore) {
               const { data: invData, error: invError } = await supabase
@@ -733,7 +733,10 @@ const App: React.FC = () => {
                           fecha_generado: (d as any).fecha_generado,
                           usuario_generado: (d as any).usuario_generado,
                           estado_lpn: (d as any).estado_lpn || ((d as any).generado ? 'GENERADO' : 'PENDIENTE'),
-                          tipo: (d as any).tipo || ((d as any).generado ? 'GENERADO' : 'RECEPCION')
+                          tipo: (d as any).tipo || ((d as any).generado ? 'GENERADO' : 'RECEPCION'),
+                          motivo_ultima_ubicacion: (d as any).motivo_ultima_ubicacion,
+                          usuario_ultima_ubicacion: (d as any).usuario_ultima_ubicacion,
+                          fecha_ultima_ubicacion: (d as any).fecha_ultima_ubicacion
                       };
                   });
                   allInv = [...allInv, ...mappedInv];
@@ -1675,7 +1678,7 @@ const App: React.FC = () => {
             ]
         },
         { view: ViewState.DISPATCH_PROVINCE, icon: <Truck className="w-5 h-5" />, label: "Despachos Provincia" },
-        { view: ViewState.SALIDAS_LPN, icon: <LogOut className="w-5 h-5 text-amber-600 dark:text-amber-400" />, label: "Salidas LPN" },
+        { view: ViewState.SALIDAS_LPN, icon: <LogOut className="w-5 h-5 text-amber-600 dark:text-amber-400" />, label: "Control LPN" },
         { view: ViewState.MOVIMIENTOS_LPN, icon: <Layers className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />, label: "Mover LPN / Picking" },
         { view: ViewState.REVERSE_LOGISTICS, icon: <RefreshCw className="w-5 h-5" />, label: "Logíst. Inversa" },
         { view: ViewState.CORTES, icon: <ClipboardList className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />, label: "Cortes" },
@@ -1754,7 +1757,7 @@ const App: React.FC = () => {
           if (currentUser.rol === 'ADMIN') return true;
           
           if (item.view === ViewState.CLIENTES) {
-              return currentUser.rol === 'ASISTENTE';
+              return true; // Disponible para todos los usuarios para cortes / pedidos
           }
           
           if (
@@ -1798,7 +1801,7 @@ const App: React.FC = () => {
       
       const isAllowed = view !== ViewState.ORCHESTRATOR && (
                         currentUser.rol === 'ADMIN' || 
-                        (view === ViewState.CLIENTES && currentUser.rol === 'ASISTENTE') ||
+                        view === ViewState.CLIENTES ||
                         !!currentUser.permisos?.[view]
                       );
       

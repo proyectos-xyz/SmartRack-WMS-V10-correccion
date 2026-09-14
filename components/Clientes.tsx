@@ -22,8 +22,8 @@ export const Clientes: React.FC<ClientesProps> = ({ currentUser }) => {
   const [direccion, setDireccion] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Check if current user is exactly ASISTENTE
-  const isAsistente = currentUser?.rol === 'ASISTENTE';
+  // Permitir la creación de clientes a todos los usuarios (no restringido solo a ASISTENTES)
+  const canCreateCliente = !!currentUser;
 
   const fetchClientes = async () => {
     setIsLoading(true);
@@ -76,8 +76,8 @@ export const Clientes: React.FC<ClientesProps> = ({ currentUser }) => {
 
   const handleCreateCliente = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isAsistente) {
-      alert('Solo los usuarios con rol de ASISTENTE pueden crear clientes.');
+    if (!canCreateCliente) {
+      alert('Debe iniciar sesión para crear clientes.');
       return;
     }
 
@@ -150,8 +150,8 @@ export const Clientes: React.FC<ClientesProps> = ({ currentUser }) => {
             <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
           </button>
 
-          {/* Plus "+" option visible only to ASISTENTE role as requested */}
-          {isAsistente && (
+          {/* Opción "+" de nuevo cliente disponible para todos los usuarios */}
+          {canCreateCliente && (
             <button
               onClick={() => setIsModalOpen(true)}
               className="flex items-center justify-center gap-1.5 px-3 py-2 sm:px-4 sm:py-2.5 bg-[#009ED6] text-white text-[10px] sm:text-xs font-black tracking-widest uppercase rounded-xl sm:rounded-2xl hover:bg-[#0089ba] shadow-lg shadow-[#009ED6]/15 hover:shadow-xl transition-all cursor-pointer"
@@ -289,7 +289,7 @@ export const Clientes: React.FC<ClientesProps> = ({ currentUser }) => {
           <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl border border-slate-100 dark:border-slate-800 animate-in fade-in zoom-in duration-200">
             <div className="flex justify-between items-start mb-6">
               <div>
-                <span className="text-[10px] font-black text-[#009ED6] uppercase tracking-widest">ASISTENTE PRIVILEGES</span>
+                <span className="text-[10px] font-black text-[#009ED6] uppercase tracking-widest">REGISTRO DE CLIENTE</span>
                 <h2 className="text-lg font-black text-slate-800 dark:text-white uppercase mt-0.5">Crear Nuevo Cliente</h2>
               </div>
               <button 

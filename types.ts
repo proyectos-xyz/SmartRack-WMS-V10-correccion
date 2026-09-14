@@ -209,7 +209,7 @@ export interface Pallet {
   usuario_ultima_ubicacion?: string;
   fecha_ultima_ubicacion?: string;
   motivo_ultima_ubicacion?: string;
-  tipo?: 'RECEPCION' | 'GENERADO';
+  tipo?: 'RECEPCION' | 'GENERADO' | 'PICKING';
   comentario?: string;
 }
 

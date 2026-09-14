@@ -12,15 +12,22 @@ import {
   CheckCircle2, 
   RefreshCw, 
   Info, 
-  Layers,
-  FileSpreadsheet,
-  BarChart3,
-  ShieldCheck,
-  TrendingUp,
-  ChevronLeft,
-  ChevronRight,
-  ChevronsLeft,
-  ChevronsRight
+  Layers, 
+  FileSpreadsheet, 
+  BarChart3, 
+  ShieldCheck, 
+  TrendingUp, 
+  ChevronLeft, 
+  ChevronRight, 
+  ChevronsLeft, 
+  ChevronsRight,
+  Boxes,
+  Calendar,
+  CalendarClock,
+  ChevronDown,
+  ChevronUp,
+  LayoutGrid,
+  List
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { 
@@ -35,6 +42,64 @@ import {
 } from 'recharts';
 import { InventoryItem, Product, Usuario } from '../types';
 import { supabase } from '../supabaseClient';
+
+// Format date strictly in America/Lima timezone (UTC-5)
+export function formatPeruDate(dateStrOrTs: string | number | undefined | null): string {
+  if (!dateStrOrTs) return '-';
+  try {
+    const d = typeof dateStrOrTs === 'number' ? new Date(dateStrOrTs) : new Date(dateStrOrTs);
+    if (isNaN(d.getTime())) return '-';
+    return new Intl.DateTimeFormat('es-PE', {
+      timeZone: 'America/Lima',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    }).format(d);
+  } catch {
+    return String(dateStrOrTs);
+  }
+}
+
+// Format date & time strictly in America/Lima timezone (UTC-5)
+export function formatPeruDateTime(dateStrOrTs: string | number | undefined | null): string {
+  if (!dateStrOrTs) return '-';
+  try {
+    const d = typeof dateStrOrTs === 'number' ? new Date(dateStrOrTs) : new Date(dateStrOrTs);
+    if (isNaN(d.getTime())) return '-';
+    return new Intl.DateTimeFormat('es-PE', {
+      timeZone: 'America/Lima',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
+    }).format(d);
+  } catch {
+    return String(dateStrOrTs);
+  }
+}
+
+// Helper for expiration status
+export function getExpirationStatus(dateStr?: string | null): { text: string; color: string; daysLeft: number | null } {
+  if (!dateStr) return { text: 'Sin Venc.', color: 'bg-slate-100 text-slate-600 border-slate-200', daysLeft: null };
+  const exp = new Date(dateStr);
+  if (isNaN(exp.getTime())) return { text: dateStr, color: 'bg-slate-100 text-slate-600 border-slate-200', daysLeft: null };
+  
+  const now = new Date();
+  const diffTime = exp.getTime() - now.getTime();
+  const days = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+  if (days < 0) {
+    return { text: `Vencido (${Math.abs(days)}d)`, color: 'bg-rose-100 text-rose-800 border-rose-200 font-black', daysLeft: days };
+  } else if (days <= 15) {
+    return { text: `Crítico (${days}d)`, color: 'bg-red-100 text-red-800 border-red-200 font-black', daysLeft: days };
+  } else if (days <= 45) {
+    return { text: `Alerta (${days}d)`, color: 'bg-amber-100 text-amber-800 border-amber-200 font-bold', daysLeft: days };
+  } else {
+    return { text: `Vigente (${days}d)`, color: 'bg-emerald-50 text-emerald-800 border-emerald-200 font-medium', daysLeft: days };
+  }
+}
 
 // Helper to get chamber from product or catalogMap
 function getChamberForItem(item: InventoryItem, catalogMap: Map<string, Product>): 'SECO' | 'REFRIGERADO' | 'CONGELADO' {
@@ -101,12 +166,21 @@ export const SalidasLpn: React.FC<SalidasLpnProps> = ({
 }) => {
   // State
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState<'ALL' | 'RAQUEADO' | 'SIN_UBICACION' | 'HISTORIAL'>('ALL');
+  const [activeTab, setActiveTab] = useState<'RAQUEADO' | 'ALL' | 'SIN_UBICACION' | 'HISTORIAL'>('RAQUEADO');
+  const [rackedViewMode, setRackedViewMode] = useState<'PRODUCT_SUMMARY' | 'PALLET_DETAIL'>('PRODUCT_SUMMARY');
+  const [expandedProducts, setExpandedProducts] = useState<Record<string, boolean>>({});
   const [selectedLpnItem, setSelectedLpnItem] = useState<InventoryItem | null>(null);
   const [dispatchReason, setDispatchReason] = useState('Baja de Pallet para Picking / Consumo');
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+
+  const toggleProductExpand = (code: string) => {
+    setExpandedProducts(prev => ({
+      ...prev,
+      [code]: !prev[code]
+    }));
+  };
 
   // Scanner state
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -397,6 +471,153 @@ export const SalidasLpn: React.FC<SalidasLpnProps> = ({
 
     return result;
   }, [activeLpns, activeTab, searchQuery]);
+
+  // All racked LPNs in reservation (en rack)
+  const allRackedLpns = useMemo(() => {
+    return activeLpns.filter(i => !!i.location || !!i.locationId);
+  }, [activeLpns]);
+
+  interface RackedProductGroup {
+    productCode: string;
+    productName: string;
+    marca?: string | null;
+    palletsCount: number;
+    totalCajas: number;
+    totalUnidades: number;
+    nearestExpiration: string | null;
+    earliestReception: string | null;
+    locations: string[];
+    items: InventoryItem[];
+  }
+
+  // Grouped products for didactical Racked view
+  const rackedProductGroups = useMemo<RackedProductGroup[]>(() => {
+    const map = new Map<string, RackedProductGroup>();
+
+    allRackedLpns.forEach(item => {
+      const code = (item.productCode || 'SIN_CODIGO').trim().toUpperCase();
+      const prodInfo = catalogMap.get(item.productCode?.trim().toLowerCase() || '');
+      const locStr = item.location
+        ? `R${item.location.rackId}-N${item.location.level}-P${item.location.position}`
+        : item.locationId || 'Sin Ubic.';
+      const units = item.unidades || item.quantity || 0;
+      const cajas = item.cajas || 0;
+
+      let g = map.get(code);
+      if (!g) {
+        const newG: RackedProductGroup = {
+          productCode: item.productCode || 'SIN_CODIGO',
+          productName: item.productName || 'Producto no especificado',
+          marca: prodInfo?.marca ?? null,
+          palletsCount: 0,
+          totalCajas: 0,
+          totalUnidades: 0,
+          nearestExpiration: null,
+          earliestReception: null,
+          locations: [],
+          items: []
+        };
+        map.set(code, newG);
+        g = newG;
+      }
+
+      g.palletsCount += 1;
+      g.totalCajas += cajas;
+      g.totalUnidades += units;
+      g.items.push(item);
+      if (!g.locations.includes(locStr)) {
+        g.locations.push(locStr);
+      }
+
+      if (item.expirationDate) {
+        if (!g.nearestExpiration || new Date(item.expirationDate) < new Date(g.nearestExpiration)) {
+          g.nearestExpiration = item.expirationDate;
+        }
+      }
+      const rec = item.receptionDate || item.fecha_generado;
+      if (rec) {
+        if (!g.earliestReception || new Date(rec) < new Date(g.earliestReception)) {
+          g.earliestReception = rec;
+        }
+      }
+    });
+
+    return Array.from(map.values()).sort((a, b) => b.palletsCount - a.palletsCount);
+  }, [allRackedLpns, catalogMap]);
+
+  // Filtered racked groups according to search
+  const filteredRackedGroups = useMemo(() => {
+    if (!searchQuery.trim()) return rackedProductGroups;
+    const q = searchQuery.trim().toLowerCase();
+    return rackedProductGroups.filter(g => {
+      const matchCode = g.productCode.toLowerCase().includes(q);
+      const matchName = g.productName.toLowerCase().includes(q);
+      const matchLpn = g.items.some(it => it.lpn.toLowerCase().includes(q));
+      return matchCode || matchName || matchLpn;
+    });
+  }, [rackedProductGroups, searchQuery]);
+
+  // Highlighted searched product summary (e.g. searching LAB001)
+  const searchedProductSummary = useMemo(() => {
+    if (!searchQuery.trim()) return null;
+    const q = searchQuery.trim().toLowerCase();
+
+    // Matching racked items
+    const matchingItems = allRackedLpns.filter(item => {
+      const matchLpn = item.lpn?.toLowerCase().includes(q);
+      const matchProdName = item.productName?.toLowerCase().includes(q);
+      const matchProdCode = item.productCode?.toLowerCase().includes(q);
+      return matchLpn || matchProdName || matchProdCode;
+    });
+
+    if (matchingItems.length === 0) return null;
+
+    const firstItem = matchingItems[0];
+    const prodInfo = catalogMap.get(firstItem.productCode?.trim().toLowerCase() || '');
+    let totalCajas = 0;
+    let totalUnidades = 0;
+    let nearestExp: string | null = null;
+    let earliestRec: string | null = null;
+    const uniqueLocations: string[] = [];
+
+    matchingItems.forEach(it => {
+      totalCajas += it.cajas || 0;
+      totalUnidades += it.unidades || it.quantity || 0;
+
+      if (it.expirationDate) {
+        if (!nearestExp || new Date(it.expirationDate) < new Date(nearestExp)) {
+          nearestExp = it.expirationDate;
+        }
+      }
+      const rec = it.receptionDate || it.fecha_generado;
+      if (rec) {
+        if (!earliestRec || new Date(rec) < new Date(earliestRec)) {
+          earliestRec = rec;
+        }
+      }
+
+      const locStr = it.location
+        ? `Rack ${it.location.rackId} • N${it.location.level}-P${it.location.position}`
+        : it.locationId || 'Sin Ubic.';
+      if (!uniqueLocations.includes(locStr)) {
+        uniqueLocations.push(locStr);
+      }
+    });
+
+    return {
+      query: searchQuery.trim(),
+      productCode: firstItem.productCode || searchQuery.trim().toUpperCase(),
+      productName: firstItem.productName || 'Producto Encontrado',
+      marca: prodInfo?.marca,
+      palletsCount: matchingItems.length,
+      totalCajas,
+      totalUnidades,
+      nearestExpiration: nearestExp,
+      earliestReception: earliestRec,
+      uniqueLocations,
+      items: matchingItems
+    };
+  }, [allRackedLpns, searchQuery, catalogMap]);
 
   // Reset currentPage when search, activeTab, or itemsPerPage changes
   useEffect(() => {
@@ -767,19 +988,19 @@ export const SalidasLpn: React.FC<SalidasLpnProps> = ({
         <div className="hidden sm:flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-amber-500 to-orange-500 flex items-center justify-center text-white shadow-md shadow-amber-500/20 shrink-0">
-              <LogOut className="w-6 h-6" />
+              <Boxes className="w-6 h-6" />
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-lg sm:text-xl font-black uppercase tracking-tight text-slate-900 dark:text-white">
-                  SALIDAS LPN (RESERVA)
+                  CONTROL LPN
                 </h1>
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 border border-amber-300 dark:border-amber-700">
-                  Mobile 100%
+                  Inventario en Rack
                 </span>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400 font-medium mt-0.5">
-                Escanee o seleccione pallets LPN para retirarlos de reserva y mantener el inventario 100% alineado.
+                Visualización didáctica de items rackeados, consulta por código/SKU y salidas de pallet.
               </p>
             </div>
           </div>
@@ -800,7 +1021,7 @@ export const SalidasLpn: React.FC<SalidasLpnProps> = ({
             <input
               ref={searchInputRef}
               type="text"
-              placeholder="Ingrese código LPN o producto..."
+              placeholder="Buscar por código (ej: LAB001), producto o LPN..."
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               className="w-full pl-9 pr-9 py-2.5 sm:py-3.5 bg-slate-50 dark:bg-slate-800/90 border-2 border-slate-200 dark:border-slate-700 rounded-xl sm:rounded-2xl text-xs sm:text-base font-bold outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 transition-all text-slate-900 dark:text-white placeholder-slate-400"
@@ -859,8 +1080,24 @@ export const SalidasLpn: React.FC<SalidasLpnProps> = ({
         )}
       </div>
 
-      {/* Tabs Bar - Hidden on Mobile */}
-      <div className="hidden sm:flex items-center gap-1.5 overflow-x-auto pb-2 mb-4 scrollbar-none">
+      {/* Tabs Bar - Responsive & Accessible on Mobile */}
+      <div className="flex items-center gap-1.5 overflow-x-auto pb-2 mb-3 scrollbar-none">
+        <button
+          type="button"
+          onClick={() => setActiveTab('RAQUEADO')}
+          className={`px-3.5 py-2.5 rounded-2xl text-xs font-black uppercase transition-all whitespace-nowrap flex items-center gap-1.5 cursor-pointer border ${
+            activeTab === 'RAQUEADO'
+              ? 'bg-amber-600 border-amber-600 text-white shadow-md shadow-amber-600/20'
+              : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+          }`}
+        >
+          <MapPin className="w-4 h-4 text-emerald-500" />
+          <span>Items Rackeados</span>
+          <span className="ml-1 px-1.5 py-0.2 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300 text-[10px]">
+            {allRackedLpns.length}
+          </span>
+        </button>
+
         <button
           type="button"
           onClick={() => setActiveTab('ALL')}
@@ -874,22 +1111,6 @@ export const SalidasLpn: React.FC<SalidasLpnProps> = ({
           <span>Todos en Reserva</span>
           <span className="ml-1 px-1.5 py-0.2 rounded-full bg-black/10 dark:bg-white/10 text-[10px]">
             {activeLpns.length}
-          </span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('RAQUEADO')}
-          className={`px-3.5 py-2.5 rounded-2xl text-xs font-black uppercase transition-all whitespace-nowrap flex items-center gap-1.5 cursor-pointer border ${
-            activeTab === 'RAQUEADO'
-              ? 'bg-amber-600 border-amber-600 text-white shadow-md shadow-amber-600/20'
-              : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-          }`}
-        >
-          <MapPin className="w-4 h-4 text-emerald-500" />
-          <span>Raqueados</span>
-          <span className="ml-1 px-1.5 py-0.2 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300 text-[10px]">
-            {activeLpns.filter(i => !!i.location || !!i.locationId).length}
           </span>
         </button>
 
@@ -929,164 +1150,502 @@ export const SalidasLpn: React.FC<SalidasLpnProps> = ({
       {/* Main Content Area */}
       {activeTab !== 'HISTORIAL' ? (
         <div className="space-y-3">
-          {filteredLpns.length === 0 ? (
-            <div className="bg-white dark:bg-slate-900 rounded-3xl p-8 text-center border border-slate-200 dark:border-slate-800 shadow-sm">
-              <Package className="w-12 h-12 text-slate-300 dark:text-slate-700 mx-auto mb-3" />
-              <h3 className="text-base font-black text-slate-700 dark:text-slate-200 uppercase">
-                No se encontraron LPNs
-              </h3>
-              <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-                {searchQuery ? `No hay resultados para "${searchQuery}". Verifique el código ingresado.` : 'No hay paletas de reserva registradas en esta categoría.'}
-              </p>
-            </div>
-          ) : (
-            <>
-              {/* Pagination Controls Top */}
-              {renderPaginationControls()}
-
-              {/* Desktop Table View (md:block) */}
-              <div className="hidden md:block bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse min-w-[650px]">
-                    <thead>
-                      <tr className="bg-slate-100 dark:bg-slate-800/80 border-b border-slate-200 dark:border-slate-700 text-[10px] font-black uppercase text-slate-500 dark:text-slate-400 tracking-wider">
-                        <th className="py-3 px-3">CÓDIGO LPN</th>
-                        <th className="py-3 px-3">PRODUCTO / CÓDIGO</th>
-                        <th className="py-3 px-3">UBICACIÓN</th>
-                        <th className="py-3 px-3 text-center">CAJAS / UNID.</th>
-                        <th className="py-3 px-3 text-right">ACCIÓN</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-xs">
-                      {paginatedLpns.map(item => {
-                        const prodInfo = catalogMap.get(item.productCode?.trim().toLowerCase() || '');
-                        const displayLocation = item.location 
-                          ? `Rack ${item.location.rackId} • N${item.location.level}-P${item.location.position}`
-                          : item.locationId 
-                          ? `Ubicación ID: ${item.locationId}` 
-                          : 'Piso / Recepción';
-
-                        return (
-                          <tr key={item.lpn} className="hover:bg-amber-50/50 dark:hover:bg-amber-950/20 transition-colors">
-                            <td className="py-2.5 px-3 font-mono font-black">
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-100 dark:bg-amber-950/80 text-amber-900 dark:text-amber-200 rounded-lg text-xs border border-amber-200 dark:border-amber-800">
-                                <QrCode className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                                {item.lpn}
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3 max-w-[240px]">
-                              <div className="font-black text-slate-900 dark:text-white uppercase truncate text-xs">
-                                {item.productName || 'Producto no especificado'}
-                              </div>
-                              <div className="flex items-center gap-2 text-[10px] font-bold text-slate-400">
-                                {item.productCode && <span className="font-mono">COD: {item.productCode}</span>}
-                                {prodInfo?.marca && <span className="truncate">| {prodInfo.marca}</span>}
-                              </div>
-                            </td>
-                            <td className="py-2.5 px-3">
-                              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-black uppercase border ${
-                                item.location || item.locationId
-                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800'
-                                  : 'bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700'
-                              }`}>
-                                <MapPin className="w-3 h-3 shrink-0" />
-                                {displayLocation}
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3 text-center">
-                              <div className="font-black text-slate-900 dark:text-white text-xs">
-                                {item.cajas || 0} Cj / {item.unidades || item.quantity || 0} Un
-                              </div>
-                            </td>
-                            <td className="py-2.5 px-3 text-right">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setSelectedLpnItem(item);
-                                  setIsConfirmModalOpen(true);
-                                }}
-                                className="px-3.5 py-1.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 active:scale-95 text-white rounded-xl font-black text-[10px] uppercase tracking-wider shadow-sm transition-all inline-flex items-center gap-1 cursor-pointer"
-                              >
-                                <LogOut className="w-3.5 h-3.5" />
-                                <span>DAR SALIDA</span>
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+          {/* 🌟 TARJETA DIDÁCTICA DESTACADA DE BÚSQUEDA (EJEMPLO: AL BUSCAR LAB001) */}
+          {activeTab === 'RAQUEADO' && searchedProductSummary && (
+            <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border-2 border-amber-400 shadow-md animate-in fade-in slide-in-from-top-2 duration-300">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100 dark:border-slate-800">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-orange-500 text-white flex items-center justify-center font-black shadow-sm shrink-0">
+                    <Boxes className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2.5 py-0.5 rounded-lg bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200 font-mono font-black text-xs border border-amber-300 dark:border-amber-700">
+                        {searchedProductSummary.productCode}
+                      </span>
+                      {searchedProductSummary.marca && (
+                        <span className="text-xs text-slate-500 font-bold uppercase">{searchedProductSummary.marca}</span>
+                      )}
+                    </div>
+                    <h2 className="text-sm sm:text-base font-black text-slate-900 dark:text-white uppercase tracking-tight mt-0.5">
+                      {searchedProductSummary.productName}
+                    </h2>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] font-bold text-slate-400">Filtro de búsqueda:</span>
+                  <span className="text-xs font-mono font-black text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950 px-2 py-0.5 rounded-md border border-amber-200 dark:border-amber-800">
+                    "{searchQuery}"
+                  </span>
                 </div>
               </div>
 
-              {/* Mobile Compact List View (md:hidden) */}
-              <div className="md:hidden space-y-2">
-                {paginatedLpns.map(item => {
-                  const prodInfo = catalogMap.get(item.productCode?.trim().toLowerCase() || '');
-                  const displayLocation = item.location 
-                    ? `Rack ${item.location.rackId} • N${item.location.level}-P${item.location.position}`
-                    : item.locationId 
-                    ? `Ubicación ID: ${item.locationId}` 
-                    : 'Piso / Recepción';
+              {/* 4 Métricas Clave Didácticas */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-3">
+                {/* 1. Pallets Rackeados */}
+                <div className="bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-800/60 rounded-xl p-3">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-amber-800 dark:text-amber-300 mb-1">
+                    <span>PALLETS RACKEADOS</span>
+                    <Boxes className="w-4 h-4 text-amber-600" />
+                  </div>
+                  <div className="text-2xl font-black text-amber-900 dark:text-amber-200">
+                    {searchedProductSummary.palletsCount}
+                    <span className="text-xs font-bold text-amber-700 dark:text-amber-400 ml-1">pallets</span>
+                  </div>
+                  <div className="text-[10px] text-amber-700/80 dark:text-amber-400 mt-0.5 font-semibold">
+                    En racks de reserva
+                  </div>
+                </div>
 
-                  return (
-                    <div 
-                      key={item.lpn}
-                      className="bg-white dark:bg-slate-900 rounded-2xl p-3 border border-slate-200/90 dark:border-slate-800 shadow-sm flex flex-col gap-2"
-                    >
-                      {/* Top Row: LPN + Ubicación */}
-                      <div className="flex items-center justify-between gap-1.5">
-                        <span className="px-2.5 py-1 bg-amber-100 dark:bg-amber-950/80 text-amber-900 dark:text-amber-200 rounded-lg font-mono text-xs font-black tracking-wider flex items-center gap-1 border border-amber-200 dark:border-amber-800 shrink-0">
-                          <QrCode className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                          {item.lpn}
-                        </span>
+                {/* 2. Cantidad en Unidades */}
+                <div className="bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200/80 dark:border-emerald-800/60 rounded-xl p-3">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-emerald-800 dark:text-emerald-300 mb-1">
+                    <span>CANT. EN UNIDADES</span>
+                    <TrendingUp className="w-4 h-4 text-emerald-600" />
+                  </div>
+                  <div className="text-2xl font-black text-emerald-900 dark:text-emerald-200">
+                    {searchedProductSummary.totalUnidades.toLocaleString()}
+                    <span className="text-xs font-bold text-emerald-700 dark:text-emerald-400 ml-1">unid.</span>
+                  </div>
+                  <div className="text-[10px] text-emerald-700/80 dark:text-emerald-400 mt-0.5 font-semibold">
+                    {searchedProductSummary.totalCajas.toLocaleString()} cajas en total
+                  </div>
+                </div>
 
-                        <span className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase border flex items-center gap-1 truncate max-w-[160px] ${
-                          item.location || item.locationId
-                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800'
-                            : 'bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700'
-                        }`}>
-                          <MapPin className="w-3 h-3 shrink-0" />
-                          <span className="truncate">{displayLocation}</span>
-                        </span>
-                      </div>
+                {/* 3. Vencimiento */}
+                <div className="bg-sky-50/70 dark:bg-sky-950/30 border border-sky-200/80 dark:border-sky-800/60 rounded-xl p-3">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-sky-800 dark:text-sky-300 mb-1">
+                    <span>PRÓX. VENCIMIENTO</span>
+                    <CalendarClock className="w-4 h-4 text-sky-600" />
+                  </div>
+                  <div className="text-sm sm:text-base font-black text-sky-900 dark:text-sky-200">
+                    {formatPeruDate(searchedProductSummary.nearestExpiration)}
+                  </div>
+                  <div className="mt-1">
+                    <span className={`inline-block px-2 py-0.5 rounded text-[10px] uppercase font-black border ${getExpirationStatus(searchedProductSummary.nearestExpiration).color}`}>
+                      {getExpirationStatus(searchedProductSummary.nearestExpiration).text}
+                    </span>
+                  </div>
+                </div>
 
-                      {/* Middle Row: Product Name & Code */}
-                      <div>
-                        <h4 className="font-black text-xs text-slate-900 dark:text-white uppercase leading-snug line-clamp-2">
-                          {item.productName || 'Producto no especificado'}
-                        </h4>
-                        <div className="flex items-center gap-2 text-[10px] font-bold text-slate-400 mt-0.5">
-                          {item.productCode && <span className="font-mono">COD: {item.productCode}</span>}
-                          {prodInfo?.marca && <span className="truncate">| {prodInfo.marca}</span>}
-                        </div>
-                      </div>
-
-                      {/* Bottom Row: Quantities & Action Button */}
-                      <div className="flex items-center justify-between pt-1.5 border-t border-slate-100 dark:border-slate-800/80 mt-0.5">
-                        <div className="text-[11px] font-black text-slate-700 dark:text-slate-300">
-                          <span className="text-amber-600 dark:text-amber-400 font-bold">{item.cajas || 0}</span> Cj / <span className="text-amber-600 dark:text-amber-400 font-bold">{item.unidades || item.quantity || 0}</span> Un
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedLpnItem(item);
-                            setIsConfirmModalOpen(true);
-                          }}
-                          className="px-3.5 py-1.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 active:scale-95 text-white rounded-xl font-black text-[10px] uppercase tracking-wider shadow-sm transition-all inline-flex items-center gap-1 cursor-pointer"
-                        >
-                          <LogOut className="w-3.5 h-3.5" />
-                          <span>DAR SALIDA</span>
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
+                {/* 4. Fecha de Ingreso */}
+                <div className="bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200/80 dark:border-indigo-800/60 rounded-xl p-3">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-indigo-800 dark:text-indigo-300 mb-1">
+                    <span>FECHA DE INGRESO</span>
+                    <Calendar className="w-4 h-4 text-indigo-600" />
+                  </div>
+                  <div className="text-sm font-black text-indigo-900 dark:text-indigo-200">
+                    {formatPeruDate(searchedProductSummary.earliestReception)}
+                  </div>
+                  <div className="text-[10px] text-indigo-700/80 dark:text-indigo-400 mt-0.5 font-mono">
+                    {formatPeruDateTime(searchedProductSummary.earliestReception)}
+                  </div>
+                </div>
               </div>
 
-              {/* Pagination Controls Bottom */}
-              {renderPaginationControls()}
+              {/* Racks Ocupados */}
+              {searchedProductSummary.uniqueLocations.length > 0 && (
+                <div className="mt-3 pt-2.5 border-t border-slate-100 dark:border-slate-800 flex items-center gap-1.5 flex-wrap">
+                  <span className="text-[11px] font-bold text-slate-500 flex items-center gap-1">
+                    <MapPin className="w-3.5 h-3.5 text-emerald-600" />
+                    Ubicaciones en Rack:
+                  </span>
+                  {searchedProductSummary.uniqueLocations.map(loc => (
+                    <span key={loc} className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded text-[10px] font-bold font-mono">
+                      {loc}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Selector de modo didáctico para items rackeados */}
+          {activeTab === 'RAQUEADO' && (
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 bg-white dark:bg-slate-900 p-2.5 rounded-xl border border-slate-200/80 dark:border-slate-800">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-black uppercase text-slate-600 dark:text-slate-300">
+                  Vista:
+                </span>
+                <div className="inline-flex p-0.5 bg-slate-100 dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700">
+                  <button
+                    type="button"
+                    onClick={() => setRackedViewMode('PRODUCT_SUMMARY')}
+                    className={`px-3 py-1.5 rounded-md text-xs font-black uppercase transition-all flex items-center gap-1.5 cursor-pointer ${
+                      rackedViewMode === 'PRODUCT_SUMMARY'
+                        ? 'bg-amber-600 text-white shadow-sm'
+                        : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                  >
+                    <LayoutGrid className="w-3.5 h-3.5" />
+                    <span>Por Producto ({filteredRackedGroups.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRackedViewMode('PALLET_DETAIL')}
+                    className={`px-3 py-1.5 rounded-md text-xs font-black uppercase transition-all flex items-center gap-1.5 cursor-pointer ${
+                      rackedViewMode === 'PALLET_DETAIL'
+                        ? 'bg-amber-600 text-white shadow-sm'
+                        : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                  >
+                    <List className="w-3.5 h-3.5" />
+                    <span>Detalle por Pallet ({filteredLpns.length})</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="text-[11px] font-bold text-slate-500">
+                Total: <span className="text-amber-600 dark:text-amber-400 font-black">{allRackedLpns.length}</span> pallets rackeados en línea
+              </div>
+            </div>
+          )}
+
+          {/* VISTA 1: RESUMEN POR PRODUCTO (DIDÁCTICO) */}
+          {activeTab === 'RAQUEADO' && rackedViewMode === 'PRODUCT_SUMMARY' ? (
+            <div>
+              {filteredRackedGroups.length === 0 ? (
+                <div className="bg-white dark:bg-slate-900 rounded-3xl p-8 text-center border border-slate-200 dark:border-slate-800 shadow-sm">
+                  <Package className="w-12 h-12 text-slate-300 dark:text-slate-700 mx-auto mb-3" />
+                  <h3 className="text-base font-black text-slate-700 dark:text-slate-200 uppercase">
+                    No se encontraron productos rackeados
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+                    {searchQuery ? `No hay productos rackeados para "${searchQuery}".` : 'No hay productos ubicados en rack.'}
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {filteredRackedGroups.map(group => {
+                    const isExpanded = expandedProducts[group.productCode] || (searchQuery.trim().length > 0 && filteredRackedGroups.length <= 3);
+                    const expStatus = getExpirationStatus(group.nearestExpiration);
+
+                    return (
+                      <div
+                        key={group.productCode}
+                        className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/90 dark:border-slate-800 shadow-sm hover:shadow-md transition-shadow flex flex-col justify-between gap-3"
+                      >
+                        {/* Header card */}
+                        <div>
+                          <div className="flex items-center justify-between gap-1.5 mb-1.5">
+                            <span className="px-2.5 py-0.5 rounded-lg bg-amber-100 dark:bg-amber-950/80 text-amber-900 dark:text-amber-200 font-mono font-black text-xs border border-amber-200 dark:border-amber-800">
+                              {group.productCode}
+                            </span>
+                            {group.marca && (
+                              <span className="text-[10px] font-bold text-slate-400 uppercase truncate max-w-[120px]">
+                                {group.marca}
+                              </span>
+                            )}
+                          </div>
+                          <h3 className="font-black text-xs sm:text-sm text-slate-900 dark:text-white uppercase leading-snug line-clamp-2">
+                            {group.productName}
+                          </h3>
+                        </div>
+
+                        {/* 4 Stats Grid */}
+                        <div className="grid grid-cols-2 gap-2 bg-slate-50 dark:bg-slate-800/60 p-2.5 rounded-xl border border-slate-100 dark:border-slate-700/60">
+                          <div>
+                            <span className="text-[10px] font-bold text-slate-400 uppercase block">Pallets Rack</span>
+                            <span className="text-base font-black text-amber-600 dark:text-amber-400">
+                              {group.palletsCount} <span className="text-[10px] font-bold text-slate-500">plts</span>
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] font-bold text-slate-400 uppercase block">Unidades</span>
+                            <span className="text-base font-black text-emerald-600 dark:text-emerald-400">
+                              {group.totalUnidades.toLocaleString()} <span className="text-[10px] font-bold text-slate-500">un</span>
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] font-bold text-slate-400 uppercase block">Cajas</span>
+                            <span className="text-xs font-black text-slate-700 dark:text-slate-300">
+                              {group.totalCajas.toLocaleString()} cjs
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] font-bold text-slate-400 uppercase block">Próx. Vence</span>
+                            <span className="text-xs font-black text-slate-700 dark:text-slate-300">
+                              {formatPeruDate(group.nearestExpiration)}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Dates & Expiration tags */}
+                        <div className="flex items-center justify-between text-[10px] pt-1 border-t border-slate-100 dark:border-slate-800">
+                          <span className="text-slate-500">
+                            Ingreso: <strong className="text-slate-700 dark:text-slate-300">{formatPeruDate(group.earliestReception)}</strong>
+                          </span>
+                          <span className={`px-2 py-0.5 rounded text-[9px] uppercase font-black border ${expStatus.color}`}>
+                            {expStatus.text}
+                          </span>
+                        </div>
+
+                        {/* Expand Pallets button */}
+                        <button
+                          type="button"
+                          onClick={() => toggleProductExpand(group.productCode)}
+                          className="w-full py-2 px-3 rounded-xl bg-slate-100 hover:bg-amber-50 dark:bg-slate-800 dark:hover:bg-amber-950/40 text-slate-700 hover:text-amber-800 dark:text-slate-200 dark:hover:text-amber-300 font-black text-[11px] uppercase transition-colors flex items-center justify-center gap-1.5 cursor-pointer border border-slate-200/80 dark:border-slate-700"
+                        >
+                          <Boxes className="w-3.5 h-3.5" />
+                          <span>{isExpanded ? 'Ocultar Pallets' : `Ver ${group.palletsCount} Pallets Rackeados`}</span>
+                          {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                        </button>
+
+                        {/* Expanded Pallet List */}
+                        {isExpanded && (
+                          <div className="space-y-2 pt-2 border-t border-slate-200 dark:border-slate-800 animate-in fade-in duration-200">
+                            {group.items.map(it => {
+                              const displayLocation = it.location 
+                                ? `Rack ${it.location.rackId} • N${it.location.level}-P${it.location.position}`
+                                : it.locationId 
+                                ? `Ubicación ID: ${it.locationId}` 
+                                : 'Piso / Recepción';
+
+                              return (
+                                <div
+                                  key={it.lpn}
+                                  className="p-2.5 bg-slate-50 dark:bg-slate-800/80 rounded-xl border border-slate-200/70 dark:border-slate-700 flex flex-col gap-1.5 text-xs"
+                                >
+                                  <div className="flex items-center justify-between gap-1">
+                                    <span className="font-mono font-black text-amber-800 dark:text-amber-300 text-[11px]">
+                                      {it.lpn}
+                                    </span>
+                                    <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 text-[10px] font-bold border border-emerald-200 dark:border-emerald-800 flex items-center gap-1">
+                                      <MapPin className="w-3 h-3 shrink-0" />
+                                      {displayLocation}
+                                    </span>
+                                  </div>
+
+                                  <div className="grid grid-cols-2 gap-1 text-[11px] text-slate-600 dark:text-slate-300 font-bold">
+                                    <span>{it.cajas || 0} Cj / {it.unidades || it.quantity || 0} Un</span>
+                                    <span className="text-right">Vence: {formatPeruDate(it.expirationDate)}</span>
+                                  </div>
+
+                                  <div className="flex items-center justify-between pt-1 border-t border-slate-200/60 dark:border-slate-700/60">
+                                    <span className="text-[10px] text-slate-400">
+                                      Ingreso: {formatPeruDateTime(it.receptionDate || it.fecha_generado)}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedLpnItem(it);
+                                        setIsConfirmModalOpen(true);
+                                      }}
+                                      className="px-2.5 py-1 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 active:scale-95 text-white rounded-lg font-black text-[10px] uppercase shadow-2xs inline-flex items-center gap-1 cursor-pointer"
+                                    >
+                                      <LogOut className="w-3 h-3" />
+                                      <span>Dar Salida</span>
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : (
+            /* VISTA 2: DETALLE POR PALLET (TABLA / TARJETAS COMPLETAS) */
+            <>
+              {filteredLpns.length === 0 ? (
+                <div className="bg-white dark:bg-slate-900 rounded-3xl p-8 text-center border border-slate-200 dark:border-slate-800 shadow-sm">
+                  <Package className="w-12 h-12 text-slate-300 dark:text-slate-700 mx-auto mb-3" />
+                  <h3 className="text-base font-black text-slate-700 dark:text-slate-200 uppercase">
+                    No se encontraron LPNs
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+                    {searchQuery ? `No hay resultados para "${searchQuery}". Verifique el código ingresado.` : 'No hay paletas de reserva registradas en esta categoría.'}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {/* Pagination Controls Top */}
+                  {renderPaginationControls()}
+
+                  {/* Desktop Table View (md:block) con columnas completas */}
+                  <div className="hidden md:block bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse min-w-[850px]">
+                        <thead>
+                          <tr className="bg-slate-100 dark:bg-slate-800/80 border-b border-slate-200 dark:border-slate-700 text-[10px] font-black uppercase text-slate-500 dark:text-slate-400 tracking-wider">
+                            <th className="py-3 px-3">CÓDIGO LPN</th>
+                            <th className="py-3 px-3">PRODUCTO / CÓDIGO</th>
+                            <th className="py-3 px-3">UBICACIÓN EN RACK</th>
+                            <th className="py-3 px-3 text-center">CAJAS</th>
+                            <th className="py-3 px-3 text-center">UNIDADES</th>
+                            <th className="py-3 px-3">FECHA INGRESO</th>
+                            <th className="py-3 px-3">VENCIMIENTO</th>
+                            <th className="py-3 px-3 text-right">ACCIÓN</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-xs">
+                          {paginatedLpns.map(item => {
+                            const prodInfo = catalogMap.get(item.productCode?.trim().toLowerCase() || '');
+                            const displayLocation = item.location 
+                              ? `Rack ${item.location.rackId} • N${item.location.level}-P${item.location.position}`
+                              : item.locationId 
+                              ? `Ubicación ID: ${item.locationId}` 
+                              : 'Piso / Recepción';
+                            const expStatus = getExpirationStatus(item.expirationDate);
+
+                            return (
+                              <tr key={item.lpn} className="hover:bg-amber-50/50 dark:hover:bg-amber-950/20 transition-colors">
+                                <td className="py-2.5 px-3 font-mono font-black">
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-100 dark:bg-amber-950/80 text-amber-900 dark:text-amber-200 rounded-lg text-xs border border-amber-200 dark:border-amber-800">
+                                    <QrCode className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                    {item.lpn}
+                                  </span>
+                                </td>
+                                <td className="py-2.5 px-3 max-w-[220px]">
+                                  <div className="font-black text-slate-900 dark:text-white uppercase truncate text-xs">
+                                    {item.productName || 'Producto no especificado'}
+                                  </div>
+                                  <div className="flex items-center gap-2 text-[10px] font-bold text-slate-400">
+                                    {item.productCode && <span className="font-mono">COD: {item.productCode}</span>}
+                                    {prodInfo?.marca && <span className="truncate">| {prodInfo.marca}</span>}
+                                  </div>
+                                </td>
+                                <td className="py-2.5 px-3">
+                                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-black uppercase border ${
+                                    item.location || item.locationId
+                                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800'
+                                      : 'bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700'
+                                  }`}>
+                                    <MapPin className="w-3 h-3 shrink-0" />
+                                    {displayLocation}
+                                  </span>
+                                </td>
+                                <td className="py-2.5 px-3 text-center font-bold text-slate-700 dark:text-slate-300">
+                                  {item.cajas || 0} Cj
+                                </td>
+                                <td className="py-2.5 px-3 text-center font-black text-emerald-600 dark:text-emerald-400">
+                                  {item.unidades || item.quantity || 0} Un
+                                </td>
+                                <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600 dark:text-slate-300">
+                                  {formatPeruDateTime(item.receptionDate || item.fecha_generado)}
+                                </td>
+                                <td className="py-2.5 px-3">
+                                  <div className="flex flex-col gap-0.5">
+                                    <span className="font-mono text-[11px] font-bold text-slate-800 dark:text-slate-200">
+                                      {formatPeruDate(item.expirationDate)}
+                                    </span>
+                                    <span className={`inline-block px-1.5 py-0.2 text-[9px] uppercase font-black rounded border w-fit ${expStatus.color}`}>
+                                      {expStatus.text}
+                                    </span>
+                                  </div>
+                                </td>
+                                <td className="py-2.5 px-3 text-right">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedLpnItem(item);
+                                      setIsConfirmModalOpen(true);
+                                    }}
+                                    className="px-3.5 py-1.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 active:scale-95 text-white rounded-xl font-black text-[10px] uppercase tracking-wider shadow-sm transition-all inline-flex items-center gap-1 cursor-pointer"
+                                  >
+                                    <LogOut className="w-3.5 h-3.5" />
+                                    <span>DAR SALIDA</span>
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Mobile Compact List View (md:hidden) */}
+                  <div className="md:hidden space-y-2">
+                    {paginatedLpns.map(item => {
+                      const prodInfo = catalogMap.get(item.productCode?.trim().toLowerCase() || '');
+                      const displayLocation = item.location 
+                        ? `Rack ${item.location.rackId} • N${item.location.level}-P${item.location.position}`
+                        : item.locationId 
+                        ? `Ubicación ID: ${item.locationId}` 
+                        : 'Piso / Recepción';
+                      const expStatus = getExpirationStatus(item.expirationDate);
+
+                      return (
+                        <div 
+                          key={item.lpn}
+                          className="bg-white dark:bg-slate-900 rounded-2xl p-3.5 border border-slate-200/90 dark:border-slate-800 shadow-sm flex flex-col gap-2"
+                        >
+                          {/* Top Row: LPN + Ubicación */}
+                          <div className="flex items-center justify-between gap-1.5">
+                            <span className="px-2.5 py-1 bg-amber-100 dark:bg-amber-950/80 text-amber-900 dark:text-amber-200 rounded-lg font-mono text-xs font-black tracking-wider flex items-center gap-1 border border-amber-200 dark:border-amber-800 shrink-0">
+                              <QrCode className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                              {item.lpn}
+                            </span>
+
+                            <span className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase border flex items-center gap-1 truncate max-w-[160px] ${
+                              item.location || item.locationId
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800'
+                                : 'bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700'
+                            }`}>
+                              <MapPin className="w-3 h-3 shrink-0" />
+                              <span className="truncate">{displayLocation}</span>
+                            </span>
+                          </div>
+
+                          {/* Middle Row: Product Name & Code */}
+                          <div>
+                            <h4 className="font-black text-xs text-slate-900 dark:text-white uppercase leading-snug line-clamp-2">
+                              {item.productName || 'Producto no especificado'}
+                            </h4>
+                            <div className="flex items-center gap-2 text-[10px] font-bold text-slate-400 mt-0.5">
+                              {item.productCode && <span className="font-mono">COD: {item.productCode}</span>}
+                              {prodInfo?.marca && <span className="truncate">| {prodInfo.marca}</span>}
+                            </div>
+                          </div>
+
+                          {/* Quantities & Expiry Badge */}
+                          <div className="grid grid-cols-2 gap-2 bg-slate-50 dark:bg-slate-800/50 p-2 rounded-xl border border-slate-100 dark:border-slate-800 text-[11px]">
+                            <div>
+                              <span className="text-[10px] text-slate-400 block font-bold">CANTIDAD</span>
+                              <span className="font-black text-slate-800 dark:text-slate-200">
+                                {item.cajas || 0} Cj / <span className="text-emerald-600">{item.unidades || item.quantity || 0} Un</span>
+                              </span>
+                            </div>
+                            <div className="text-right">
+                              <span className="text-[10px] text-slate-400 block font-bold">VENCIMIENTO</span>
+                              <span className={`inline-block px-1.5 py-0.2 rounded text-[9px] uppercase font-black border ${expStatus.color}`}>
+                                {formatPeruDate(item.expirationDate)}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Bottom Row: Reception Date & Action Button */}
+                          <div className="flex items-center justify-between pt-1 border-t border-slate-100 dark:border-slate-800/80 mt-0.5">
+                            <span className="text-[10px] text-slate-400 font-mono">
+                              Ingreso: {formatPeruDate(item.receptionDate || item.fecha_generado)}
+                            </span>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedLpnItem(item);
+                                setIsConfirmModalOpen(true);
+                              }}
+                              className="px-3.5 py-1.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 active:scale-95 text-white rounded-xl font-black text-[10px] uppercase tracking-wider shadow-sm transition-all inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <LogOut className="w-3.5 h-3.5" />
+                              <span>DAR SALIDA</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Pagination Controls Bottom */}
+                  {renderPaginationControls()}
+                </>
+              )}
             </>
           )}
         </div>
