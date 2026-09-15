@@ -10,7 +10,7 @@ import {
   CheckCircle2,
   AlertTriangle,
   RefreshCw,
-  FileSpreadsheet,
+  Warehouse,
   Building2,
   Package,
   MapPin,
@@ -27,7 +27,6 @@ import {
   Trash2,
   Plus
 } from 'lucide-react';
-import * as XLSX from 'xlsx';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { InventoryItem, Product, Usuario, Rack, RackLocation, Zone, ZoneType } from '../types';
 import { supabase } from '../supabaseClient';
@@ -143,6 +142,7 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
 
   // ❄️ CÁMARA FILTER STATE ('TODOS' | 'SECO' | 'REFRIGERADO' | 'CONGELADO')
   const [selectedChamber, setSelectedChamber] = useState<'TODOS' | 'SECO' | 'REFRIGERADO' | 'CONGELADO'>('TODOS');
+  const [isChamberModalOpen, setIsChamberModalOpen] = useState(false);
 
   // ⚡ ASÍNCRONO OPTIMISTA: Almacena cambios en caliente (0 ms) antes de que la BD termine
   const [optimisticOverrides, setOptimisticOverrides] = useState<Map<string, Partial<InventoryItem>>>(new Map());
@@ -255,7 +255,7 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
     }
 
     // 2. Look up product in catalog
-    const pCode = item.productCode?.trim().toUpperCase() || (item as any).producto_id?.trim().toUpperCase() || item.sku?.trim().toUpperCase();
+    const pCode = item.productCode?.trim().toUpperCase() || (item as any).producto_id?.trim().toUpperCase() || (item as any).sku?.trim().toUpperCase();
     const prod = pCode ? catalogMap.get(pCode) : null;
     if (prod) {
       if (prod.es_congelado) return 'CONGELADO';
@@ -340,8 +340,29 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
     };
   }, [effectiveInventory]);
 
-  // Real-time counts by chamber for the active list (Pendientes / En Rack / Picking)
-  const chamberCounts = useMemo(() => {
+  // Real-time counts by chamber specifically for PENDIENTES
+  const pendingChamberCounts = useMemo(() => {
+    let seco = 0;
+    let refrigerado = 0;
+    let congelado = 0;
+
+    for (const item of pendientesList) {
+      const ch = getItemChamber(item);
+      if (ch === 'SECO') seco++;
+      else if (ch === 'REFRIGERADO') refrigerado++;
+      else if (ch === 'CONGELADO') congelado++;
+    }
+
+    return {
+      total: pendientesList.length,
+      seco,
+      refrigerado,
+      congelado
+    };
+  }, [pendientesList, catalogMap]);
+
+  // Real-time counts by chamber for the currently active tab (Pendientes / En Rack / Picking)
+  const currentTabChamberCounts = useMemo(() => {
     let baseList = pendientesList;
     if (activeTab === 'RACKS') baseList = reservasInRackList;
     else if (activeTab === 'PICKING') baseList = pickingList;
@@ -364,22 +385,6 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
       congelado
     };
   }, [activeTab, pendientesList, reservasInRackList, pickingList, catalogMap]);
-
-  // Lists filtered by chamber
-  const filteredPendientesList = useMemo(() => {
-    if (selectedChamber === 'TODOS') return pendientesList;
-    return pendientesList.filter(item => getItemChamber(item) === selectedChamber);
-  }, [pendientesList, selectedChamber, catalogMap]);
-
-  const filteredReservasList = useMemo(() => {
-    if (selectedChamber === 'TODOS') return reservasInRackList;
-    return reservasInRackList.filter(item => getItemChamber(item) === selectedChamber);
-  }, [reservasInRackList, selectedChamber, catalogMap]);
-
-  const filteredPickingList = useMemo(() => {
-    if (selectedChamber === 'TODOS') return pickingList;
-    return pickingList.filter(item => getItemChamber(item) === selectedChamber);
-  }, [pickingList, selectedChamber, catalogMap]);
 
   // Find LPN by scanned string, full code or 4-5 trailing digits
   const findLpnCandidate = (rawCode: string): InventoryItem | null => {
@@ -466,9 +471,8 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
     }
   };
 
-  // 🚀 ACTION 1: BAJAR A PICKING (INDIVIDUAL)
-  const handleBajarAPicking = async (item: InventoryItem, reason: string = 'Bajada a Picking') => {
-    setIsProcessing(true);
+  // 🚀 ACTION 1: BAJAR A PICKING (INDIVIDUAL) - 100% ASÍNCRONO OPTIMISTA (0 ms)
+  const handleBajarAPicking = (item: InventoryItem, reason: string = 'Bajada a Picking') => {
     const lpnCode = item.lpn;
     const currentState = getLpnState(item);
     const oldLocationId = item.locationId || item.location?.id;
@@ -476,77 +480,99 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
     const operatorName = currentUser?.nombre || currentUser?.username || 'OPERADOR';
     const nowIso = new Date().toISOString();
 
-    try {
-      if (oldLocationId) {
-        await supabase
-          .from('ubicaciones')
-          .update({ estado: 'VACIO' })
-          .eq('id', oldLocationId);
+    // ⚡ 1. ACTUALIZACIÓN INMEDIATA OPTIMISTA (0 ms)
+    setOptimisticOverrides(prev => {
+      const next = new Map(prev);
+      next.set(lpnCode, {
+        estado_lpn: 'GENERADO',
+        tipo: 'PICKING',
+        location: undefined,
+        locationId: undefined,
+        motivo_ultima_ubicacion: reason,
+        usuario_ultima_ubicacion: operatorName,
+        fecha_ultima_ubicacion: nowIso
+      });
+      return next;
+    });
+
+    const isDirectFromPendiente = currentState === 'PENDIENTE';
+    const newMove: MovementLog = {
+      lpn: lpnCode,
+      tipo: isDirectFromPendiente ? 'DIRECTO_PICKING' : 'BAJADA_PICKING',
+      origen: oldLocation ? `RACK ${oldLocation.aisle}-R${oldLocation.rackId}-N${oldLocation.level}-P${oldLocation.position}` : 'Playa Recepción',
+      destino: 'Zona Picking',
+      usuario: operatorName,
+      fecha: nowIso,
+      timestamp: Date.now(),
+      productName: item.productName,
+      productCode: item.productCode,
+      quantity: item.quantity,
+      cajas: item.cajas,
+      unidades: item.unidades,
+      previousState: currentState,
+      previousLocationId: oldLocationId || null,
+      previousLocation: oldLocation || null
+    };
+
+    setRecentMoves(prev => [newMove, ...prev.filter(m => !(m.lpn === lpnCode && Date.now() - m.timestamp < 1000))]);
+    setBatchQueue(prev => prev.filter(b => b.lpn !== lpnCode));
+    setSelectedBatchLpns(prev => prev.filter(l => l !== lpnCode));
+    setSelectedLpn(prev => prev && prev.lpn === lpnCode ? { ...prev, estado_lpn: 'GENERADO', tipo: 'PICKING', motivo_ultima_ubicacion: reason, location: null, locationId: undefined } : null);
+
+    showToast(`⚡ LPN ${lpnCode} pasado a PICKING`, "success");
+
+    // 🌐 2. PERSISTENCIA EN SEGUNDO PLANO (BACKGROUND ASYNC)
+    void (async () => {
+      try {
+        if (oldLocationId) {
+          await supabase
+            .from('ubicaciones')
+            .update({ estado: 'VACIO' })
+            .eq('id', oldLocationId);
+        }
+
+        const { error: lpnErr } = await supabase
+          .from('paletas_lpn')
+          .update({
+            estado: 'ACTIVO',
+            estado_lpn: 'GENERADO',
+            tipo: 'PICKING',
+            ubicacion_id: null,
+            usuario_ultima_ubicacion: operatorName,
+            fecha_ultima_ubicacion: nowIso,
+            motivo_ultima_ubicacion: reason
+          })
+          .eq('lpn', lpnCode);
+
+        if (lpnErr) throw lpnErr;
+
+        await supabase.from('lpn_movimientos').insert([{
+          lpn: lpnCode,
+          ubicacion_id: oldLocationId || null,
+          tipo_movimiento: isDirectFromPendiente ? 'DIRECTO_PICKING' : 'BAJADA_PICKING',
+          usuario: operatorName,
+          motivo: reason,
+          cantidad_afectada: item.quantity || item.unidades || item.cajas || 1,
+          fecha: nowIso,
+          sede_id: currentUser?.sede_id
+        }]);
+
+        await onRefresh();
+      } catch (err: any) {
+        console.error("Error asíncrono bajando LPN a picking:", err);
+        // Revertir optimismo en caso de error
+        setOptimisticOverrides(prev => {
+          const next = new Map(prev);
+          next.delete(lpnCode);
+          return next;
+        });
+        showToast(`Error al sincronizar con BD: ${err?.message || 'Fallo de conexión'}`, "error");
       }
-
-      const { error: lpnErr } = await supabase
-        .from('paletas_lpn')
-        .update({
-          estado: 'ACTIVO',
-          estado_lpn: 'GENERADO',
-          tipo: 'PICKING',
-          ubicacion_id: null,
-          usuario_ultima_ubicacion: operatorName,
-          fecha_ultima_ubicacion: nowIso,
-          motivo_ultima_ubicacion: reason
-        })
-        .eq('lpn', lpnCode);
-
-      if (lpnErr) throw lpnErr;
-
-      const isDirectFromPendiente = currentState === 'PENDIENTE';
-      await supabase.from('lpn_movimientos').insert([{
-        lpn: lpnCode,
-        ubicacion_id: oldLocationId || null,
-        tipo_movimiento: isDirectFromPendiente ? 'DIRECTO_PICKING' : 'BAJADA_PICKING',
-        usuario: operatorName,
-        motivo: reason,
-        cantidad_afectada: item.quantity || item.unidades || item.cajas || 1,
-        fecha: nowIso,
-        sede_id: currentUser?.sede_id
-      }]);
-
-      const newMove: MovementLog = {
-        lpn: lpnCode,
-        tipo: isDirectFromPendiente ? 'DIRECTO_PICKING' : 'BAJADA_PICKING',
-        origen: oldLocation ? `RACK ${oldLocation.aisle}-R${oldLocation.rackId}-N${oldLocation.level}-P${oldLocation.position}` : 'Playa Recepción',
-        destino: 'Zona Picking',
-        usuario: operatorName,
-        fecha: nowIso,
-        timestamp: Date.now(),
-        productName: item.productName,
-        productCode: item.productCode,
-        quantity: item.quantity,
-        cajas: item.cajas,
-        unidades: item.unidades,
-        previousState: currentState,
-        previousLocationId: oldLocationId || null,
-        previousLocation: oldLocation || null
-      };
-
-      setRecentMoves(prev => [newMove, ...prev.filter(m => !(m.lpn === lpnCode && Date.now() - m.timestamp < 1000))]);
-      // Remove from batch if present
-      setBatchQueue(prev => prev.filter(b => b.lpn !== lpnCode));
-      setSelectedBatchLpns(prev => prev.filter(l => l !== lpnCode));
-
-      await onRefresh();
-      setSelectedLpn(prev => prev && prev.lpn === lpnCode ? { ...prev, estado_lpn: 'GENERADO', tipo: 'PICKING', motivo_ultima_ubicacion: reason, location: null, locationId: undefined } : null);
-      showToast(`LPN ${lpnCode} pasado a PICKING`, "success");
-    } catch (err: any) {
-      console.error("Error bajando LPN a picking:", err);
-      showToast(`Error: ${err?.message || 'Fallo de conexión'}`, "error");
-    } finally {
-      setIsProcessing(false);
-    }
+    })();
   };
 
-  // 🚀 ACTION 2: RACKEAR / ASIGNAR EN ALTURA (INDIVIDUAL)
-  const handleConfirmRackAssignment = async () => {
+  // 🚀 ACTION 2: RACKEAR / ASIGNAR EN ALTURA (INDIVIDUAL) - 100% ASÍNCRONO OPTIMISTA (0 ms)
+  const handleConfirmRackAssignment = () => {
     if (!selectedLpn) return;
     if (!selectedRackId || !selectedLevel || !selectedPosition) {
       if (manualLocationText.trim()) {
@@ -570,7 +596,6 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
       position: selectedPosition
     };
 
-    setIsProcessing(true);
     const lpnCode = selectedLpn.lpn;
     const currentState = getLpnState(selectedLpn);
     const oldLocation = selectedLpn.location;
@@ -578,217 +603,255 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
     const operatorName = currentUser?.nombre || currentUser?.username || 'OPERADOR';
     const nowIso = new Date().toISOString();
 
-    try {
-      onAssignLocation(lpnCode, targetLocation, currentState === 'PENDIENTE' ? 'Rackeo inicial' : 'Reubicación');
+    // ⚡ 1. ACTUALIZACIÓN INMEDIATA OPTIMISTA (0 ms)
+    onAssignLocation(lpnCode, targetLocation, currentState === 'PENDIENTE' ? 'Rackeo inicial' : 'Reubicación');
 
-      await supabase
-        .from('paletas_lpn')
-        .update({
-          estado: 'ACTIVO',
-          estado_lpn: 'GENERADO',
-          tipo: 'RECEPCION',
-          usuario_ultima_ubicacion: operatorName,
-          fecha_ultima_ubicacion: nowIso
-        })
-        .eq('lpn', lpnCode);
+    setOptimisticOverrides(prev => {
+      const next = new Map(prev);
+      next.set(lpnCode, {
+        estado_lpn: 'GENERADO',
+        tipo: 'RECEPCION',
+        location: targetLocation,
+        locationId: undefined,
+        motivo_ultima_ubicacion: currentState === 'PENDIENTE' ? 'Rackeo inicial' : 'Reubicación',
+        usuario_ultima_ubicacion: operatorName,
+        fecha_ultima_ubicacion: nowIso
+      });
+      return next;
+    });
 
-      const newMove: MovementLog = {
-        lpn: lpnCode,
-        tipo: currentState === 'PENDIENTE' ? 'UBICACION' : 'REUBICACION',
-        origen: oldLocation ? `RACK ${oldLocation.aisle}-R${oldLocation.rackId}-N${oldLocation.level}-P${oldLocation.position}` : (currentState === 'PICKING' ? 'Zona Picking' : 'Playa Recepción'),
-        destino: `RACK ${targetLocation.aisle}-R${targetLocation.rackId}-N${targetLocation.level}-P${targetLocation.position}`,
-        usuario: operatorName,
-        fecha: nowIso,
-        timestamp: Date.now(),
-        productName: selectedLpn.productName,
-        productCode: selectedLpn.productCode,
-        quantity: selectedLpn.quantity,
-        cajas: selectedLpn.cajas,
-        unidades: selectedLpn.unidades,
-        previousState: currentState,
-        previousLocationId: oldLocationId || null,
-        previousLocation: oldLocation || null
-      };
+    const newMove: MovementLog = {
+      lpn: lpnCode,
+      tipo: currentState === 'PENDIENTE' ? 'UBICACION' : 'REUBICACION',
+      origen: oldLocation ? `RACK ${oldLocation.aisle}-R${oldLocation.rackId}-N${oldLocation.level}-P${oldLocation.position}` : (currentState === 'PICKING' ? 'Zona Picking' : 'Playa Recepción'),
+      destino: `RACK ${targetLocation.aisle}-R${targetLocation.rackId}-N${targetLocation.level}-P${targetLocation.position}`,
+      usuario: operatorName,
+      fecha: nowIso,
+      timestamp: Date.now(),
+      productName: selectedLpn.productName,
+      productCode: selectedLpn.productCode,
+      quantity: selectedLpn.quantity,
+      cajas: selectedLpn.cajas,
+      unidades: selectedLpn.unidades,
+      previousState: currentState,
+      previousLocationId: oldLocationId || null,
+      previousLocation: oldLocation || null
+    };
 
-      setRecentMoves(prev => [newMove, ...prev]);
+    setRecentMoves(prev => [newMove, ...prev]);
 
-      setIsRackModalOpen(false);
-      setSelectedRackId(null);
-      setSelectedLevel(null);
-      setSelectedPosition(null);
-      setManualLocationText('');
+    // Cerrar modal y limpiar campos de inmediato sin congelar la app
+    setIsRackModalOpen(false);
+    setSelectedRackId(null);
+    setSelectedLevel(null);
+    setSelectedPosition(null);
+    setManualLocationText('');
+    setShowDetailedLocation(false);
 
-      // Remove from batch if present
-      setBatchQueue(prev => prev.filter(b => b.lpn !== lpnCode));
-      setSelectedBatchLpns(prev => prev.filter(l => l !== lpnCode));
+    setBatchQueue(prev => prev.filter(b => b.lpn !== lpnCode));
+    setSelectedBatchLpns(prev => prev.filter(l => l !== lpnCode));
+    setSelectedLpn(null);
 
-      await onRefresh();
-      setSelectedLpn(null);
-      showToast(`LPN ${lpnCode} ubicado en ${targetLocation.aisle}-R${targetLocation.rackId}-N${targetLocation.level}-P${targetLocation.position}`, "success");
-    } catch (err: any) {
-      console.error("Error al almacenar en rack:", err);
-      showToast(`Error: ${err?.message || 'Fallo desconocido'}`, "error");
-    } finally {
-      setIsProcessing(false);
-    }
+    showToast(`⚡ LPN ${lpnCode} ubicado en ${targetLocation.aisle}-R${targetLocation.rackId}-N${targetLocation.level}-P${targetLocation.position}`, "success");
+
+    // 🌐 2. PERSISTENCIA EN SEGUNDO PLANO (BACKGROUND ASYNC)
+    void (async () => {
+      try {
+        await supabase
+          .from('paletas_lpn')
+          .update({
+            estado: 'ACTIVO',
+            estado_lpn: 'GENERADO',
+            tipo: 'RECEPCION',
+            usuario_ultima_ubicacion: operatorName,
+            fecha_ultima_ubicacion: nowIso
+          })
+          .eq('lpn', lpnCode);
+
+        await onRefresh();
+      } catch (err: any) {
+        console.error("Error al almacenar en rack:", err);
+        setOptimisticOverrides(prev => {
+          const next = new Map(prev);
+          next.delete(lpnCode);
+          return next;
+        });
+        showToast(`Error al guardar en BD: ${err?.message || 'Fallo desconocido'}`, "error");
+      }
+    })();
   };
 
-  // ⚡ RACKEO RÁPIDO CON BOTONES (A, B, C, D, E)
-  const handleFastRackSelect = async (rackLetter: string) => {
+  // ⚡ RACKEO RÁPIDO CON BOTONES (A, B, C, D, E) - 100% ASÍNCRONO OPTIMISTA (0 ms)
+  const handleFastRackSelect = (rackLetter: string) => {
     if (!selectedLpn) {
       showToast("Seleccione un LPN primero", "error");
       return;
     }
 
-    setIsProcessing(true);
     const lpnCode = selectedLpn.lpn;
     const currentState = getLpnState(selectedLpn);
     const oldLocation = selectedLpn.location;
     const oldLocationId = selectedLpn.locationId || oldLocation?.id;
     const operatorName = currentUser?.nombre || currentUser?.username || 'OPERADOR';
     const nowIso = new Date().toISOString();
+    const letterUpper = rackLetter.toUpperCase();
 
-    try {
-      // Buscar rack por letra de pasillo (A, B, C, D, E...)
-      const letterUpper = rackLetter.toUpperCase();
-      const matchingRacks = racks.filter(r => r.aisle?.toUpperCase() === letterUpper);
-      const selectedRack = matchingRacks.find(r => r.slots.some(s => s.status === 'empty')) 
-        || matchingRacks[0] 
-        || racks.find(r => r.aisle?.toUpperCase().includes(letterUpper)) 
-        || racks[0];
+    // Buscar rack por letra de pasillo (A, B, C, D, E...)
+    const matchingRacks = racks.filter(r => r.aisle?.toUpperCase() === letterUpper);
+    const selectedRack = matchingRacks.find(r => r.slots.some(s => s.status === 'empty')) 
+      || matchingRacks[0] 
+      || racks.find(r => r.aisle?.toUpperCase().includes(letterUpper)) 
+      || racks[0];
 
-      if (!selectedRack) {
-        showToast(`Rack ${letterUpper} no configurado en esta sede`, "error");
-        setIsProcessing(false);
-        return;
-      }
-
-      // Encontrar primer slot libre o el primero disponible
-      const targetSlot = selectedRack.slots.find(s => s.status === 'empty') || selectedRack.slots[0];
-      const targetLevel = targetSlot ? targetSlot.location.level : 1;
-      const targetPosition = targetSlot ? targetSlot.location.position : 1;
-
-      const targetLocation: RackLocation = {
-        aisle: selectedRack.aisle,
-        rackId: selectedRack.id,
-        level: targetLevel,
-        position: targetPosition
-      };
-
-      // 1. Liberar ubicación anterior si existía
-      if (oldLocationId) {
-        await supabase
-          .from('ubicaciones')
-          .update({ estado: 'VACIO' })
-          .eq('id', oldLocationId);
-      }
-
-      // 2. Marcar nuevo slot como ocupado
-      if (targetSlot?.dbId) {
-        await supabase
-          .from('ubicaciones')
-          .update({ estado: 'OCUPADO' })
-          .eq('id', targetSlot.dbId);
-      }
-
-      // 3. Actualizar paleta en la base de datos
-      const { error: lpnErr } = await supabase
-        .from('paletas_lpn')
-        .update({
-          estado: 'ACTIVO',
-          estado_lpn: 'GENERADO',
-          tipo: 'RECEPCION',
-          ubicacion_id: targetSlot?.dbId || null,
-          usuario_ultima_ubicacion: operatorName,
-          fecha_ultima_ubicacion: nowIso,
-          motivo_ultima_ubicacion: `Rackeo a Rack ${letterUpper}`
-        })
-        .eq('lpn', lpnCode);
-
-      if (lpnErr) throw lpnErr;
-
-      // 4. Actualizar estado local a través de onAssignLocation
-      onAssignLocation(lpnCode, targetLocation, currentState === 'PENDIENTE' ? `Rackeo inicial a Rack ${letterUpper}` : `Reubicación a Rack ${letterUpper}`);
-
-      // 5. Registrar movimiento de auditoría
-      await supabase.from('lpn_movimientos').insert([{
-        lpn: lpnCode,
-        ubicacion_id: targetSlot?.dbId || null,
-        tipo_movimiento: currentState === 'PENDIENTE' ? 'UBICACION' : 'REUBICACION',
-        usuario: operatorName,
-        motivo: `Rackeo rápido a Rack ${letterUpper}`,
-        cantidad_afectada: selectedLpn.quantity || selectedLpn.unidades || selectedLpn.cajas || 1,
-        fecha: nowIso,
-        sede_id: currentUser?.sede_id
-      }]);
-
-      const newMove: MovementLog = {
-        lpn: lpnCode,
-        tipo: currentState === 'PENDIENTE' ? 'UBICACION' : 'REUBICACION',
-        origen: oldLocation ? `RACK ${oldLocation.aisle}-R${oldLocation.rackId}-N${oldLocation.level}-P${oldLocation.position}` : (currentState === 'PICKING' ? 'Zona Picking' : 'Playa Recepción'),
-        destino: `RACK ${selectedRack.aisle} (N${targetLevel}-P${targetPosition})`,
-        usuario: operatorName,
-        fecha: nowIso,
-        timestamp: Date.now(),
-        productName: selectedLpn.productName,
-        productCode: selectedLpn.productCode,
-        quantity: selectedLpn.quantity,
-        cajas: selectedLpn.cajas,
-        unidades: selectedLpn.unidades,
-        previousState: currentState,
-        previousLocationId: oldLocationId || null,
-        previousLocation: oldLocation || null
-      };
-
-      setRecentMoves(prev => [newMove, ...prev]);
-
-      setIsRackModalOpen(false);
-      setSelectedRackId(null);
-      setSelectedLevel(null);
-      setSelectedPosition(null);
-      setManualLocationText('');
-      setShowDetailedLocation(false);
-
-      // Remover de cola si estaba
-      setBatchQueue(prev => prev.filter(b => b.lpn !== lpnCode));
-      setSelectedBatchLpns(prev => prev.filter(l => l !== lpnCode));
-
-      await onRefresh();
-      setSelectedLpn(null);
-      showToast(`LPN ${lpnCode} rackeado en RACK ${letterUpper} con éxito`, "success");
-    } catch (err: any) {
-      console.error("Error al almacenar en rack:", err);
-      showToast(`Error: ${err?.message || 'Fallo desconocido'}`, "error");
-    } finally {
-      setIsProcessing(false);
+    if (!selectedRack) {
+      showToast(`Rack ${letterUpper} no configurado en esta sede`, "error");
+      return;
     }
+
+    const targetSlot = selectedRack.slots.find(s => s.status === 'empty') || selectedRack.slots[0];
+    const targetLevel = targetSlot ? targetSlot.location.level : 1;
+    const targetPosition = targetSlot ? targetSlot.location.position : 1;
+
+    const targetLocation: RackLocation = {
+      aisle: selectedRack.aisle,
+      rackId: selectedRack.id,
+      level: targetLevel,
+      position: targetPosition
+    };
+
+    // ⚡ 1. ACTUALIZACIÓN INMEDIATA OPTIMISTA (0 ms)
+    onAssignLocation(lpnCode, targetLocation, currentState === 'PENDIENTE' ? `Rackeo inicial a Rack ${letterUpper}` : `Reubicación a Rack ${letterUpper}`);
+
+    setOptimisticOverrides(prev => {
+      const next = new Map(prev);
+      next.set(lpnCode, {
+        estado_lpn: 'GENERADO',
+        tipo: 'RECEPCION',
+        location: targetLocation,
+        locationId: targetSlot?.dbId,
+        motivo_ultima_ubicacion: `Rackeo a Rack ${letterUpper}`,
+        usuario_ultima_ubicacion: operatorName,
+        fecha_ultima_ubicacion: nowIso
+      });
+      return next;
+    });
+
+    const newMove: MovementLog = {
+      lpn: lpnCode,
+      tipo: currentState === 'PENDIENTE' ? 'UBICACION' : 'REUBICACION',
+      origen: oldLocation ? `RACK ${oldLocation.aisle}-R${oldLocation.rackId}-N${oldLocation.level}-P${oldLocation.position}` : (currentState === 'PICKING' ? 'Zona Picking' : 'Playa Recepción'),
+      destino: `RACK ${selectedRack.aisle} (N${targetLevel}-P${targetPosition})`,
+      usuario: operatorName,
+      fecha: nowIso,
+      timestamp: Date.now(),
+      productName: selectedLpn.productName,
+      productCode: selectedLpn.productCode,
+      quantity: selectedLpn.quantity,
+      cajas: selectedLpn.cajas,
+      unidades: selectedLpn.unidades,
+      previousState: currentState,
+      previousLocationId: oldLocationId || null,
+      previousLocation: oldLocation || null
+    };
+
+    setRecentMoves(prev => [newMove, ...prev]);
+
+    // Cerrar modal y limpiar campos de inmediato sin congelar la pantalla
+    setIsRackModalOpen(false);
+    setSelectedRackId(null);
+    setSelectedLevel(null);
+    setSelectedPosition(null);
+    setManualLocationText('');
+    setShowDetailedLocation(false);
+
+    setBatchQueue(prev => prev.filter(b => b.lpn !== lpnCode));
+    setSelectedBatchLpns(prev => prev.filter(l => l !== lpnCode));
+    setSelectedLpn(null);
+
+    showToast(`⚡ LPN ${lpnCode} rackeado en RACK ${letterUpper} con éxito`, "success");
+
+    // 🌐 2. PERSISTENCIA EN SEGUNDO PLANO (BACKGROUND ASYNC)
+    void (async () => {
+      try {
+        if (oldLocationId) {
+          await supabase
+            .from('ubicaciones')
+            .update({ estado: 'VACIO' })
+            .eq('id', oldLocationId);
+        }
+
+        if (targetSlot?.dbId) {
+          await supabase
+            .from('ubicaciones')
+            .update({ estado: 'OCUPADO' })
+            .eq('id', targetSlot.dbId);
+        }
+
+        const { error: lpnErr } = await supabase
+          .from('paletas_lpn')
+          .update({
+            estado: 'ACTIVO',
+            estado_lpn: 'GENERADO',
+            tipo: 'RECEPCION',
+            ubicacion_id: targetSlot?.dbId || null,
+            usuario_ultima_ubicacion: operatorName,
+            fecha_ultima_ubicacion: nowIso,
+            motivo_ultima_ubicacion: `Rackeo a Rack ${letterUpper}`
+          })
+          .eq('lpn', lpnCode);
+
+        if (lpnErr) throw lpnErr;
+
+        await supabase.from('lpn_movimientos').insert([{
+          lpn: lpnCode,
+          ubicacion_id: targetSlot?.dbId || null,
+          tipo_movimiento: currentState === 'PENDIENTE' ? 'UBICACION' : 'REUBICACION',
+          usuario: operatorName,
+          motivo: `Rackeo rápido a Rack ${letterUpper}`,
+          cantidad_afectada: selectedLpn.quantity || selectedLpn.unidades || selectedLpn.cajas || 1,
+          fecha: nowIso,
+          sede_id: currentUser?.sede_id
+        }]);
+
+        await onRefresh();
+      } catch (err: any) {
+        console.error("Error al almacenar en rack:", err);
+        setOptimisticOverrides(prev => {
+          const next = new Map(prev);
+          next.delete(lpnCode);
+          return next;
+        });
+        showToast(`Error al rackear: ${err?.message || 'Fallo desconocido'}`, "error");
+      }
+    })();
   };
 
-  // ⚡ RACKEO RÁPIDO MASIVO CON BOTONES (A, B, C, D, E)
-  const handleFastBatchRackSelect = async (rackLetter: string) => {
+  // ⚡ RACKEO RÁPIDO MASIVO CON BOTONES (A, B, C, D, E) - 100% ASÍNCRONO OPTIMISTA (0 ms)
+  const handleFastBatchRackSelect = (rackLetter: string) => {
     if (selectedBatchLpns.length === 0) return;
 
-    setIsProcessing(true);
     const operatorName = currentUser?.nombre || currentUser?.username || 'OPERADOR';
     const nowIso = new Date().toISOString();
     const letterUpper = rackLetter.toUpperCase();
 
-    try {
-      const matchingRacks = racks.filter(r => r.aisle?.toUpperCase() === letterUpper);
-      const selectedRack = matchingRacks.find(r => r.slots.some(s => s.status === 'empty')) 
-        || matchingRacks[0] 
-        || racks.find(r => r.aisle?.toUpperCase().includes(letterUpper)) 
-        || racks[0];
+    const matchingRacks = racks.filter(r => r.aisle?.toUpperCase() === letterUpper);
+    const selectedRack = matchingRacks.find(r => r.slots.some(s => s.status === 'empty')) 
+      || matchingRacks[0] 
+      || racks.find(r => r.aisle?.toUpperCase().includes(letterUpper)) 
+      || racks[0];
 
-      if (!selectedRack) {
-        showToast(`Rack ${letterUpper} no configurado`, "error");
-        setIsProcessing(false);
-        return;
-      }
+    if (!selectedRack) {
+      showToast(`Rack ${letterUpper} no configurado`, "error");
+      return;
+    }
 
-      const emptySlots = selectedRack.slots.filter(s => s.status === 'empty');
-      const targetItems = inventory.filter(i => selectedBatchLpns.includes(i.lpn));
+    const emptySlots = selectedRack.slots.filter(s => s.status === 'empty');
+    const targetItems = inventory.filter(i => selectedBatchLpns.includes(i.lpn));
+    const assignedSlots: Array<{ item: InventoryItem; slot: any; location: RackLocation }> = [];
 
+    // ⚡ 1. ACTUALIZACIÓN INMEDIATA OPTIMISTA (0 ms)
+    setOptimisticOverrides(prev => {
+      const next = new Map(prev);
       for (let i = 0; i < targetItems.length; i++) {
         const item = targetItems[i];
         const slot = emptySlots[i] || selectedRack.slots[0];
@@ -798,42 +861,56 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
           level: slot.location.level,
           position: slot.location.position
         };
+        assignedSlots.push({ item, slot, location: targetLocation });
+        onAssignLocation(item.lpn, targetLocation, `Rackeo masivo a Rack ${letterUpper}`);
+        next.set(item.lpn, {
+          estado_lpn: 'GENERADO',
+          tipo: 'RECEPCION',
+          location: targetLocation,
+          locationId: slot.dbId,
+          motivo_ultima_ubicacion: `Rackeo masivo a Rack ${letterUpper}`
+        });
+      }
+      return next;
+    });
 
-        if (slot.dbId) {
-          await supabase.from('ubicaciones').update({ estado: 'OCUPADO' }).eq('id', slot.dbId);
+    setIsBatchRackModalOpen(false);
+    setBatchQueue(prev => prev.filter(b => !selectedBatchLpns.includes(b.lpn)));
+    setSelectedBatchLpns([]);
+
+    showToast(`⚡ ${targetItems.length} pallets rackeados en RACK ${letterUpper}`, "success");
+
+    // 🌐 2. PERSISTENCIA EN SEGUNDO PLANO (BACKGROUND ASYNC)
+    void (async () => {
+      try {
+        for (const { item, slot } of assignedSlots) {
+          if (slot.dbId) {
+            await supabase.from('ubicaciones').update({ estado: 'OCUPADO' }).eq('id', slot.dbId);
+          }
+
+          await supabase
+            .from('paletas_lpn')
+            .update({
+              estado: 'ACTIVO',
+              estado_lpn: 'GENERADO',
+              tipo: 'RECEPCION',
+              ubicacion_id: slot.dbId || null,
+              usuario_ultima_ubicacion: operatorName,
+              fecha_ultima_ubicacion: nowIso,
+              motivo_ultima_ubicacion: `Rackeo masivo a Rack ${letterUpper}`
+            })
+            .eq('lpn', item.lpn);
         }
 
-        await supabase
-          .from('paletas_lpn')
-          .update({
-            estado: 'ACTIVO',
-            estado_lpn: 'GENERADO',
-            tipo: 'RECEPCION',
-            ubicacion_id: slot.dbId || null,
-            usuario_ultima_ubicacion: operatorName,
-            fecha_ultima_ubicacion: nowIso,
-            motivo_ultima_ubicacion: `Rackeo masivo a Rack ${letterUpper}`
-          })
-          .eq('lpn', item.lpn);
-
-        onAssignLocation(item.lpn, targetLocation, `Rackeo masivo a Rack ${letterUpper}`);
+        await onRefresh();
+      } catch (err: any) {
+        console.error("Error en rackeo masivo:", err);
+        showToast(`Error en persistencia masiva: ${err?.message || 'Fallo desconocido'}`, "error");
       }
-
-      setIsBatchRackModalOpen(false);
-      setBatchQueue(prev => prev.filter(b => !selectedBatchLpns.includes(b.lpn)));
-      setSelectedBatchLpns([]);
-
-      await onRefresh();
-      showToast(`${targetItems.length} pallets rackeados en RACK ${letterUpper}`, "success");
-    } catch (err: any) {
-      console.error("Error en rackeo masivo:", err);
-      showToast(`Error: ${err?.message || 'Fallo desconocido'}`, "error");
-    } finally {
-      setIsProcessing(false);
-    }
+    })();
   };
 
-  const parseAndApplyManualLocation = async (text: string) => {
+  const parseAndApplyManualLocation = (text: string) => {
     const clean = text.toUpperCase().replace(/^UBC-/, '').replace(/\s+/g, '');
     const match = clean.match(/([A-Z]+)[-_]?(\d+)[-_]?[Nn]?(\d+)[-_]?[Pp]?(\d+)/);
     if (!match) {
@@ -860,23 +937,58 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
     };
 
     if (!selectedLpn) return;
-    setIsProcessing(true);
-    try {
-      onAssignLocation(selectedLpn.lpn, targetLocation, 'Rackeo Manual Escaneado');
-      setIsRackModalOpen(false);
-      setManualLocationText('');
-      await onRefresh();
-      setSelectedLpn(null);
-      showToast(`Ubicado en ${foundRack.aisle}-R${foundRack.id}-N${level}-P${pos}`, "success");
-    } catch (e: any) {
-      showToast(`Error: ${e?.message}`, "error");
-    } finally {
-      setIsProcessing(false);
-    }
+    const lpnCode = selectedLpn.lpn;
+    const operatorName = currentUser?.nombre || currentUser?.username || 'OPERADOR';
+    const nowIso = new Date().toISOString();
+
+    // ⚡ 1. ACTUALIZACIÓN INMEDIATA OPTIMISTA (0 ms)
+    onAssignLocation(lpnCode, targetLocation, 'Rackeo Manual Escaneado');
+    setOptimisticOverrides(prev => {
+      const next = new Map(prev);
+      next.set(lpnCode, {
+        estado_lpn: 'GENERADO',
+        tipo: 'RECEPCION',
+        location: targetLocation,
+        motivo_ultima_ubicacion: 'Rackeo Manual Escaneado',
+        usuario_ultima_ubicacion: operatorName,
+        fecha_ultima_ubicacion: nowIso
+      });
+      return next;
+    });
+
+    setIsRackModalOpen(false);
+    setManualLocationText('');
+    setSelectedLpn(null);
+    showToast(`⚡ Ubicado en ${foundRack.aisle}-R${foundRack.id}-N${level}-P${pos}`, "success");
+
+    // 🌐 2. PERSISTENCIA EN SEGUNDO PLANO (BACKGROUND ASYNC)
+    void (async () => {
+      try {
+        await supabase
+          .from('paletas_lpn')
+          .update({
+            estado: 'ACTIVO',
+            estado_lpn: 'GENERADO',
+            tipo: 'RECEPCION',
+            usuario_ultima_ubicacion: operatorName,
+            fecha_ultima_ubicacion: nowIso
+          })
+          .eq('lpn', lpnCode);
+
+        await onRefresh();
+      } catch (e: any) {
+        setOptimisticOverrides(prev => {
+          const next = new Map(prev);
+          next.delete(lpnCode);
+          return next;
+        });
+        showToast(`Error al persistir ubicación: ${e?.message}`, "error");
+      }
+    })();
   };
 
-  // 🔥 ACTION 4: PROCESAMIENTO MASIVO (BATCH A PICKING O RACK)
-  const handleExecuteBatchMove = async (action: 'PICKING' | 'RACK') => {
+  // 🔥 ACTION 4: PROCESAMIENTO MASIVO (BATCH A PICKING O RACK) - 100% ASÍNCRONO OPTIMISTA (0 ms)
+  const handleExecuteBatchMove = (action: 'PICKING' | 'RACK') => {
     if (selectedBatchLpns.length === 0) {
       showToast("Seleccione al menos 1 LPN.", "error");
       return;
@@ -892,21 +1004,32 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
     }
 
     // Direct Batch to PICKING
-    setIsProcessing(true);
     const operatorName = currentUser?.nombre || currentUser?.username || 'OPERADOR';
     const nowIso = new Date().toISOString();
 
-    try {
-      const locationIdsToFree: string[] = [];
-      const lpnCodesToUpdate: string[] = [];
-      const logsToInsert: any[] = [];
-      const newMovesList: MovementLog[] = [];
+    const locationIdsToFree: string[] = [];
+    const lpnCodesToUpdate: string[] = [];
+    const logsToInsert: any[] = [];
+    const newMovesList: MovementLog[] = [];
 
+    // ⚡ 1. ACTUALIZACIÓN INMEDIATA OPTIMISTA (0 ms)
+    setOptimisticOverrides(prev => {
+      const next = new Map(prev);
       for (const item of targetItems) {
         const lpnCode = item.lpn;
         const oldLocId = item.locationId || item.location?.id;
         if (oldLocId) locationIdsToFree.push(oldLocId);
         lpnCodesToUpdate.push(lpnCode);
+
+        next.set(lpnCode, {
+          estado_lpn: 'GENERADO',
+          tipo: 'PICKING',
+          location: undefined,
+          locationId: undefined,
+          motivo_ultima_ubicacion: `Pase Masivo a Picking (${targetItems.length} pallets)`,
+          usuario_ultima_ubicacion: operatorName,
+          fecha_ultima_ubicacion: nowIso
+        });
 
         logsToInsert.push({
           lpn: lpnCode,
@@ -935,55 +1058,55 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
           previousState: getLpnState(item)
         });
       }
+      return next;
+    });
 
-      // 1. Free rack locations in bulk
-      if (locationIdsToFree.length > 0) {
-        await supabase
-          .from('ubicaciones')
-          .update({ estado: 'VACIO' })
-          .in('id', locationIdsToFree);
+    setRecentMoves(prev => [...newMovesList, ...prev]);
+    setBatchQueue(prev => prev.filter(b => !selectedBatchLpns.includes(b.lpn)));
+    setSelectedBatchLpns([]);
+    setIsBatchModalOpen(false);
+
+    showToast(`⚡ ${targetItems.length} LPNs pasados a PICKING con éxito`, "success");
+
+    // 🌐 2. PERSISTENCIA EN SEGUNDO PLANO (BACKGROUND ASYNC)
+    void (async () => {
+      try {
+        if (locationIdsToFree.length > 0) {
+          await supabase
+            .from('ubicaciones')
+            .update({ estado: 'VACIO' })
+            .in('id', locationIdsToFree);
+        }
+
+        const { error: lpnErr } = await supabase
+          .from('paletas_lpn')
+          .update({
+            estado: 'ACTIVO',
+            estado_lpn: 'GENERADO',
+            tipo: 'PICKING',
+            ubicacion_id: null,
+            usuario_ultima_ubicacion: operatorName,
+            fecha_ultima_ubicacion: nowIso,
+            motivo_ultima_ubicacion: `Pase Masivo a Picking (${targetItems.length} pallets)`
+          })
+          .in('lpn', lpnCodesToUpdate);
+
+        if (lpnErr) throw lpnErr;
+
+        if (logsToInsert.length > 0) {
+          await supabase.from('lpn_movimientos').insert(logsToInsert);
+        }
+
+        await onRefresh();
+      } catch (err: any) {
+        console.error("Error en movimiento masivo a picking:", err);
+        showToast(`Error masivo en BD: ${err?.message || 'Fallo de conexión'}`, "error");
       }
-
-      // 2. Update LPN states in bulk
-      const { error: lpnErr } = await supabase
-        .from('paletas_lpn')
-        .update({
-          estado: 'ACTIVO',
-          estado_lpn: 'GENERADO',
-          tipo: 'PICKING',
-          ubicacion_id: null,
-          usuario_ultima_ubicacion: operatorName,
-          fecha_ultima_ubicacion: nowIso,
-          motivo_ultima_ubicacion: `Pase Masivo a Picking (${targetItems.length} pallets)`
-        })
-        .in('lpn', lpnCodesToUpdate);
-
-      if (lpnErr) throw lpnErr;
-
-      // 3. Insert audit movement logs in bulk
-      if (logsToInsert.length > 0) {
-        await supabase.from('lpn_movimientos').insert(logsToInsert);
-      }
-
-      setRecentMoves(prev => [...newMovesList, ...prev]);
-
-      // Remove processed items from batch queue
-      setBatchQueue(prev => prev.filter(b => !selectedBatchLpns.includes(b.lpn)));
-      setSelectedBatchLpns([]);
-      setIsBatchModalOpen(false);
-
-      await onRefresh();
-      showToast(`${targetItems.length} LPNs pasados a PICKING con éxito`, "success");
-    } catch (err: any) {
-      console.error("Error en movimiento masivo a picking:", err);
-      showToast(`Error masivo: ${err?.message || 'Fallo de base de datos'}`, "error");
-    } finally {
-      setIsProcessing(false);
-    }
+    })();
   };
 
-  // 🔥 ACTION 4.B: BATCH TO RACK CONFIRMATION
-  const handleConfirmBatchRackAssignment = async () => {
+  // 🔥 ACTION 4.B: BATCH TO RACK CONFIRMATION - 100% ASÍNCRONO OPTIMISTA (0 ms)
+  const handleConfirmBatchRackAssignment = () => {
     if (!selectedRackId || !selectedLevel || !selectedPosition) {
       showToast("Seleccione una posición de rack destino.", "error");
       return;
@@ -998,7 +1121,6 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
     const targetItems = batchQueue.filter(item => selectedBatchLpns.includes(item.lpn));
     if (targetItems.length === 0) return;
 
-    setIsProcessing(true);
     const operatorName = currentUser?.nombre || currentUser?.username || 'OPERADOR';
     const nowIso = new Date().toISOString();
 
@@ -1009,13 +1131,23 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
       position: selectedPosition
     };
 
-    try {
-      const lpnCodesToUpdate = targetItems.map(i => i.lpn);
-      const logsToInsert: any[] = [];
-      const newMovesList: MovementLog[] = [];
+    const lpnCodesToUpdate = targetItems.map(i => i.lpn);
+    const logsToInsert: any[] = [];
+    const newMovesList: MovementLog[] = [];
 
+    // ⚡ 1. ACTUALIZACIÓN INMEDIATA OPTIMISTA (0 ms)
+    setOptimisticOverrides(prev => {
+      const next = new Map(prev);
       for (const item of targetItems) {
         onAssignLocation(item.lpn, targetLocation, `Rackeo Masivo (${targetItems.length} pallets)`);
+        next.set(item.lpn, {
+          estado_lpn: 'GENERADO',
+          tipo: 'RECEPCION',
+          location: targetLocation,
+          motivo_ultima_ubicacion: `Rackeo Masivo a ${targetLocation.aisle}-R${targetLocation.rackId}`,
+          usuario_ultima_ubicacion: operatorName,
+          fecha_ultima_ubicacion: nowIso
+        });
 
         logsToInsert.push({
           lpn: item.lpn,
@@ -1044,38 +1176,43 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
           previousState: getLpnState(item)
         });
       }
+      return next;
+    });
 
-      await supabase
-        .from('paletas_lpn')
-        .update({
-          estado: 'ACTIVO',
-          estado_lpn: 'GENERADO',
-          usuario_ultima_ubicacion: operatorName,
-          fecha_ultima_ubicacion: nowIso,
-          motivo_ultima_ubicacion: `Rackeo Masivo a ${targetLocation.aisle}-R${targetLocation.rackId}`
-        })
-        .in('lpn', lpnCodesToUpdate);
+    setRecentMoves(prev => [...newMovesList, ...prev]);
 
-      if (logsToInsert.length > 0) {
-        await supabase.from('lpn_movimientos').insert(logsToInsert);
+    // Clear batch and modals inmediatamente
+    setBatchQueue(prev => prev.filter(b => !selectedBatchLpns.includes(b.lpn)));
+    setSelectedBatchLpns([]);
+    setIsBatchRackModalOpen(false);
+    setIsBatchModalOpen(false);
+
+    showToast(`⚡ ${targetItems.length} LPNs rackeados en ${targetLocation.aisle}-R${targetLocation.rackId}`, "success");
+
+    // 🌐 2. PERSISTENCIA EN SEGUNDO PLANO (BACKGROUND ASYNC)
+    void (async () => {
+      try {
+        await supabase
+          .from('paletas_lpn')
+          .update({
+            estado: 'ACTIVO',
+            estado_lpn: 'GENERADO',
+            usuario_ultima_ubicacion: operatorName,
+            fecha_ultima_ubicacion: nowIso,
+            motivo_ultima_ubicacion: `Rackeo Masivo a ${targetLocation.aisle}-R${targetLocation.rackId}`
+          })
+          .in('lpn', lpnCodesToUpdate);
+
+        if (logsToInsert.length > 0) {
+          await supabase.from('lpn_movimientos').insert(logsToInsert);
+        }
+
+        await onRefresh();
+      } catch (err: any) {
+        console.error("Error en rackeo masivo:", err);
+        showToast(`Error masivo al persistir: ${err?.message || 'Fallo desconocido'}`, "error");
       }
-
-      setRecentMoves(prev => [...newMovesList, ...prev]);
-
-      // Clear batch and modals
-      setBatchQueue(prev => prev.filter(b => !selectedBatchLpns.includes(b.lpn)));
-      setSelectedBatchLpns([]);
-      setIsBatchRackModalOpen(false);
-      setIsBatchModalOpen(false);
-
-      await onRefresh();
-      showToast(`${targetItems.length} LPNs rackeados en ${targetLocation.aisle}-R${targetLocation.rackId}`, "success");
-    } catch (err: any) {
-      console.error("Error en rackeo masivo:", err);
-      showToast(`Error masivo: ${err?.message || 'Fallo desconocido'}`, "error");
-    } finally {
-      setIsProcessing(false);
-    }
+    })();
   };
 
   // ACTION 3: DESHACER (<10 min)
@@ -1146,45 +1283,6 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
       showToast(`Error: ${err?.message || 'Fallo desconocido'}`, "error");
     } finally {
       setIsProcessing(false);
-    }
-  };
-
-  // EXPORT TO EXCEL
-  const handleExportData = (mode: 'RESERVA' | 'ALL') => {
-    try {
-      const targetItems = mode === 'RESERVA' ? reservasInRackList : activeList;
-      const exportRows = targetItems.map((item, idx) => {
-        const state = getLpnState(item);
-        const locStr = item.location
-          ? `${item.location.aisle}-R${item.location.rackId}-N${item.location.level}-P${item.location.position}`
-          : (item.locationId || 'Sin Ubicación (Suelo)');
-
-        return {
-          'N°': idx + 1,
-          'LPN': item.lpn,
-          'Código ICO': item.productCode || '',
-          'Descripción': item.productName || '',
-          'Estado': state === 'RESERVA' ? 'EN RACK' : (state === 'PICKING' ? 'PICKING' : 'PENDIENTE'),
-          'Ubicación': locStr,
-          'Cajas': item.cajas || 0,
-          'Unidades': item.unidades || item.quantity || 0,
-          'Fecha Ingreso / Creación': (item.receptionDate || item.fecha_generado) ? formatLocalPeruTime(item.receptionDate || item.fecha_generado) : '-',
-          'Vencimiento': item.expirationDate ? formatLocalPeruTime(item.expirationDate).split(' ')[0] : 'N/A'
-        };
-      });
-
-      const ws = XLSX.utils.json_to_sheet(exportRows);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, mode === 'RESERVA' ? 'LPNs_Rack' : 'LPNs_Todos');
-
-      const fileName = mode === 'RESERVA'
-        ? `LPNS_RACK_${new Date().toISOString().split('T')[0]}.xlsx`
-        : `LPNS_TOTAL_${new Date().toISOString().split('T')[0]}.xlsx`;
-
-      XLSX.writeFile(wb, fileName);
-      showToast(`Descargado ${fileName}`, "success");
-    } catch (e: any) {
-      showToast(`Error exportar: ${e?.message}`, "error");
     }
   };
 
@@ -1293,6 +1391,11 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
     else if (activeTab === 'PENDIENTES') baseList = pendientesList;
     else if (activeTab === 'PICKING') baseList = pickingList;
 
+    // ❄️ Filtrado por Cámara (Secos, Refrigerado, Congelado)
+    if (selectedChamber !== 'TODOS') {
+      baseList = baseList.filter(item => getItemChamber(item) === selectedChamber);
+    }
+
     if (!searchFilter.trim()) return baseList;
     const q = searchFilter.trim().toLowerCase();
     return baseList.filter(item =>
@@ -1301,7 +1404,7 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
       (item.productName && item.productName.toLowerCase().includes(q)) ||
       (item.location && `${item.location.aisle}-${item.location.rackId}-${item.location.level}-${item.location.position}`.toLowerCase().includes(q))
     );
-  }, [activeList, reservasInRackList, pendientesList, pickingList, activeTab, searchFilter]);
+  }, [activeList, reservasInRackList, pendientesList, pickingList, activeTab, searchFilter, selectedChamber, catalogMap]);
 
   // Batch selection helpers
   const handleToggleSelectAllBatch = () => {
@@ -1360,16 +1463,18 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
               <span className="text-[10px] opacity-80">({recentMoves.length})</span>
             </button>
 
-            {currentUser?.rol === 'ADMIN' && (
-              <button
-                onClick={() => handleExportData('RESERVA')}
-                className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-all"
-                title="Descargar Racks en Excel"
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5" />
-                <span>Excel</span>
-              </button>
-            )}
+            <button
+              onClick={() => setActiveTab(activeTab === 'MAPA_INVENTARIO' ? 'SCANNER' : 'MAPA_INVENTARIO')}
+              className={`px-2 py-1 rounded-lg border text-xs font-bold transition-all flex items-center gap-1 ${
+                activeTab === 'MAPA_INVENTARIO'
+                  ? 'bg-indigo-600 text-white border-indigo-700'
+                  : 'bg-slate-50 hover:bg-slate-100 text-slate-600 border-slate-200'
+              }`}
+              title="Mapa 3D del almacén"
+            >
+              <MapPin className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Mapa 3D</span>
+            </button>
 
             <button
               onClick={onRefresh}
@@ -1381,7 +1486,7 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
           </div>
         </div>
 
-        {/* 📱 4 STATUS PILLS INCLUDING MAPA DE INVENTARIO (Click to view list or return to scanner) */}
+        {/* 📱 4 STATUS PILLS: PENDIENTES, EN RACK, PICKING Y FILTRAR POR CÁMARA (100% APPLIKE) */}
         <div className="max-w-2xl mx-auto grid grid-cols-4 gap-1.5 mt-2">
           <button
             onClick={() => setActiveTab(activeTab === 'PENDIENTES' ? 'SCANNER' : 'PENDIENTES')}
@@ -1419,18 +1524,29 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
             <div className="text-sm font-black mt-0.5 leading-none">{pickingList.length}</div>
           </button>
 
+          {/* ❄️ BOTÓN CÁMARA: FILTRAR POR CÁMARA (SECOS, REFRIGERADO, CONGELADO) */}
           <button
-            onClick={() => setActiveTab(activeTab === 'MAPA_INVENTARIO' ? 'SCANNER' : 'MAPA_INVENTARIO')}
-            className={`py-1.5 px-1.5 rounded-xl border text-center transition-all ${
-              activeTab === 'MAPA_INVENTARIO'
-                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white border-blue-700 shadow-xs font-black ring-2 ring-blue-300'
-                : 'bg-blue-50/80 border-blue-200 text-blue-900 font-bold hover:bg-blue-100'
+            type="button"
+            onClick={() => setIsChamberModalOpen(true)}
+            className={`py-1.5 px-1.5 rounded-xl border text-center transition-all active:scale-95 ${
+              selectedChamber !== 'TODOS'
+                ? 'bg-gradient-to-r from-sky-600 to-indigo-600 text-white border-indigo-700 shadow-xs font-black ring-2 ring-sky-300'
+                : 'bg-sky-50/80 border-sky-200 text-sky-900 font-bold hover:bg-sky-100'
             }`}
+            title="Filtrar inventario por Cámara (Secos, Refrigerado, Congelado)"
           >
             <div className="text-[9px] uppercase opacity-90 leading-none flex items-center justify-center gap-0.5">
-              <span>🗺️ Mapa</span>
+              <span>❄️ Cámara</span>
             </div>
-            <div className="text-xs font-black mt-0.5 leading-none">Cámaras</div>
+            <div className="text-xs font-black mt-0.5 leading-none truncate">
+              {selectedChamber === 'TODOS'
+                ? 'Todas'
+                : selectedChamber === 'SECO'
+                ? '📦 Secos'
+                : selectedChamber === 'REFRIGERADO'
+                ? '❄️ Refrig.'
+                : '🧊 Congel.'}
+            </div>
           </button>
         </div>
       </div>
@@ -1462,7 +1578,7 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
               inventory={inventory}
               racks={racks}
               zones={zones}
-              catalog={_catalog}
+              catalog={catalog}
               currentUser={currentUser}
               onAssignLocation={onAssignLocation}
               onMoveToPicking={async (lpn) => {
@@ -1539,6 +1655,106 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
                   <div className="absolute bottom-2 left-1/2 -translate-x-1/2 z-20 px-3 py-1 bg-slate-900/80 backdrop-blur-xs rounded-full text-white text-[10px] font-bold pointer-events-none whitespace-nowrap border border-slate-700">
                     Apunta al código QR o de barras del LPN
                   </div>
+                </div>
+              )}
+            </div>
+
+            {/* ❄️ BARRA RÁPIDA DE FILTRO POR CÁMARA (100% APPLIKE PARA OPERARIO) */}
+            <div className="bg-white p-2.5 rounded-2xl border border-slate-200 shadow-2xs space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] font-black px-0.5">
+                <span className="text-slate-600 uppercase tracking-wider flex items-center gap-1">
+                  <span>❄️ Filtrar por Cámara:</span>
+                </span>
+                {selectedChamber !== 'TODOS' && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedChamber('TODOS')}
+                    className="text-[10px] text-indigo-600 font-bold hover:underline"
+                  >
+                    Ver todas
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-4 gap-1 sm:gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedChamber('TODOS');
+                    showToast(`Mostrando todas las cámaras (${pendingChamberCounts.total} pend.)`, 'info');
+                  }}
+                  className={`py-1.5 px-1 rounded-xl text-center border transition-all active:scale-95 ${
+                    selectedChamber === 'TODOS'
+                      ? 'bg-slate-900 text-white border-slate-900 font-black shadow-xs ring-1 ring-slate-400'
+                      : 'bg-slate-50 text-slate-700 border-slate-200 font-bold hover:bg-slate-100'
+                  }`}
+                >
+                  <div className="text-[9px] uppercase leading-none">Todas</div>
+                  <div className="text-xs font-black mt-0.5 leading-none">{pendingChamberCounts.total}</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedChamber('SECO');
+                    showToast(`Cámara Secos: ${pendingChamberCounts.seco} pallets pendientes`, 'info');
+                  }}
+                  className={`py-1.5 px-1 rounded-xl text-center border transition-all active:scale-95 ${
+                    selectedChamber === 'SECO'
+                      ? 'bg-amber-500 text-white border-amber-600 font-black shadow-xs ring-2 ring-amber-300'
+                      : 'bg-amber-50/80 text-amber-900 border-amber-200 font-bold hover:bg-amber-100'
+                  }`}
+                >
+                  <div className="text-[9px] uppercase leading-none">📦 Secos</div>
+                  <div className="text-xs font-black mt-0.5 leading-none">{pendingChamberCounts.seco}</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedChamber('REFRIGERADO');
+                    showToast(`Cámara Refrigerado: ${pendingChamberCounts.refrigerado} pallets pendientes`, 'info');
+                  }}
+                  className={`py-1.5 px-1 rounded-xl text-center border transition-all active:scale-95 ${
+                    selectedChamber === 'REFRIGERADO'
+                      ? 'bg-sky-600 text-white border-sky-700 font-black shadow-xs ring-2 ring-sky-300'
+                      : 'bg-sky-50/80 text-sky-900 border-sky-200 font-bold hover:bg-sky-100'
+                  }`}
+                >
+                  <div className="text-[9px] uppercase leading-none">❄️ Refrig.</div>
+                  <div className="text-xs font-black mt-0.5 leading-none">{pendingChamberCounts.refrigerado}</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedChamber('CONGELADO');
+                    showToast(`Cámara Congelado: ${pendingChamberCounts.congelado} pallets pendientes`, 'info');
+                  }}
+                  className={`py-1.5 px-1 rounded-xl text-center border transition-all active:scale-95 ${
+                    selectedChamber === 'CONGELADO'
+                      ? 'bg-indigo-600 text-white border-indigo-700 font-black shadow-xs ring-2 ring-indigo-300'
+                      : 'bg-indigo-50/80 text-indigo-900 border-indigo-200 font-bold hover:bg-indigo-100'
+                  }`}
+                >
+                  <div className="text-[9px] uppercase leading-none">🧊 Congel.</div>
+                  <div className="text-xs font-black mt-0.5 leading-none">{pendingChamberCounts.congelado}</div>
+                </button>
+              </div>
+
+              {selectedChamber !== 'TODOS' && (
+                <div className="pt-1 flex items-center justify-between text-[11px] bg-slate-50 p-2 rounded-xl border border-slate-200">
+                  <span className="text-slate-700 font-medium">
+                    Pendientes en <strong className="font-black text-slate-900">{selectedChamber}</strong>: {pendingChamberCounts[selectedChamber.toLowerCase() as 'seco' | 'refrigerado' | 'congelado']} pallets
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('PENDIENTES')}
+                    className="text-indigo-600 font-black flex items-center gap-0.5 hover:underline"
+                  >
+                    <span>Ver lista</span>
+                    <MoveRight className="w-3 h-3" />
+                  </button>
                 </div>
               )}
             </div>
@@ -1799,6 +2015,69 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
               </span>
             </div>
 
+            {/* ❄️ SELECTOR RÁPIDO DE CÁMARA PARA LISTAS (1-TAP APPLIKE) */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 custom-scrollbar">
+              <button
+                type="button"
+                onClick={() => setSelectedChamber('TODOS')}
+                className={`px-2.5 py-1 rounded-xl text-xs font-black transition-all shrink-0 active:scale-95 flex items-center gap-1 ${
+                  selectedChamber === 'TODOS'
+                    ? 'bg-slate-900 text-white shadow-2xs ring-1 ring-slate-400'
+                    : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                <span>🌟 Todas</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${selectedChamber === 'TODOS' ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-700'}`}>
+                  {currentTabChamberCounts.total}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSelectedChamber('SECO')}
+                className={`px-2.5 py-1 rounded-xl text-xs font-black transition-all shrink-0 active:scale-95 flex items-center gap-1 ${
+                  selectedChamber === 'SECO'
+                    ? 'bg-amber-500 text-white shadow-2xs ring-2 ring-amber-300'
+                    : 'bg-amber-50/80 text-amber-900 border border-amber-200 hover:bg-amber-100'
+                }`}
+              >
+                <span>📦 Secos</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${selectedChamber === 'SECO' ? 'bg-amber-600 text-white' : 'bg-amber-100 text-amber-900'}`}>
+                  {currentTabChamberCounts.seco}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSelectedChamber('REFRIGERADO')}
+                className={`px-2.5 py-1 rounded-xl text-xs font-black transition-all shrink-0 active:scale-95 flex items-center gap-1 ${
+                  selectedChamber === 'REFRIGERADO'
+                    ? 'bg-sky-600 text-white shadow-2xs ring-2 ring-sky-300'
+                    : 'bg-sky-50/80 text-sky-900 border border-sky-200 hover:bg-sky-100'
+                }`}
+              >
+                <span>❄️ Refrig.</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${selectedChamber === 'REFRIGERADO' ? 'bg-sky-700 text-white' : 'bg-sky-100 text-sky-900'}`}>
+                  {currentTabChamberCounts.refrigerado}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSelectedChamber('CONGELADO')}
+                className={`px-2.5 py-1 rounded-xl text-xs font-black transition-all shrink-0 active:scale-95 flex items-center gap-1 ${
+                  selectedChamber === 'CONGELADO'
+                    ? 'bg-indigo-600 text-white shadow-2xs ring-2 ring-indigo-300'
+                    : 'bg-indigo-50/80 text-indigo-900 border border-indigo-200 hover:bg-indigo-100'
+                }`}
+              >
+                <span>🧊 Congel.</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${selectedChamber === 'CONGELADO' ? 'bg-indigo-700 text-white' : 'bg-indigo-100 text-indigo-900'}`}>
+                  {currentTabChamberCounts.congelado}
+                </span>
+              </button>
+            </div>
+
             {/* Filter Bar */}
             <div className="bg-white p-2 rounded-xl border border-slate-200 flex items-center gap-2 shadow-2xs">
               <div className="relative flex-1">
@@ -1820,12 +2099,13 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
             {filteredList.length === 0 ? (
               <div className="bg-white p-8 text-center rounded-2xl border border-slate-200 text-slate-400">
                 <Package className="w-8 h-8 mx-auto mb-1 opacity-30" />
-                <p className="text-xs font-bold text-slate-500">No hay paletas en esta sección.</p>
+                <p className="text-xs font-bold text-slate-500">No hay paletas en esta sección con los filtros actuales.</p>
               </div>
             ) : (
               <div className="space-y-1.5">
                 {filteredList.slice(0, visibleCount).map((item, idx) => {
                   const state = getLpnState(item);
+                  const chamber = getItemChamber(item);
                   const isItemInBatch = batchQueue.some(b => b.lpn === item.lpn);
 
                   return (
@@ -1833,14 +2113,21 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
                       key={item.lpn || idx}
                       className="bg-white p-2.5 rounded-xl border border-slate-200 hover:border-indigo-200 shadow-2xs transition-all space-y-1.5"
                     >
-                      {/* Top row: LPN Code + State Badge + Quick Cola toggle */}
+                      {/* Top row: LPN Code + State Badge + Chamber Badge + Quick Cola toggle */}
                       <div className="flex items-center justify-between gap-1.5">
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="font-mono font-black text-xs sm:text-sm text-slate-900">{item.lpn}</span>
                           <span className={`px-1.5 py-0.2 rounded text-[9px] font-black uppercase ${
                             state === 'RESERVA' ? 'bg-indigo-100 text-indigo-800' : (state === 'PICKING' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800')
                           }`}>
                             {state === 'RESERVA' ? 'RACK' : state}
+                          </span>
+                          <span className={`px-1.5 py-0.2 rounded text-[9px] font-black uppercase ${
+                            chamber === 'SECO' ? 'bg-amber-50 text-amber-900 border border-amber-200' :
+                            chamber === 'REFRIGERADO' ? 'bg-sky-50 text-sky-900 border border-sky-200' :
+                            'bg-indigo-50 text-indigo-900 border border-indigo-200'
+                          }`}>
+                            {chamber === 'SECO' ? '📦 Seco' : chamber === 'REFRIGERADO' ? '❄️ Refrig.' : '🧊 Congel.'}
                           </span>
                         </div>
 
@@ -2528,6 +2815,176 @@ export const MovimientosLpn: React.FC<MovimientosLpnProps> = ({
                 className="w-full py-2 rounded-xl text-slate-600 bg-slate-100 hover:bg-slate-200 font-bold text-xs text-center transition-colors"
               >
                 Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 📱 MODAL 4: FILTRO POR CÁMARA (SECOS, REFRIGERADO, CONGELADO) - 100% APPLIKE */}
+      {isChamberModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-2xs flex items-center justify-center p-3 animate-fade-in">
+          <div className="bg-white w-full max-w-sm rounded-3xl border border-slate-200 shadow-2xl p-4 sm:p-5 space-y-4 animate-scale-up">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-sky-100 text-sky-700 rounded-xl">
+                  <Warehouse className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm sm:text-base font-black text-slate-900">Filtrar por Cámara</h3>
+                  <p className="text-[11px] font-bold text-slate-500">Almacenamiento por temperatura</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsChamberModalOpen(false)}
+                className="p-1.5 rounded-full text-slate-400 hover:text-slate-600 bg-slate-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Chamber selection cards */}
+            <div className="space-y-2">
+              {/* Option 1: TODAS */}
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedChamber('TODOS');
+                  setIsChamberModalOpen(false);
+                  showToast(`Filtro: Todas las Cámaras (${pendingChamberCounts.total} pendientes)`, 'info');
+                }}
+                className={`w-full p-3 rounded-2xl border-2 text-left transition-all flex items-center justify-between active:scale-98 ${
+                  selectedChamber === 'TODOS'
+                    ? 'border-indigo-600 bg-indigo-50/80 shadow-xs ring-1 ring-indigo-400'
+                    : 'border-slate-200 hover:border-slate-300 bg-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-800 flex items-center justify-center text-lg font-black shrink-0">
+                    🌟
+                  </div>
+                  <div>
+                    <span className="text-xs font-black text-slate-900 block">Todas las Cámaras</span>
+                    <span className="text-[10px] font-bold text-slate-500">Ver inventario completo</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-black bg-slate-200 text-slate-800">
+                    {pendingChamberCounts.total} pend.
+                  </span>
+                </div>
+              </button>
+
+              {/* Option 2: SECO */}
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedChamber('SECO');
+                  setIsChamberModalOpen(false);
+                  showToast(`Cámara SECO seleccionada (${pendingChamberCounts.seco} pendientes)`, 'info');
+                }}
+                className={`w-full p-3 rounded-2xl border-2 text-left transition-all flex items-center justify-between active:scale-98 ${
+                  selectedChamber === 'SECO'
+                    ? 'border-amber-500 bg-amber-50/80 shadow-xs ring-2 ring-amber-300'
+                    : 'border-slate-200 hover:border-amber-300 bg-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center text-lg font-black shrink-0">
+                    📦
+                  </div>
+                  <div>
+                    <span className="text-xs font-black text-amber-950 block">Cámara de Secos</span>
+                    <span className="text-[10px] font-bold text-slate-500">Abarrotes y temperatura ambiente</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-black bg-amber-100 text-amber-900 border border-amber-300">
+                    {pendingChamberCounts.seco} pend.
+                  </span>
+                </div>
+              </button>
+
+              {/* Option 3: REFRIGERADO */}
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedChamber('REFRIGERADO');
+                  setIsChamberModalOpen(false);
+                  showToast(`Cámara REFRIGERADO seleccionada (${pendingChamberCounts.refrigerado} pendientes)`, 'info');
+                }}
+                className={`w-full p-3 rounded-2xl border-2 text-left transition-all flex items-center justify-between active:scale-98 ${
+                  selectedChamber === 'REFRIGERADO'
+                    ? 'border-sky-500 bg-sky-50/80 shadow-xs ring-2 ring-sky-300'
+                    : 'border-slate-200 hover:border-sky-300 bg-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-sky-100 text-sky-800 flex items-center justify-center text-lg font-black shrink-0">
+                    ❄️
+                  </div>
+                  <div>
+                    <span className="text-xs font-black text-sky-950 block">Cámara de Refrigerado</span>
+                    <span className="text-[10px] font-bold text-slate-500">0°C a 4°C (Lácteos, embutidos, frutas)</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-black bg-sky-100 text-sky-900 border border-sky-300">
+                    {pendingChamberCounts.refrigerado} pend.
+                  </span>
+                </div>
+              </button>
+
+              {/* Option 4: CONGELADO */}
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedChamber('CONGELADO');
+                  setIsChamberModalOpen(false);
+                  showToast(`Cámara CONGELADO seleccionada (${pendingChamberCounts.congelado} pendientes)`, 'info');
+                }}
+                className={`w-full p-3 rounded-2xl border-2 text-left transition-all flex items-center justify-between active:scale-98 ${
+                  selectedChamber === 'CONGELADO'
+                    ? 'border-indigo-600 bg-indigo-50/80 shadow-xs ring-2 ring-indigo-300'
+                    : 'border-slate-200 hover:border-indigo-300 bg-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-100 text-indigo-800 flex items-center justify-center text-lg font-black shrink-0">
+                    🧊
+                  </div>
+                  <div>
+                    <span className="text-xs font-black text-indigo-950 block">Cámara de Congelado</span>
+                    <span className="text-[10px] font-bold text-slate-500">-18°C (Carnes, pescados, helados)</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-black bg-indigo-100 text-indigo-900 border border-indigo-300">
+                    {pendingChamberCounts.congelado} pend.
+                  </span>
+                </div>
+              </button>
+            </div>
+
+            {/* Quick Action: Ir directo a Pendientes de la cámara seleccionada */}
+            <div className="pt-2 border-t border-slate-100 flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('PENDIENTES');
+                  setIsChamberModalOpen(false);
+                }}
+                className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-black text-xs flex items-center justify-center gap-1.5 shadow-2xs active:scale-95 transition-all"
+              >
+                <span>Ver Lista Pendientes</span>
+                <MoveRight className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsChamberModalOpen(false)}
+                className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs"
+              >
+                Listo
               </button>
             </div>
           </div>
